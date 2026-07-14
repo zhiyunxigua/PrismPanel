@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PrismPanel 测试控制台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <button id="home-button" class="brand-button" type="button"><h1>PrismPanel</h1></button>
+      <span class="environment">守护进程联调</span>
+    </div>
+    <div class="connection">
+      <span id="connection-dot" class="connection-dot"></span>
+      <span id="connection-text">正在连接</span>
+      <button id="refresh-button" class="button secondary" type="button">刷新</button>
+    </div>
+  </header>
+
+  <main id="home-view">
+    <div id="notice" class="notice" hidden></div>
+
+    <section class="server-browser">
+      <div class="page-heading">
+        <div>
+          <h2>服务器</h2>
+          <p id="server-summary">0 个服务器组</p>
+        </div>
+        <button id="create-button" class="button primary" type="button">新建实例</button>
+      </div>
+      <div id="server-grid" class="server-grid"></div>
+      <div id="empty-state" class="empty-state">暂无服务器</div>
+    </section>
+  </main>
+
+  <main id="detail-view" hidden>
+    <div id="detail-notice" class="notice" hidden></div>
+    <div class="detail-nav">
+      <button id="back-button" class="button secondary" type="button">返回</button>
+      <span id="detail-path"></span>
+    </div>
+
+    <header class="detail-header">
+      <div>
+        <div class="detail-title-row">
+          <h2 id="detail-name">服务器</h2>
+          <span id="detail-type" class="type-badge"></span>
+        </div>
+        <p id="detail-id"></p>
+      </div>
+      <div class="detail-actions">
+        <button class="button secondary" data-detail-action="start" type="button">启动</button>
+        <button class="button secondary" data-detail-action="stop" type="button">停止</button>
+        <button class="button secondary" data-detail-action="restart" type="button">重启</button>
+        <button class="button danger" data-detail-action="kill" type="button">强杀</button>
+      </div>
+    </header>
+
+    <section id="mirror-toolbar" class="mirror-toolbar" hidden>
+      <div>
+        <span class="toolbar-label">镜像实例</span>
+        <div id="instance-switcher" class="instance-switcher"></div>
+      </div>
+      <div class="deploy-actions">
+        <button id="deploy-selected" class="button primary" type="button">部署当前实例</button>
+        <button id="deploy-all" class="button secondary" type="button">部署全部</button>
+        <button id="cancel-deployment" class="button secondary" type="button" hidden>取消</button>
+        <button id="force-stop-deployment" class="button danger" type="button" hidden>强制结束</button>
+      </div>
+    </section>
+
+    <section class="instance-overview">
+      <div><span>状态</span><strong id="detail-state"></strong></div>
+      <div><span>端口</span><strong id="detail-port"></strong></div>
+      <div><span>PID</span><strong id="detail-pid"></strong></div>
+      <div><span>工作目录</span><strong id="detail-workspace"></strong></div>
+    </section>
+
+    <section class="console-section">
+      <div class="section-heading compact">
+        <div>
+          <h3>控制台</h3>
+          <p id="console-state">正在连接</p>
+        </div>
+        <button id="clear-console" class="button secondary" type="button">清空</button>
+      </div>
+      <pre id="console-output" aria-live="polite"></pre>
+      <form id="command-form" class="command-form">
+        <input id="command-input" type="text" maxlength="8192" autocomplete="off" placeholder="输入控制台命令" disabled>
+        <button class="button primary" type="submit" disabled>发送</button>
+      </form>
+    </section>
+
+    <section id="deployment-panel" class="deployment-panel" hidden>
+      <div class="section-heading compact">
+        <div>
+          <h3>部署任务</h3>
+          <p id="deployment-state"></p>
+        </div>
+        <span id="deployment-progress"></span>
+      </div>
+      <div id="deployment-log" class="deployment-log"></div>
+    </section>
+  </main>
+
+  <dialog id="server-dialog">
+    <form id="server-form">
+      <div class="dialog-heading">
+        <h2>新建服务器</h2>
+        <button id="close-dialog" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <div class="type-switch" role="radiogroup" aria-label="服务器类型">
+        <label><input type="radio" name="type" value="standalone" checked><span>普通实例</span></label>
+        <label><input type="radio" name="type" value="mirror"><span>镜像实例</span></label>
+      </div>
+      <div class="form-grid">
+        <label>服务器 ID<input name="server_id" required pattern="[a-z0-9_-]+" placeholder="lobby"></label>
+        <label>显示名称<input name="name" required placeholder="主城服"></label>
+
+        <div class="form-subgrid wide" data-type-section="standalone">
+          <label class="wide">工作目录<input name="workspace" required placeholder="/srv/minecraft/lobby"></label>
+          <label>端口<input name="port" type="number" min="1" max="65535" value="25565" required></label>
+        </div>
+
+        <div class="form-subgrid wide" data-type-section="mirror" hidden>
+          <label class="wide">镜像根目录<input name="root_path" required placeholder="/srv/minecraft/bedwars"></label>
+          <label>镜像目录名<input name="image_directory" value="image" required></label>
+          <label>实例数量<input name="instance_count" type="number" min="1" max="128" value="3" required></label>
+          <fieldset class="wide editor-field">
+            <legend>实例端口</legend>
+            <div id="ports-editor" class="ports-editor"></div>
+          </fieldset>
+          <fieldset class="wide editor-field">
+            <legend>部署排除项</legend>
+            <div id="exclude-editor" class="exclude-editor"></div>
+            <button id="add-exclude" class="button secondary" type="button">添加排除项</button>
+          </fieldset>
+        </div>
+
+        <label class="wide">完整启动命令<textarea name="start_command" rows="3" required>java -Xms1G -Xmx2G -jar server.jar nogui</textarea></label>
+        <label class="wide">停止命令<input name="stop_command" value="stop" required></label>
+        <label>停止超时（秒）<input name="stop_timeout" type="number" min="1" value="60" required></label>
+        <label class="checkbox-field"><input name="auto_restart" type="checkbox" checked>异常退出后自动重启</label>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancel-dialog" class="button secondary" type="button">取消</button>
+        <button class="button primary" type="submit">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
