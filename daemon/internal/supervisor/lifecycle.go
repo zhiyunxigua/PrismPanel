@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -27,6 +28,9 @@ func (m *Manager) Start(instanceID string) error {
 		return apperr.New("INSTANCE_BUSY", "实例正在执行其他操作")
 	}
 	defer current.op.Unlock()
+	if err := deploymentLockError(current); err != nil {
+		return err
+	}
 	return m.startLocked(current)
 }
 
@@ -43,12 +47,31 @@ func (m *Manager) startLocked(current *instance) error {
 		current.mu.Unlock()
 		return apperr.New("INSTANCE_BUSY", "实例正在切换状态")
 	}
+	instanceID := current.cfg.InstanceID
+	workspace := current.cfg.Workspace
+	current.mu.Unlock()
+	m.beforeStartMu.RLock()
+	beforeStart := m.beforeStart
+	m.beforeStartMu.RUnlock()
+	if beforeStart != nil {
+		if err := beforeStart(instanceID, workspace); err != nil {
+			m.markStartFailed(current, err)
+			return apperr.Wrap("PLUGIN_OPERATION_FAILED", "pending plugin operation failed", err)
+		}
+	}
+	current.mu.Lock()
 	current.state = StateStarting
 	current.lastError = ""
 	current.mu.Unlock()
 	m.publishState(current)
 
-	cmd, stdin, stdout, stderr, sessionID, err := m.prepareCommand(current)
+	sessionID := randomSessionID()
+	pluginToken, err := randomPluginToken()
+	if err != nil {
+		m.markStartFailed(current, err)
+		return apperr.Wrap("PROCESS_START_FAILED", "无法生成插件实例凭据", err)
+	}
+	cmd, stdin, stdout, stderr, err := m.prepareCommand(current, sessionID, pluginToken)
 	if err != nil {
 		m.markStartFailed(current, err)
 		return apperr.Wrap("PROCESS_START_FAILED", "实例启动准备失败", err)
@@ -68,52 +91,73 @@ func (m *Manager) startLocked(current *instance) error {
 	current.sessionID = sessionID
 	current.pid = cmd.Process.Pid
 	current.runtimePort = copyInt(&current.cfg.Port)
+	current.runtimeEncoding = current.cfg.Console.Encoding
+	runtimeEncoding := current.runtimeEncoding
+	current.pluginTokenHash = sha256.Sum256([]byte(pluginToken))
+	current.pluginTokenSet = true
+	current.pluginGeneration++
+	current.pluginConnected = false
+	current.pluginLastSeen = nil
+	current.pluginReport = PluginReport{}
+	current.pluginPendingRestart = false
+	current.cpuPercent = nil
+	current.memoryBytes = nil
 	current.startedAt = &now
 	current.state = StateRunning
 	current.mu.Unlock()
 	current.addConsole("system", fmt.Sprintf("process started with pid %d", cmd.Process.Pid))
 	m.publishState(current)
 
-	go m.scanOutput(current, "stdout", stdout)
-	go m.scanOutput(current, "stderr", stderr)
+	go m.scanOutput(current, "stdout", stdout, runtimeEncoding)
+	go m.scanOutput(current, "stderr", stderr, runtimeEncoding)
+	go m.sampleProcessMetrics(current, cmd.Process.Pid, sessionID, done)
 	go m.waitProcess(current, cmd, done)
 	return nil
 }
 
-func (m *Manager) prepareCommand(current *instance) (*exec.Cmd, io.WriteCloser, io.ReadCloser, io.ReadCloser, string, error) {
+func (m *Manager) prepareCommand(
+	current *instance,
+	sessionID string,
+	pluginToken string,
+) (*exec.Cmd, io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
 	current.mu.RLock()
 	cfg := current.cfg
 	current.mu.RUnlock()
 	workspaceInfo, err := os.Stat(cfg.Workspace)
 	if err != nil || !workspaceInfo.IsDir() {
-		return nil, nil, nil, nil, "", errors.New("instance workspace is unavailable")
+		return nil, nil, nil, nil, errors.New("instance workspace is unavailable")
 	}
 	if _, err := filepath.EvalSymlinks(cfg.Workspace); err != nil {
-		return nil, nil, nil, nil, "", fmt.Errorf("resolve workspace: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("resolve workspace: %w", err)
 	}
 	if err := writeServerPort(cfg.Workspace, cfg.Port); err != nil {
-		return nil, nil, nil, nil, "", err
+		return nil, nil, nil, nil, err
 	}
 	cmd := shellCommand(cfg.Process.StartCommand)
 	cmd.Dir = cfg.Workspace
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(),
+		"PRISM_DAEMON_WS="+m.pluginWebSocketURL(),
+		"PRISM_INSTANCE_ID="+cfg.InstanceID,
+		"PRISM_SESSION_ID="+sessionID,
+		"PRISM_PLUGIN_TOKEN="+pluginToken,
+	)
 	configureProcessGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, nil, nil, nil, "", err
+		return nil, nil, nil, nil, err
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		stdin.Close()
-		return nil, nil, nil, nil, "", err
+		return nil, nil, nil, nil, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		stdin.Close()
 		stdout.Close()
-		return nil, nil, nil, nil, "", err
+		return nil, nil, nil, nil, err
 	}
-	return cmd, stdin, stdout, stderr, randomSessionID(), nil
+	return cmd, stdin, stdout, stderr, nil
 }
 
 func randomSessionID() string {
@@ -124,8 +168,24 @@ func randomSessionID() string {
 	return hex.EncodeToString(buffer)
 }
 
-func (m *Manager) scanOutput(current *instance, stream string, reader io.Reader) {
-	scanner := bufio.NewScanner(reader)
+func randomPluginToken() (string, error) {
+	buffer := make([]byte, 32)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buffer), nil
+}
+
+func (m *Manager) pluginWebSocketURL() string {
+	scheme := "ws"
+	if m.config.SSL.Enabled {
+		scheme = "wss"
+	}
+	return fmt.Sprintf("%s://127.0.0.1:%d/api/v1/ws/plugin", scheme, m.config.Server.Port)
+}
+
+func (m *Manager) scanOutput(current *instance, stream string, reader io.Reader, encoding string) {
+	scanner := bufio.NewScanner(decodeConsoleOutput(encoding, reader))
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		current.addConsole(stream, scanner.Text())
@@ -147,6 +207,14 @@ func (m *Manager) waitProcess(current *instance, cmd *exec.Cmd, done chan struct
 	current.stdin = nil
 	current.pid = 0
 	current.runtimePort = nil
+	current.runtimeEncoding = ""
+	current.cpuPercent = nil
+	current.memoryBytes = nil
+	current.pluginTokenHash = [32]byte{}
+	current.pluginTokenSet = false
+	current.pluginGeneration++
+	current.pluginConnected = false
+	current.pluginReport = PluginReport{}
 	if expected {
 		current.state = StateStopped
 		current.lastError = ""
@@ -213,6 +281,9 @@ func (m *Manager) Stop(instanceID string) error {
 		return apperr.New("INSTANCE_BUSY", "实例正在执行其他操作")
 	}
 	defer current.op.Unlock()
+	if err := deploymentLockError(current); err != nil {
+		return err
+	}
 	return m.stopLocked(current)
 }
 
@@ -231,11 +302,12 @@ func (m *Manager) stopLocked(current *instance) error {
 	done := current.done
 	timeout := time.Duration(current.cfg.Process.StopTimeoutSeconds) * time.Second
 	stopCommand := current.cfg.Process.StopCommand
+	encoding := current.runtimeEncoding
 	current.mu.Unlock()
 	m.publishState(current)
 
 	if stdin != nil {
-		if _, err := io.WriteString(stdin, stopCommand+"\n"); err != nil {
+		if err := writeConsoleInput(stdin, encoding, stopCommand+"\n"); err != nil {
 			current.addConsole("system", fmt.Sprintf("stop command failed: %v", err))
 		}
 	}
@@ -259,6 +331,9 @@ func (m *Manager) Kill(instanceID string) error {
 		return apperr.New("INSTANCE_BUSY", "实例正在执行其他操作")
 	}
 	defer current.op.Unlock()
+	if err := deploymentLockError(current); err != nil {
+		return err
+	}
 	current.mu.Lock()
 	if current.cmd == nil {
 		current.state = StateStopped
@@ -301,6 +376,9 @@ func (m *Manager) Restart(instanceID string) error {
 		return apperr.New("INSTANCE_BUSY", "实例正在执行其他操作")
 	}
 	defer current.op.Unlock()
+	if err := deploymentLockError(current); err != nil {
+		return err
+	}
 	if err := m.stopLocked(current); err != nil {
 		return err
 	}
@@ -320,10 +398,13 @@ func (m *Manager) Command(instanceID, command string) error {
 	}
 	current.mu.Lock()
 	defer current.mu.Unlock()
+	if current.deploymentLocked {
+		return apperr.New("INSTANCE_BUSY", "实例已被部署任务锁定")
+	}
 	if current.state != StateRunning || current.stdin == nil {
 		return apperr.New("INVALID_STATE", "实例当前未运行")
 	}
-	if _, err := io.WriteString(current.stdin, command+"\n"); err != nil {
+	if err := writeConsoleInput(current.stdin, current.runtimeEncoding, command+"\n"); err != nil {
 		return apperr.Wrap("PROCESS_INPUT_FAILED", "控制台命令写入失败", err)
 	}
 	return nil

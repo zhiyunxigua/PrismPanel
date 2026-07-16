@@ -5,7 +5,7 @@ import "encoding/json"
 type Incoming struct {
 	Type      string          `json:"type"`
 	RequestID string          `json:"request_id,omitempty"`
-	Secret    string          `json:"secret,omitempty"`
+	Token     string          `json:"token,omitempty"`
 	Data      json.RawMessage `json:"data,omitempty"`
 }
 

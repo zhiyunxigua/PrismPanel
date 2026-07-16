@@ -41,7 +41,7 @@ func TestMirrorDeploymentTransaction(t *testing.T) {
 	serverService := serverservice.NewService(
 		store.NewServerStore(t.TempDir()), processManager, []model.ServerConfig{serverConfig},
 	)
-	manager := NewManager(serverService, processManager)
+	manager := NewManager(serverService, processManager, 4)
 	started, err := manager.Start("bedwars", []int{1})
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +49,13 @@ func TestMirrorDeploymentTransaction(t *testing.T) {
 	result := waitForDeployment(t, manager, started.TaskID)
 	if result.Status != StatusCompleted {
 		t.Fatalf("deployment failed: %#v", result)
+	}
+	if result.CopyConcurrency != 4 {
+		t.Fatalf("unexpected copy concurrency: %d", result.CopyConcurrency)
+	}
+	if result.CopyStage != "finalizing" || result.CopyFilesDone != result.CopyFilesTotal ||
+		result.CopyBytesDone != result.CopyBytesTotal {
+		t.Fatalf("unexpected final copy progress: %#v", result)
 	}
 	assertContents(t, filepath.Join(instancePath, "config.txt"), "new config")
 	assertContents(t, filepath.Join(instancePath, "world", "level.dat"), "saved world")

@@ -15,11 +15,22 @@ import (
 )
 
 type Manager struct {
-	config    config.Config
-	events    *eventbus.Bus
-	mu        sync.RWMutex
-	instances map[string]*instance
-	closing   atomic.Bool
+	config        config.Config
+	events        *eventbus.Bus
+	mu            sync.RWMutex
+	instances     map[string]*instance
+	closing       atomic.Bool
+	hostMu        sync.RWMutex
+	host          HostSnapshot
+	hostOnce      sync.Once
+	beforeStartMu sync.RWMutex
+	beforeStart   func(instanceID, workspace string) error
+}
+
+func (m *Manager) SetBeforeStart(hook func(instanceID, workspace string) error) {
+	m.beforeStartMu.Lock()
+	m.beforeStart = hook
+	m.beforeStartMu.Unlock()
 }
 
 func NewManager(cfg config.Config, events *eventbus.Bus, servers []model.ServerConfig) (*Manager, error) {
@@ -103,6 +114,9 @@ func (m *Manager) ApplyServer(server model.ServerConfig) ([]string, error) {
 				return nil, apperr.New("INSTANCE_BUSY", "实例正在执行其他操作")
 			}
 			locked = append(locked, current)
+			if err := deploymentLockError(current); err != nil {
+				return nil, err
+			}
 		}
 	}
 	defer func() {
@@ -156,8 +170,9 @@ func (m *Manager) RemoveServer(serverID string) error {
 		current.mu.RLock()
 		belongs := current.cfg.ServerID == serverID
 		state := current.state
+		deploymentLocked := current.deploymentLocked
 		current.mu.RUnlock()
-		if belongs && state != StateStopped {
+		if belongs && (state != StateStopped || deploymentLocked) {
 			return apperr.New("INSTANCE_BUSY", "服务器仍有实例未停止")
 		}
 	}

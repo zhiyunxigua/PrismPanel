@@ -1,6 +1,6 @@
 # User-specific stuff
 .idea/
-参考项目/
+/.idea/
 dist/
 
 *.iml
@@ -118,3 +118,5 @@ run/
 .cache/
 daemon/data/
 panel/data/
+frontend/node_modules/
+frontend/dist/

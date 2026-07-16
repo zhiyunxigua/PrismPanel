@@ -3,53 +3,92 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"PrismPanel/internal/audit"
+	"PrismPanel/internal/auth"
 	"PrismPanel/internal/config"
 	"PrismPanel/internal/daemon"
+	panelmetrics "PrismPanel/internal/metrics"
+	panelnodes "PrismPanel/internal/nodes"
+	panelplugins "PrismPanel/internal/plugins"
+	"PrismPanel/internal/store"
 )
 
 type Server struct {
-	config config.Config
-	daemon *daemon.Client
-	audit  *audit.Logger
-	http   *http.Server
-	logger *slog.Logger
+	config      config.Config
+	connections *daemon.Manager
+	auth        *auth.Service
+	store       *store.Store
+	nodes       *panelnodes.Service
+	metrics     *panelmetrics.Store
+	plugins     *panelplugins.Repository
+	http        *http.Server
+	logger      *slog.Logger
 }
 
 type response struct {
-	Success bool `json:"success"`
-	Data    any  `json:"data,omitempty"`
-	Error   any  `json:"error,omitempty"`
+	Success   bool   `json:"success"`
+	Data      any    `json:"data,omitempty"`
+	Error     any    `json:"error,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
-func NewServer(cfg config.Config, client *daemon.Client, auditLogger *audit.Logger, logger *slog.Logger) *Server {
-	server := &Server{config: cfg, daemon: client, audit: auditLogger, logger: logger}
+func NewServer(
+	cfg config.Config,
+	authService *auth.Service,
+	repository *store.Store,
+	nodeService *panelnodes.Service,
+	connectionManager *daemon.Manager,
+	metricStore *panelmetrics.Store,
+	pluginRepository *panelplugins.Repository,
+	logger *slog.Logger,
+) *Server {
+	server := &Server{
+		config: cfg, auth: authService, store: repository, connections: connectionManager,
+		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, logger: logger,
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/health", server.handleHealth)
-	mux.HandleFunc("/api/v1/servers", server.handleServers)
-	mux.HandleFunc("/api/v1/servers/", server.handleServer)
-	mux.HandleFunc("/api/v1/instances/", server.handleInstance)
-	mux.HandleFunc("/api/v1/deployments/", server.handleDeployment)
-	mux.HandleFunc("/api/v1/ws/console", server.handleConsoleProxy)
+	mux.HandleFunc("/api/v1/auth/status", server.handleAuthStatus)
+	mux.HandleFunc("/api/v1/auth/login", server.handleLogin)
+	mux.HandleFunc("/api/v1/auth/logout", server.requireAuth(server.handleLogout))
+	mux.HandleFunc("/api/v1/auth/session", server.requireAuth(server.handleSession))
+	mux.HandleFunc("/api/v1/auth/password", server.requireAuth(server.handlePassword))
+	mux.HandleFunc("/api/v1/users", server.requireAuth(server.handleUsers))
+	mux.HandleFunc("/api/v1/users/", server.requireAuth(server.handleUser))
+	mux.HandleFunc("/api/v1/user-groups", server.requireAuth(server.handleUserGroups))
+	mux.HandleFunc("/api/v1/user-groups/", server.requireAuth(server.handleUserGroup))
+	mux.HandleFunc("/api/v1/permissions", server.requireSuperAdmin(server.handlePermissions))
+	mux.HandleFunc("/api/v1/audit", server.requirePermission("audit.view", server.handleAudit))
+	mux.HandleFunc("/api/v1/health", server.requireAuth(server.handleHealth))
+	mux.HandleFunc("/api/v1/dashboard", server.requireAuth(server.handleDashboard))
+	mux.HandleFunc("/api/v1/nodes", server.requireAuth(server.handleNodes))
+	mux.HandleFunc("/api/v1/nodes/", server.requireAuth(server.handleNode))
+	mux.HandleFunc("/api/v1/servers", server.requireAuth(server.handleServers))
+	mux.HandleFunc("/api/v1/servers/", server.requireAuth(server.handleServer))
+	mux.HandleFunc("/api/v1/instances/", server.requireAuth(server.handleInstance))
+	mux.HandleFunc("/api/v1/deployments/", server.requireAuth(server.handleDeployment))
+	mux.HandleFunc("/api/v1/plugins", server.requireAuth(server.handlePlugins))
+	mux.HandleFunc("/api/v1/plugins/", server.requireAuth(server.handlePluginArtifact))
+	mux.HandleFunc("/api/v1/plugins/rescan", server.requireAuth(server.handlePluginRescan))
+	mux.HandleFunc("/api/v1/ws/console", server.requirePermission("console.read", server.handleConsoleProxy))
 	mux.Handle("/", frontendHandler(cfg.Frontend.Directory))
 	server.http = &http.Server{
 		Addr: net.JoinHostPort(cfg.Server.Listen, fmt.Sprintf("%d", cfg.Server.Port)),
-		Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			writer.Header().Set("X-Prism-Test-Mode", "true")
+		Handler: server.withRequestID(server.checkOrigin(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			writer.Header().Set("X-Content-Type-Options", "nosniff")
+			writer.Header().Set("Referrer-Policy", "same-origin")
+			writer.Header().Set("X-Frame-Options", "DENY")
 			mux.ServeHTTP(writer, request)
-		}),
+		}))),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       75 * time.Second,
 	}
@@ -65,11 +104,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleHealth(writer http.ResponseWriter, _ *http.Request) {
-	connected, publicURL, version := s.daemon.Status()
-	writeSuccess(writer, map[string]any{
-		"panel": "ok", "daemon_connected": connected,
-		"daemon_version": version, "daemon_public_url": publicURL,
-	})
+	writeSuccess(writer, map[string]any{"panel": "ok"})
 }
 
 func frontendHandler(directory string) http.Handler {
@@ -78,7 +113,21 @@ func frontendHandler(directory string) http.Handler {
 			http.Error(writer, "frontend directory is unavailable", http.StatusNotFound)
 		})
 	}
-	return http.FileServer(http.Dir(filepath.Clean(directory)))
+	root := filepath.Clean(directory)
+	files := http.FileServer(http.Dir(root))
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/api/") {
+			http.NotFound(writer, request)
+			return
+		}
+		cleanPath := strings.TrimPrefix(path.Clean("/"+request.URL.Path), "/")
+		target := filepath.Join(root, filepath.FromSlash(cleanPath))
+		if info, err := os.Stat(target); err == nil && !info.IsDir() {
+			files.ServeHTTP(writer, request)
+			return
+		}
+		http.ServeFile(writer, request, filepath.Join(root, "index.html"))
+	})
 }
 
 func writeSuccess(writer http.ResponseWriter, data any) {
@@ -86,28 +135,14 @@ func writeSuccess(writer http.ResponseWriter, data any) {
 }
 
 func writeError(writer http.ResponseWriter, err error) {
-	status := http.StatusBadRequest
-	var apiError *daemon.APIError
-	switch {
-	case errors.Is(err, daemon.ErrDisconnected):
-		status = http.StatusServiceUnavailable
-	case errors.As(err, &apiError):
-		switch apiError.Code {
-		case "SERVER_NOT_FOUND", "INSTANCE_NOT_FOUND":
-			status = http.StatusNotFound
-		case "INSTANCE_BUSY", "PORT_CONFLICT", "SERVER_ID_CONFLICT", "DEPLOYMENT_ALREADY_RUNNING":
-			status = http.StatusConflict
-		case "INTERNAL", "CONFIG_WRITE_FAILED":
-			status = http.StatusInternalServerError
-		}
-	default:
-		status = http.StatusInternalServerError
-		apiError = &daemon.APIError{Code: "INTERNAL", Message: "面板内部错误"}
-	}
-	writeJSON(writer, status, response{Success: false, Error: apiError})
+	writeRequestError(writer, err)
 }
 
 func writeJSON(writer http.ResponseWriter, status int, value any) {
+	if payload, ok := value.(response); ok {
+		payload.RequestID = writer.Header().Get("X-Request-ID")
+		value = payload
+	}
 	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(value)
@@ -126,12 +161,4 @@ func readBody(request *http.Request) (json.RawMessage, error) {
 		return nil, &daemon.APIError{Code: "INVALID_REQUEST", Message: "请求体不是有效 JSON"}
 	}
 	return contents, nil
-}
-
-func actor(request *http.Request) string {
-	value := strings.TrimSpace(request.Header.Get("X-Prism-Actor"))
-	if value == "" {
-		return "test-user"
-	}
-	return value
 }

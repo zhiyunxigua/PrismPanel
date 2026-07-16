@@ -33,3 +33,27 @@ func TestMissingStartCommandIsRejected(t *testing.T) {
 		t.Fatal("expected configuration without start_command to be rejected")
 	}
 }
+
+func TestConsoleEncodingNormalization(t *testing.T) {
+	for input, expected := range map[string]string{
+		"": "utf-8", "UTF8": "utf-8", "UTF-8": "utf-8", "GBK": "gbk",
+	} {
+		cfg := ServerConfig{Console: ConsoleConfig{Encoding: input}}
+		cfg.Normalize()
+		if cfg.Console.Encoding != expected {
+			t.Fatalf("normalize %q: expected %q, got %q", input, expected, cfg.Console.Encoding)
+		}
+	}
+}
+
+func TestUnsupportedConsoleEncodingIsRejected(t *testing.T) {
+	cfg := ServerConfig{
+		SchemaVersion: 1, Type: "standalone", ServerID: "invalid-encoding", Name: "Invalid",
+		Workspace: t.TempDir(), Port: 25565,
+		Process: ProcessConfig{StartCommand: "java -jar server.jar", StopCommand: "stop", StopTimeoutSeconds: 30},
+		Console: ConsoleConfig{Encoding: "big5"},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected unsupported console encoding to be rejected")
+	}
+}

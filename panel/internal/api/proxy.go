@@ -2,13 +2,22 @@ package api
 
 import (
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/gorilla/websocket"
 )
 
 var proxyUpgrader = websocket.Upgrader{
 	ReadBufferSize: 4096, WriteBufferSize: 4096,
-	CheckOrigin: func(_ *http.Request) bool { return true },
+	CheckOrigin: func(request *http.Request) bool {
+		origin := request.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		parsed, err := url.Parse(origin)
+		return err == nil && strings.EqualFold(parsed.Host, request.Host)
+	},
 }
 
 func (s *Server) handleConsoleProxy(writer http.ResponseWriter, request *http.Request) {
@@ -17,7 +26,8 @@ func (s *Server) handleConsoleProxy(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	defer frontend.Close()
-	daemonURL, err := s.daemon.ConsoleURL()
+	nodeID := request.URL.Query().Get("node_id")
+	daemonURL, err := s.connections.ConsoleURL(nodeID)
 	if err != nil {
 		_ = frontend.WriteJSON(map[string]any{"type": "proxy.error", "message": err.Error()})
 		return

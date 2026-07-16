@@ -17,6 +17,7 @@ import (
 	"PrismPanel-daemon/internal/config"
 	"PrismPanel-daemon/internal/deployment"
 	"PrismPanel-daemon/internal/eventbus"
+	pluginservice "PrismPanel-daemon/internal/plugins"
 	"PrismPanel-daemon/internal/secret"
 	serverservice "PrismPanel-daemon/internal/server"
 	"PrismPanel-daemon/internal/store"
@@ -81,13 +82,19 @@ func run() error {
 	}
 	serverService := serverservice.NewService(serverStore, manager, serverConfigs)
 	ticketManager := ticket.NewManager()
-	deploymentManager := deployment.NewManager(serverService, manager)
+	deploymentManager := deployment.NewManager(serverService, manager, cfg.Files.CopyConcurrency)
+	pluginManager, err := pluginservice.NewService(manager, serverService, dataDir)
+	if err != nil {
+		return err
+	}
 	httpServer := api.NewServer(
-		cfg, secretFile.Secret, serverService, manager, ticketManager, deploymentManager, events, slog.Default(),
+		cfg, secretFile.Secret, secretFile.NodeID, serverService, manager, ticketManager,
+		deploymentManager, pluginManager, events, slog.Default(),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	manager.StartMetrics(ctx)
 	serverError := make(chan error, 1)
 	go func() {
 		scheme := "http"

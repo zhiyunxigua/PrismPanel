@@ -16,7 +16,28 @@ type Ticket struct {
 	InstanceID string    `json:"instance_id,omitempty"`
 	ExpiresAt  time.Time `json:"expires_at"`
 	MaxUses    int       `json:"max_uses"`
+	SHA256     string    `json:"sha256,omitempty"`
+	MaxBytes   int64     `json:"max_bytes,omitempty"`
 	uses       int
+}
+
+func (m *Manager) CreateUpload(scope, resourceID, sha256 string, maxBytes int64, ttl time.Duration) (Ticket, error) {
+	if sha256 == "" || maxBytes <= 0 {
+		return Ticket{}, apperr.New("INVALID_TICKET", "upload ticket requires sha256 and size")
+	}
+	item, err := m.Create(scope, resourceID, ttl, 1)
+	if err != nil {
+		return Ticket{}, err
+	}
+	m.mu.Lock()
+	stored := m.byID[item.ID]
+	if stored != nil {
+		stored.SHA256 = sha256
+		stored.MaxBytes = maxBytes
+		item = *stored
+	}
+	m.mu.Unlock()
+	return item, nil
 }
 
 type Manager struct {

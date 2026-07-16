@@ -37,6 +37,7 @@ type StorageConfig struct {
 
 type FilesConfig struct {
 	MaxEditFileSize int64 `yaml:"max_edit_file_size"`
+	CopyConcurrency int   `yaml:"copy_concurrency"`
 }
 
 type ProcessConfig struct {
@@ -48,7 +49,10 @@ func Default() Config {
 	return Config{
 		Server:  ServerConfig{Listen: "0.0.0.0", Port: 24444},
 		Storage: StorageConfig{DataDir: "data"},
-		Files:   FilesConfig{MaxEditFileSize: 5 * 1024 * 1024},
+		Files: FilesConfig{
+			MaxEditFileSize: 5 * 1024 * 1024,
+			CopyConcurrency: 4,
+		},
 		Process: ProcessConfig{
 			ConsoleBufferLines: 2000,
 			ShutdownTimeoutSec: 90,
@@ -113,6 +117,9 @@ func (c Config) Validate() error {
 	}
 	if c.Files.MaxEditFileSize <= 0 {
 		return errors.New("files.max_edit_file_size must be positive")
+	}
+	if c.Files.CopyConcurrency < 1 || c.Files.CopyConcurrency > 64 {
+		return errors.New("files.copy_concurrency must be between 1 and 64")
 	}
 	if c.Process.ConsoleBufferLines <= 0 {
 		return errors.New("process.console_buffer_lines must be positive")

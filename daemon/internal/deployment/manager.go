@@ -48,6 +48,12 @@ type Snapshot struct {
 	CurrentInstance string     `json:"current_instance,omitempty"`
 	Completed       int        `json:"completed"`
 	Failed          int        `json:"failed"`
+	CopyStage       string     `json:"copy_stage,omitempty"`
+	CopyConcurrency int        `json:"copy_concurrency"`
+	CopyFilesTotal  int64      `json:"copy_files_total"`
+	CopyFilesDone   int64      `json:"copy_files_done"`
+	CopyBytesTotal  int64      `json:"copy_bytes_total"`
+	CopyBytesDone   int64      `json:"copy_bytes_done"`
 	CreatedAt       time.Time  `json:"created_at"`
 	StartedAt       *time.Time `json:"started_at,omitempty"`
 	FinishedAt      *time.Time `json:"finished_at,omitempty"`
@@ -60,20 +66,23 @@ type task struct {
 	context context.Context
 	cancel  context.CancelFunc
 	force   bool
+	release func()
 }
 
 type Manager struct {
-	servers    *serverservice.Service
-	supervisor *supervisor.Manager
-	mu         sync.RWMutex
-	tasks      map[string]*task
-	active     map[string]string
+	servers         *serverservice.Service
+	supervisor      *supervisor.Manager
+	copyConcurrency int
+	mu              sync.RWMutex
+	tasks           map[string]*task
+	active          map[string]string
 }
 
-func NewManager(servers *serverservice.Service, processManager *supervisor.Manager) *Manager {
+func NewManager(servers *serverservice.Service, processManager *supervisor.Manager, copyConcurrency int) *Manager {
 	return &Manager{
 		servers: servers, supervisor: processManager,
-		tasks: make(map[string]*task), active: make(map[string]string),
+		copyConcurrency: copyConcurrency,
+		tasks:           make(map[string]*task), active: make(map[string]string),
 	}
 }
 
@@ -98,19 +107,36 @@ func (m *Manager) Start(serverID string, requested []int) (Snapshot, error) {
 	if err := precheckResidualDirectories(cfg, targets); err != nil {
 		return Snapshot{}, err
 	}
+	instanceIDs := make([]string, len(targets))
+	for index, slot := range targets {
+		instanceIDs[index] = fmt.Sprintf("%s_%d", cfg.ServerID, slot)
+	}
+
+	m.mu.RLock()
+	activeID := m.active[serverID]
+	m.mu.RUnlock()
+	if activeID != "" {
+		return Snapshot{}, apperr.New("DEPLOYMENT_ALREADY_RUNNING", "该镜像服务器组已有部署任务")
+	}
+	release, err := m.supervisor.ReserveDeployment(instanceIDs)
+	if err != nil {
+		return Snapshot{}, err
+	}
 
 	m.mu.Lock()
 	if activeID := m.active[serverID]; activeID != "" {
 		m.mu.Unlock()
+		release()
 		return Snapshot{}, apperr.New("DEPLOYMENT_ALREADY_RUNNING", "该镜像服务器组已有部署任务")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	item := &task{
 		Snapshot: Snapshot{
 			TaskID: taskID, ServerID: serverID, Targets: targets,
-			Status: StatusQueued, CreatedAt: time.Now().UTC(), Logs: make([]Log, 0, 64),
+			Status: StatusQueued, CopyConcurrency: m.copyConcurrency,
+			CreatedAt: time.Now().UTC(), Logs: make([]Log, 0, 64),
 		},
-		context: ctx, cancel: cancel,
+		context: ctx, cancel: cancel, release: release,
 	}
 	m.tasks[taskID] = item
 	m.active[serverID] = taskID
@@ -127,6 +153,19 @@ func (m *Manager) Get(taskID string) (Snapshot, error) {
 	if item == nil {
 		m.mu.RUnlock()
 		return Snapshot{}, apperr.New("DEPLOYMENT_NOT_FOUND", "部署任务不存在")
+	}
+	snapshot := cloneSnapshot(item.Snapshot)
+	m.mu.RUnlock()
+	return snapshot, nil
+}
+
+func (m *Manager) Active(serverID string) (Snapshot, error) {
+	m.mu.RLock()
+	taskID := m.active[serverID]
+	item := m.tasks[taskID]
+	if item == nil {
+		m.mu.RUnlock()
+		return Snapshot{}, apperr.New("DEPLOYMENT_NOT_FOUND", "该镜像服务器组当前没有部署任务")
 	}
 	snapshot := cloneSnapshot(item.Snapshot)
 	m.mu.RUnlock()
@@ -160,6 +199,7 @@ func (m *Manager) Cancel(taskID string, force bool) (Snapshot, error) {
 }
 
 func (m *Manager) run(item *task, cfg model.ServerConfig) {
+	defer item.release()
 	now := time.Now().UTC()
 	m.mu.Lock()
 	item.Status = StatusRunning
@@ -175,6 +215,11 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 		instanceID := fmt.Sprintf("%s_%d", cfg.ServerID, slot)
 		m.mu.Lock()
 		item.CurrentInstance = instanceID
+		item.CopyStage = "preparing"
+		item.CopyFilesTotal = 0
+		item.CopyFilesDone = 0
+		item.CopyBytesTotal = 0
+		item.CopyBytesDone = 0
 		m.appendLogLocked(item, "info", "stopping", instanceID, "正在准备目标实例")
 		m.mu.Unlock()
 
@@ -250,6 +295,31 @@ func (m *Manager) isForce(item *task) bool {
 func (m *Manager) log(item *task, level, stage, instanceID, message string) {
 	m.mu.Lock()
 	m.appendLogLocked(item, level, stage, instanceID, message)
+	m.mu.Unlock()
+}
+
+func (m *Manager) beginCopyProgress(item *task, stage string, files, bytes int64) {
+	m.mu.Lock()
+	item.CopyStage = stage
+	item.CopyFilesTotal = files
+	item.CopyFilesDone = 0
+	item.CopyBytesTotal = bytes
+	item.CopyBytesDone = 0
+	m.mu.Unlock()
+}
+
+func (m *Manager) setCopyStage(item *task, stage string) {
+	m.mu.Lock()
+	item.CopyStage = stage
+	m.mu.Unlock()
+}
+
+func (m *Manager) advanceCopyProgress(item *task, bytes int64, fileDone bool) {
+	m.mu.Lock()
+	item.CopyBytesDone += bytes
+	if fileDone {
+		item.CopyFilesDone++
+	}
 	m.mu.Unlock()
 }
 

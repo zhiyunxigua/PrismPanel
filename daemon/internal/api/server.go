@@ -15,6 +15,7 @@ import (
 	"PrismPanel-daemon/internal/deployment"
 	"PrismPanel-daemon/internal/eventbus"
 	"PrismPanel-daemon/internal/model"
+	pluginservice "PrismPanel-daemon/internal/plugins"
 	"PrismPanel-daemon/internal/protocol"
 	serverservice "PrismPanel-daemon/internal/server"
 	"PrismPanel-daemon/internal/supervisor"
@@ -23,14 +24,17 @@ import (
 )
 
 const Version = "dev"
+const ProtocolVersion = "1"
 
 type Server struct {
 	config      config.Config
 	secret      string
+	nodeID      string
 	servers     *serverservice.Service
 	supervisor  *supervisor.Manager
 	tickets     *ticket.Manager
 	deployments *deployment.Manager
+	plugins     *pluginservice.Service
 	hub         *controlHub
 	http        *http.Server
 	startedAt   time.Time
@@ -40,16 +44,18 @@ type Server struct {
 func NewServer(
 	cfg config.Config,
 	mainSecret string,
+	nodeID string,
 	servers *serverservice.Service,
 	manager *supervisor.Manager,
 	tickets *ticket.Manager,
 	deployments *deployment.Manager,
+	plugins *pluginservice.Service,
 	events *eventbus.Bus,
 	logger *slog.Logger,
 ) *Server {
 	api := &Server{
-		config: cfg, secret: mainSecret, servers: servers, supervisor: manager,
-		tickets: tickets, deployments: deployments,
+		config: cfg, secret: mainSecret, nodeID: nodeID, servers: servers, supervisor: manager,
+		tickets: tickets, deployments: deployments, plugins: plugins,
 		hub: newControlHub(), startedAt: time.Now().UTC(), logger: logger,
 	}
 	events.Subscribe(api.hub.broadcast)
@@ -57,6 +63,8 @@ func NewServer(
 	mux.HandleFunc("/healthz", api.handleHealth)
 	mux.HandleFunc("/api/v1/ws/control", api.handleControl)
 	mux.HandleFunc("/api/v1/ws/console", api.handleConsole)
+	mux.HandleFunc("/api/v1/ws/plugin", api.handlePlugin)
+	mux.HandleFunc("/api/v1/plugins/deploy", api.handlePluginDeploy)
 	api.http = &http.Server{
 		Addr:              net.JoinHostPort(cfg.Server.Listen, fmt.Sprintf("%d", cfg.Server.Port)),
 		Handler:           securityHeaders(mux),
@@ -119,10 +127,10 @@ func (s *Server) handleControl(writer http.ResponseWriter, request *http.Request
 	conn.SetReadLimit(1024 * 1024)
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	var auth protocol.Incoming
-	if err := conn.ReadJSON(&auth); err != nil || auth.Type != "auth" || !secretsEqual(auth.Secret, s.secret) {
+	if err := conn.ReadJSON(&auth); err != nil || auth.Type != "auth" || !secretsEqual(auth.Token, s.secret) {
 		_ = conn.WriteJSON(protocol.Outgoing{
 			Type: "auth.result", Success: boolPointer(false),
-			Error: apperr.New("UNAUTHENTICATED", "守护进程主密钥无效"),
+			Error: apperr.New("UNAUTHENTICATED", "节点令牌无效"),
 		})
 		_ = conn.Close()
 		return
@@ -137,7 +145,11 @@ func (s *Server) handleControl(writer http.ResponseWriter, request *http.Request
 	go client.writeLoop()
 	client.enqueue(protocol.Outgoing{
 		Type: "auth.result", Success: boolPointer(true),
-		Data: map[string]any{"version": Version, "public_url": s.config.Server.PublicURL},
+		Data: map[string]any{
+			"node_id": s.nodeID, "version": Version, "protocol_version": ProtocolVersion,
+			"public_url":   s.config.Server.PublicURL,
+			"capabilities": []string{"server.manage", "instance.lifecycle", "console", "deployment", "plugin.telemetry", "plugin.manage", "metrics"},
+		},
 	})
 	client.enqueue(s.supervisor.SnapshotEvent())
 
@@ -171,6 +183,29 @@ func (s *Server) execute(messageType string, raw json.RawMessage) (any, error) {
 	switch messageType {
 	case "server.list":
 		return s.servers.List(), nil
+	case "metrics.snapshot":
+		return s.supervisor.MetricsSnapshot(), nil
+	case "plugin.list":
+		var input struct {
+			InstanceID string `json:"instance_id"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		return s.plugins.List(input.InstanceID)
+	case "plugin.enable", "plugin.disable", "plugin.uninstall":
+		var input pluginservice.OperationInput
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		switch messageType {
+		case "plugin.enable":
+			return s.plugins.SetEnabled(input, true)
+		case "plugin.disable":
+			return s.plugins.SetEnabled(input, false)
+		default:
+			return s.plugins.Uninstall(input)
+		}
 	case "server.get":
 		var input struct {
 			ServerID string `json:"server_id"`
@@ -270,6 +305,14 @@ func (s *Server) execute(messageType string, raw json.RawMessage) (any, error) {
 			return nil, invalidJSON(err)
 		}
 		return s.deployments.Get(input.TaskID)
+	case "deployment.active":
+		var input struct {
+			ServerID string `json:"server_id"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		return s.deployments.Active(input.ServerID)
 	case "deployment.cancel", "deployment.force_stop":
 		var input struct {
 			TaskID string `json:"task_id"`
@@ -288,9 +331,29 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 		Scope      string `json:"scope"`
 		InstanceID string `json:"instance_id"`
 		TTLSeconds int    `json:"ttl_seconds"`
+		SHA256     string `json:"sha256,omitempty"`
+		Size       int64  `json:"size,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, invalidJSON(err)
+	}
+	if input.Scope == "plugin.deploy" {
+		if _, err := s.servers.Get(input.InstanceID); err != nil {
+			return nil, err
+		}
+		if input.TTLSeconds == 0 {
+			input.TTLSeconds = 300
+		}
+		created, err := s.tickets.CreateUpload(input.Scope, input.InstanceID, input.SHA256, input.Size,
+			time.Duration(input.TTLSeconds)*time.Second)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ticket_id": created.ID, "ticket": created.Token, "expires_at": created.ExpiresAt,
+			"scope": created.Scope, "instance_id": created.InstanceID,
+			"public_url": s.config.Server.PublicURL, "upload_path": "/api/v1/plugins/deploy",
+		}, nil
 	}
 	if input.Scope != "console.read" {
 		return nil, apperr.New("INVALID_TICKET", "当前仅支持 console.read 临时凭证")

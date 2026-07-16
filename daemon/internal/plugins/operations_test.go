@@ -1,0 +1,138 @@
+package plugins
+
+import (
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestDeployBundleOverlaysConfigAndPreservesExtraFiles(t *testing.T) {
+	workspace := t.TempDir()
+	pluginDir := filepath.Join(workspace, "plugins")
+	if err := os.MkdirAll(filepath.Join(pluginDir, "Example"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "Example", "config.yml"), []byte("old"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "Example", "extra.yml"), []byte("keep"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := pluginJAR(t, "Example", "2.0", "com.example.Main")
+	bundlePath := pluginBundle(t, jar, "Example-2.0.jar", map[string]string{"config.yml": "new"})
+	bundle, cleanup, err := prepareBundle(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := deployBundleToWorkspace(workspace, bundle); err != nil {
+		t.Fatal(err)
+	}
+
+	installed := filepath.Join(pluginDir, "Example-2.0.jar")
+	if hash, err := fileSHA256(installed); err != nil || hash != bundle.plugin.SHA256 {
+		t.Fatalf("unexpected deployed jar: %s, %v", hash, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(pluginDir, "Example", "config.yml")); err != nil || string(data) != "new" {
+		t.Fatalf("config was not overlaid: %q, %v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(pluginDir, "Example", "extra.yml")); err != nil || string(data) != "keep" {
+		t.Fatalf("extra config was not preserved: %q, %v", data, err)
+	}
+}
+
+func TestPluginEnableDisableAndUninstall(t *testing.T) {
+	workspace := t.TempDir()
+	pluginDir := filepath.Join(workspace, "plugins")
+	configDir := filepath.Join(pluginDir, "Example")
+	if err := os.MkdirAll(configDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	jarPath := filepath.Join(pluginDir, "Example.jar")
+	if err := os.WriteFile(jarPath, pluginJAR(t, "Example", "1.0", "com.example.Main"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.yml"), []byte("keep"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := setPluginEnabled(workspace, "Example", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(jarPath + ".disabled"); err != nil {
+		t.Fatalf("disabled jar missing: %v", err)
+	}
+	if err := setPluginEnabled(workspace, "Example", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(jarPath); err != nil {
+		t.Fatalf("enabled jar missing: %v", err)
+	}
+	if err := uninstallPlugin(workspace, "Example", false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(jarPath); !os.IsNotExist(err) {
+		t.Fatalf("jar was not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(configDir, "config.yml")); err != nil {
+		t.Fatalf("config should remain: %v", err)
+	}
+}
+
+func pluginJAR(t *testing.T, name, version, main string) []byte {
+	t.Helper()
+	return zipBytes(t, map[string]string{
+		"plugin.yml": "name: " + name + "\nversion: " + version + "\nmain: " + main + "\nauthors: [Tester]\n",
+	})
+}
+
+func pluginBundle(t *testing.T, jar []byte, filename string, config map[string]string) string {
+	t.Helper()
+	hash := sha256.Sum256(jar)
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
+	entry, _ := archive.Create("plugin.jar")
+	_, _ = entry.Write(jar)
+	manifest := "name: Example\nversion: 2.0\nmain: com.example.Main\nartifact:\n" +
+		"  original_filename: " + filename + "\n  sha256: " + hex.EncodeToString(hash[:]) + "\n" +
+		"config:\n  directory: Example\n  present: true\n"
+	entry, _ = archive.Create("manifest.yaml")
+	_, _ = io.WriteString(entry, manifest)
+	for name, content := range config {
+		entry, _ = archive.Create("config/" + name)
+		_, _ = io.WriteString(entry, content)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "bundle.zip")
+	if err := os.WriteFile(path, buffer.Bytes(), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func zipBytes(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
+	for name, content := range files {
+		entry, err := archive.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(entry, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}

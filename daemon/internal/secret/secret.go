@@ -3,6 +3,7 @@ package secret
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 type File struct {
 	Secret    string    `json:"secret"`
+	NodeID    string    `json:"node_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -24,7 +26,11 @@ func LoadOrCreate(path string) (File, bool, error) {
 		if err != nil {
 			return File{}, false, err
 		}
-		file := File{Secret: value, CreatedAt: time.Now().UTC()}
+		nodeID, err := generateID()
+		if err != nil {
+			return File{}, false, err
+		}
+		file := File{Secret: value, NodeID: nodeID, CreatedAt: time.Now().UTC()}
 		if err := Save(path, file); err != nil {
 			return File{}, false, err
 		}
@@ -40,15 +46,28 @@ func LoadOrCreate(path string) (File, bool, error) {
 	if len(file.Secret) < 32 {
 		return File{}, false, errors.New("stored daemon secret is invalid")
 	}
+	if file.NodeID == "" {
+		file.NodeID, err = generateID()
+		if err != nil {
+			return File{}, false, err
+		}
+		if err := Save(path, file); err != nil {
+			return File{}, false, err
+		}
+	}
 	return file, false, nil
 }
 
 func Reset(path string) (File, error) {
+	current, _, err := LoadOrCreate(path)
+	if err != nil {
+		return File{}, err
+	}
 	value, err := generate()
 	if err != nil {
 		return File{}, err
 	}
-	file := File{Secret: value, CreatedAt: time.Now().UTC()}
+	file := File{Secret: value, NodeID: current.NodeID, CreatedAt: time.Now().UTC()}
 	return file, Save(path, file)
 }
 
@@ -70,4 +89,12 @@ func generate() (string, error) {
 		return "", fmt.Errorf("generate secret: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
+}
+
+func generateID() (string, error) {
+	buffer := make([]byte, 16)
+	if _, err := rand.Read(buffer); err != nil {
+		return "", fmt.Errorf("generate node id: %w", err)
+	}
+	return hex.EncodeToString(buffer), nil
 }

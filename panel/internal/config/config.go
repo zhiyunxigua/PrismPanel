@@ -1,21 +1,26 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
+	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Server   ServerConfig `yaml:"server"`
-	Daemon   DaemonConfig `yaml:"daemon"`
-	Frontend Frontend     `yaml:"frontend"`
-	Audit    Audit        `yaml:"audit"`
+	Server   ServerConfig   `yaml:"server"`
+	Database DatabaseConfig `yaml:"database"`
+	Auth     AuthConfig     `yaml:"auth"`
+	Security SecurityConfig `yaml:"security"`
+	Frontend Frontend       `yaml:"frontend"`
 }
 
 type ServerConfig struct {
@@ -23,28 +28,47 @@ type ServerConfig struct {
 	Port   int    `yaml:"port"`
 }
 
-type DaemonConfig struct {
-	URL        string `yaml:"url"`
-	Secret     string `yaml:"secret"`
-	SecretFile string `yaml:"secret_file"`
+type DatabaseConfig struct {
+	URL          string `yaml:"url"`
+	Username     string `yaml:"username"`
+	Password     string `yaml:"password"`
+	Name         string `yaml:"name"`
+	TablePrefix  string `yaml:"table_prefix"`
+	MaxOpenConns int    `yaml:"max_open_conns"`
+	MaxIdleConns int    `yaml:"max_idle_conns"`
+}
+
+type AuthConfig struct {
+	CookieName      string `yaml:"cookie_name"`
+	CookieSecure    bool   `yaml:"cookie_secure"`
+	SessionLifetime string `yaml:"session_lifetime"`
+	IdleTimeout     string `yaml:"idle_timeout"`
+}
+
+type SecurityConfig struct {
+	MasterKeyFile string `yaml:"master_key_file"`
 }
 
 type Frontend struct {
 	Directory string `yaml:"directory"`
 }
 
-type Audit struct {
-	File string `yaml:"file"`
-}
-
 func Default() Config {
 	return Config{
 		Server: ServerConfig{Listen: "127.0.0.1", Port: 8080},
-		Daemon: DaemonConfig{
-			URL: "http://127.0.0.1:24444", SecretFile: "../daemon/data/secret.json",
+		Database: DatabaseConfig{
+			URL:          "127.0.0.1:3306",
+			Username:     "root",
+			Name:         "prismpanel",
+			TablePrefix:  "prism_",
+			MaxOpenConns: 10,
+			MaxIdleConns: 5,
 		},
-		Frontend: Frontend{Directory: "../frontend"},
-		Audit:    Audit{File: "data/audit.jsonl"},
+		Auth: AuthConfig{
+			CookieName: "prism_session", SessionLifetime: "24h", IdleTimeout: "2h",
+		},
+		Security: SecurityConfig{MasterKeyFile: "data/master.key"},
+		Frontend: Frontend{Directory: "../frontend/dist"},
 	}
 }
 
@@ -81,38 +105,78 @@ func (c Config) Validate() error {
 	if c.Server.Listen == "" || c.Server.Port < 1 || c.Server.Port > 65535 {
 		return errors.New("panel listen address is invalid")
 	}
-	parsed, err := url.Parse(c.Daemon.URL)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errors.New("daemon.url must be an http or https URL")
+	if err := c.Database.Validate(); err != nil {
+		return err
 	}
-	if c.Daemon.Secret == "" && c.Daemon.SecretFile == "" {
-		return errors.New("daemon.secret or daemon.secret_file is required")
+	if c.Database.MaxOpenConns < 1 || c.Database.MaxIdleConns < 0 ||
+		c.Database.MaxIdleConns > c.Database.MaxOpenConns {
+		return errors.New("database connection limits are invalid")
 	}
-	if c.Frontend.Directory == "" || c.Audit.File == "" {
-		return errors.New("frontend.directory and audit.file are required")
+	if strings.TrimSpace(c.Auth.CookieName) == "" || strings.ContainsAny(c.Auth.CookieName, " ;=\t\r\n") {
+		return errors.New("auth.cookie_name is invalid")
+	}
+	if _, err := c.SessionLifetime(); err != nil {
+		return err
+	}
+	if _, err := c.IdleTimeout(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.Security.MasterKeyFile) == "" {
+		return errors.New("security.master_key_file is required")
+	}
+	if c.Frontend.Directory == "" {
+		return errors.New("frontend.directory is required")
 	}
 	return nil
 }
 
-func (c Config) DaemonSecret() (string, error) {
-	if value := os.Getenv("PRISM_DAEMON_SECRET"); value != "" {
-		return value, nil
+var databaseIdentifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
+
+func (c DatabaseConfig) Validate() error {
+	host, portText, err := net.SplitHostPort(strings.TrimSpace(c.URL))
+	if err != nil || strings.TrimSpace(host) == "" {
+		return errors.New("database.url must use host:port format")
 	}
-	if c.Daemon.Secret != "" {
-		return c.Daemon.Secret, nil
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return errors.New("database.url port must be between 1 and 65535")
 	}
-	contents, err := os.ReadFile(c.Daemon.SecretFile)
-	if err != nil {
-		return "", fmt.Errorf("read daemon secret file: %w", err)
+	if strings.TrimSpace(c.Username) == "" {
+		return errors.New("database.username is required")
 	}
-	var value struct {
-		Secret string `json:"secret"`
+	if !databaseIdentifierPattern.MatchString(c.Name) || len(c.Name) > 64 {
+		return errors.New("database.name is invalid")
 	}
-	if err := json.Unmarshal(contents, &value); err != nil {
-		return "", fmt.Errorf("decode daemon secret file: %w", err)
+	if !databaseIdentifierPattern.MatchString(c.TablePrefix) || len(c.TablePrefix) > 24 {
+		return errors.New("database.table_prefix is invalid")
 	}
-	if value.Secret == "" {
-		return "", errors.New("daemon secret file is empty")
+	return nil
+}
+
+func (c DatabaseConfig) DSN() string {
+	value := mysql.NewConfig()
+	value.User = c.Username
+	value.Passwd = c.Password
+	value.Net = "tcp"
+	value.Addr = c.URL
+	value.DBName = c.Name
+	value.Collation = "utf8mb4_unicode_ci"
+	value.ParseTime = true
+	return value.FormatDSN()
+}
+
+func (c Config) SessionLifetime() (time.Duration, error) {
+	return positiveDuration("auth.session_lifetime", c.Auth.SessionLifetime)
+}
+
+func (c Config) IdleTimeout() (time.Duration, error) {
+	return positiveDuration("auth.idle_timeout", c.Auth.IdleTimeout)
+}
+
+func positiveDuration(name, value string) (time.Duration, error) {
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", name)
 	}
-	return value.Secret, nil
+	return duration, nil
 }

@@ -64,9 +64,7 @@ func (s *ServerConfig) Normalize() {
 	if s.Process.StopTimeoutSeconds == 0 {
 		s.Process.StopTimeoutSeconds = 60
 	}
-	if s.Console.Encoding == "" {
-		s.Console.Encoding = "utf-8"
-	}
+	s.Console.Encoding = normalizeConsoleEncoding(s.Console.Encoding)
 }
 
 func (s ServerConfig) Validate() error {
@@ -97,8 +95,8 @@ func (s ServerConfig) Validate() error {
 	if s.Process.StopTimeoutSeconds <= 0 {
 		return errors.New("process.stop_timeout_seconds must be positive")
 	}
-	if !strings.EqualFold(s.Console.Encoding, "utf-8") {
-		return errors.New("only utf-8 console encoding is currently supported")
+	if s.Console.Encoding != "utf-8" && s.Console.Encoding != "gbk" {
+		return errors.New("console.encoding must be utf-8 or gbk")
 	}
 	if s.Type == "standalone" {
 		if !filepath.IsAbs(s.Workspace) {
@@ -132,6 +130,17 @@ func (s ServerConfig) Validate() error {
 		}
 	}
 	return nil
+}
+
+func normalizeConsoleEncoding(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "utf8", "utf-8":
+		return "utf-8"
+	case "gbk":
+		return "gbk"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
 }
 
 func (s ServerConfig) Instances() []InstanceConfig {
