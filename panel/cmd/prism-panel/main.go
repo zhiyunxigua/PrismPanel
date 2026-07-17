@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -99,6 +100,37 @@ func run() error {
 			slog.Error("update node runtime", "node_id", nodeID, "error", err)
 		}
 	})
+	connectionManager.SetEventCallback(func(nodeID, eventType string, data json.RawMessage) {
+		if eventType != "file.operation_result" {
+			return
+		}
+		var event struct {
+			OperationID string           `json:"operation_id"`
+			Success     bool             `json:"success"`
+			Error       *daemon.APIError `json:"error"`
+		}
+		if err := json.Unmarshal(data, &event); err != nil || event.OperationID == "" {
+			slog.Error("decode file operation result", "node_id", nodeID, "error", err)
+			return
+		}
+		errorCode := ""
+		if event.Error != nil {
+			errorCode = event.Error.Code
+		}
+		completeContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		operation, changed, err := repository.CompleteFileOperation(
+			completeContext, event.OperationID, nodeID, event.Success, errorCode,
+		)
+		if err != nil {
+			slog.Error("complete file operation", "operation_id", event.OperationID, "error", err)
+			return
+		}
+		if changed {
+			writeFileOperationAudit(completeContext, repository, operation, event.Success, errorCode)
+		}
+	})
+	go expireFileOperations(ctx, repository)
 	nodeService, err := nodes.NewService(repository, connectionManager, masterKey)
 	if err != nil {
 		return err
@@ -130,4 +162,47 @@ func run() error {
 	shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdownContext)
+}
+
+func writeFileOperationAudit(ctx context.Context, repository *store.Store, operation store.FileOperation, success bool, errorCode string) {
+	risk := "high"
+	if operation.Action == "file.delete" {
+		risk = "critical"
+	}
+	detail := operation.Detail
+	if detail == nil {
+		detail = make(map[string]any)
+	}
+	detail["node_id"] = operation.NodeID
+	if err := repository.CreateAudit(ctx, store.AuditLog{
+		RequestID: operation.RequestID, ActorUserID: operation.ActorUserID,
+		SessionID: operation.SessionID, ActorUsername: operation.ActorUsername,
+		ActorDisplayName: operation.ActorDisplayName, SourceIP: operation.SourceIP,
+		UserAgent: operation.UserAgent, Action: operation.Action, ResourceType: "file",
+		ResourceID: operation.ID, RiskLevel: risk, Success: success,
+		ErrorCode: errorCode, Detail: detail,
+	}); err != nil {
+		slog.Error("write file operation audit", "operation_id", operation.ID, "error", err)
+	}
+}
+
+func expireFileOperations(ctx context.Context, repository *store.Store) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			expireContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+			operations, err := repository.ExpireFileOperations(expireContext, 100)
+			if err != nil {
+				slog.Error("expire file operations", "error", err)
+			}
+			for _, operation := range operations {
+				writeFileOperationAudit(expireContext, repository, operation, false, "TICKET_EXPIRED")
+			}
+			cancel()
+		}
+	}
 }

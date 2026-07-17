@@ -215,6 +215,38 @@ func (m *Manager) Get(instanceID string) (Snapshot, error) {
 	return current.snapshot(), nil
 }
 
+// WithFileMutation serializes a file write with lifecycle and deployment operations.
+func (m *Manager) WithFileMutation(instanceID string, mutate func(workspace string) error) error {
+	return m.withFileMutation(instanceID, false, mutate)
+}
+
+// WithStoppedFileMutation also requires the instance process to be inactive.
+func (m *Manager) WithStoppedFileMutation(instanceID string, mutate func(workspace string) error) error {
+	return m.withFileMutation(instanceID, true, mutate)
+}
+
+func (m *Manager) withFileMutation(instanceID string, requireStopped bool, mutate func(workspace string) error) error {
+	current, err := m.lookup(instanceID)
+	if err != nil {
+		return err
+	}
+	if !current.op.TryLock() {
+		return apperr.New("INSTANCE_BUSY", "实例正在执行其他操作")
+	}
+	defer current.op.Unlock()
+	if err := deploymentLockError(current); err != nil {
+		return err
+	}
+	current.mu.RLock()
+	workspace := current.cfg.Workspace
+	state := current.state
+	current.mu.RUnlock()
+	if requireStopped && state != StateStopped && state != StateFailed {
+		return apperr.New("INVALID_STATE", "实例运行时不能切换工作目录")
+	}
+	return mutate(workspace)
+}
+
 func (m *Manager) Subscribe(instanceID string, afterSequence uint64) ([]ConsoleLine, <-chan ConsoleLine, func(), error) {
 	current, err := m.lookup(instanceID)
 	if err != nil {

@@ -76,6 +76,7 @@ type Manager struct {
 	mu              sync.RWMutex
 	tasks           map[string]*task
 	active          map[string]string
+	imageLocks      sync.Map
 }
 
 func NewManager(servers *serverservice.Service, processManager *supervisor.Manager, copyConcurrency int) *Manager {
@@ -94,6 +95,14 @@ func (m *Manager) Start(serverID string, requested []int) (Snapshot, error) {
 	if cfg.Type != "mirror" {
 		return Snapshot{}, apperr.New("INVALID_STATE", "只有镜像服务器组可以执行镜像部署")
 	}
+	imageLock := m.imageLock(serverID)
+	imageLock.RLock()
+	imageLocked := true
+	defer func() {
+		if imageLocked {
+			imageLock.RUnlock()
+		}
+	}()
 	targets, err := normalizeTargets(requested, cfg.InstanceCount)
 	if err != nil {
 		return Snapshot{}, err
@@ -136,8 +145,12 @@ func (m *Manager) Start(serverID string, requested []int) (Snapshot, error) {
 			Status: StatusQueued, CopyConcurrency: m.copyConcurrency,
 			CreatedAt: time.Now().UTC(), Logs: make([]Log, 0, 64),
 		},
-		context: ctx, cancel: cancel, release: release,
+		context: ctx, cancel: cancel, release: func() {
+			release()
+			imageLock.RUnlock()
+		},
 	}
+	imageLocked = false
 	m.tasks[taskID] = item
 	m.active[serverID] = taskID
 	m.appendLogLocked(item, "info", "queued", "", "部署任务已进入队列")
@@ -145,6 +158,20 @@ func (m *Manager) Start(serverID string, requested []int) (Snapshot, error) {
 	m.mu.Unlock()
 	go m.run(item, cfg)
 	return snapshot, nil
+}
+
+func (m *Manager) WithImageMutation(serverID string, mutate func() error) error {
+	lock := m.imageLock(serverID)
+	if !lock.TryLock() {
+		return apperr.New("INSTANCE_BUSY", "镜像源正在被部署任务使用")
+	}
+	defer lock.Unlock()
+	return mutate()
+}
+
+func (m *Manager) imageLock(serverID string) *sync.RWMutex {
+	value, _ := m.imageLocks.LoadOrStore(serverID, &sync.RWMutex{})
+	return value.(*sync.RWMutex)
 }
 
 func (m *Manager) Get(taskID string) (Snapshot, error) {

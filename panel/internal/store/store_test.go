@@ -26,4 +26,8 @@ func TestPrefixStatement(t *testing.T) {
 	if !strings.Contains(pluginQuery, "`prism_plugin_artifacts`") {
 		t.Fatalf("missing prefixed plugin table in %q", pluginQuery)
 	}
+	fileOperationQuery := prefixStatement("UPDATE file_operations SET status = 'failed'", "prism_")
+	if !strings.Contains(fileOperationQuery, "`prism_file_operations`") {
+		t.Fatalf("missing prefixed file operation table in %q", fileOperationQuery)
+	}
 }

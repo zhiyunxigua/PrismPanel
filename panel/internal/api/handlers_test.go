@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestValidateConsoleCommandRejectsOPChanges(t *testing.T) {
@@ -10,6 +11,39 @@ func TestValidateConsoleCommandRejectsOPChanges(t *testing.T) {
 		if err := validateConsoleCommand(command); err == nil {
 			t.Fatalf("expected %q to be rejected", command)
 		}
+	}
+}
+
+func TestFileProxyGrantIsBoundAndSingleUse(t *testing.T) {
+	store := newFileProxyStore()
+	token, err := store.Add(fileProxyGrant{
+		DaemonTicket: "daemon-secret", NodeID: "node-a", Scope: "file.delete",
+		UserID: "user-a", ExpiresAt: time.Now().Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Consume(token, "user-b", "node-a", "file.delete"); err == nil {
+		t.Fatal("expected user binding rejection")
+	}
+	grant, err := store.Consume(token, "user-a", "node-a", "file.delete")
+	if err != nil || grant.DaemonTicket != "daemon-secret" {
+		t.Fatalf("unexpected proxy grant: %#v, %v", grant, err)
+	}
+	if _, err := store.Consume(token, "user-a", "node-a", "file.delete"); err == nil {
+		t.Fatal("expected single-use proxy grant rejection")
+	}
+}
+
+func TestProxyFileScopeRequiresExpectedMethod(t *testing.T) {
+	if got := proxyFileScope("content", "GET"); got != "file.read" {
+		t.Fatalf("content GET scope = %q", got)
+	}
+	if got := proxyFileScope("delete", "GET"); got != "" {
+		t.Fatalf("delete GET unexpectedly mapped to %q", got)
+	}
+	if got := proxyFileScope("import", "POST"); got != "file.import" {
+		t.Fatalf("import POST scope = %q", got)
 	}
 }
 

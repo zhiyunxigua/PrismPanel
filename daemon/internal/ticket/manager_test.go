@@ -21,3 +21,27 @@ func TestTicketScopeAndSingleUse(t *testing.T) {
 		t.Fatal("expected single-use rejection")
 	}
 }
+
+func TestRestrictedTicketBindsMethodAndPaths(t *testing.T) {
+	manager := NewManager()
+	created, err := manager.CreateRestricted(RestrictedOptions{
+		Scope: "file.move", ResourceType: "instance", ResourceID: "lobby",
+		Path: "plugins/a.jar", Paths: []string{"plugins/a.jar", "plugins/b.jar"},
+		Method: "POST", TTL: time.Minute, MaxUses: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ConsumeRestricted(created.Token, "file.move", "instance", "lobby", "plugins/c.jar", "POST"); err == nil {
+		t.Fatal("expected unbound path to be rejected")
+	}
+	if _, err := manager.ConsumeRestricted(created.Token, "file.move", "instance", "lobby", "plugins/a.jar", "GET"); err == nil {
+		t.Fatal("expected method mismatch to be rejected")
+	}
+	if _, err := manager.ConsumeRestricted(created.Token, "file.move", "instance", "lobby", "plugins/a.jar", "POST"); err != nil {
+		t.Fatal(err)
+	}
+	if !created.AllowsPath("plugins/b.jar") {
+		t.Fatal("expected destination path to be allowed")
+	}
+}

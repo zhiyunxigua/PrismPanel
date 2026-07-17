@@ -36,7 +36,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Store, error) {
 }
 
 var logicalTablePattern = regexp.MustCompile(
-	`\b(user_permission_overrides|group_permissions|user_groups|sessions|users|nodes|audit_logs|plugin_artifacts)\b`,
+	`\b(user_permission_overrides|group_permissions|user_groups|sessions|users|nodes|audit_logs|file_operations|plugin_artifacts)\b`,
 )
 
 type database struct {
@@ -214,6 +214,28 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			KEY idx_audit_actor (actor_user_id, created_at),
 			KEY idx_audit_resource (resource_type, resource_id, created_at),
 			KEY idx_audit_action (action, created_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS file_operations (
+			id CHAR(32) CHARACTER SET ascii NOT NULL PRIMARY KEY,
+			request_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			created_at DATETIME(6) NOT NULL,
+			expires_at DATETIME(6) NOT NULL,
+			completed_at DATETIME(6) NULL,
+			actor_user_id CHAR(32) CHARACTER SET ascii NULL,
+			session_id CHAR(64) CHARACTER SET ascii NOT NULL DEFAULT '',
+			actor_username VARCHAR(64) NOT NULL,
+			actor_display_name VARCHAR(100) NOT NULL,
+			source_ip VARCHAR(45) CHARACTER SET ascii NOT NULL,
+			user_agent VARCHAR(255) NOT NULL,
+			action VARCHAR(96) CHARACTER SET ascii NOT NULL,
+			node_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			resource_type VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			resource_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			status VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			error_code VARCHAR(64) CHARACTER SET ascii NOT NULL DEFAULT '',
+			detail JSON NULL,
+			KEY idx_file_operations_status (status, expires_at),
+			KEY idx_file_operations_actor (actor_user_id, created_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS plugin_artifacts (
 			plugin_id VARCHAR(64) CHARACTER SET ascii NOT NULL,

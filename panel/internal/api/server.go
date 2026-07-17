@@ -31,6 +31,7 @@ type Server struct {
 	nodes       *panelnodes.Service
 	metrics     *panelmetrics.Store
 	plugins     *panelplugins.Repository
+	fileProxies *fileProxyStore
 	http        *http.Server
 	logger      *slog.Logger
 }
@@ -54,7 +55,8 @@ func NewServer(
 ) *Server {
 	server := &Server{
 		config: cfg, auth: authService, store: repository, connections: connectionManager,
-		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, logger: logger,
+		nodes: nodeService, metrics: metricStore, plugins: pluginRepository,
+		fileProxies: newFileProxyStore(), logger: logger,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/status", server.handleAuthStatus)
@@ -79,6 +81,8 @@ func NewServer(
 	mux.HandleFunc("/api/v1/plugins", server.requireAuth(server.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", server.requireAuth(server.handlePluginArtifact))
 	mux.HandleFunc("/api/v1/plugins/rescan", server.requireAuth(server.handlePluginRescan))
+	mux.HandleFunc("/api/v1/files/authorize", server.requireAuth(server.handleFileAuthorize))
+	mux.HandleFunc("/api/v1/files/proxy/", server.requireAuth(server.handleFileProxy))
 	mux.HandleFunc("/api/v1/ws/console", server.requirePermission("console.read", server.handleConsoleProxy))
 	mux.Handle("/", frontendHandler(cfg.Frontend.Directory))
 	server.http = &http.Server{

@@ -38,3 +38,14 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 	}
 	return nil
 }
+
+// Publish moves a completed temporary file into place.
+func Publish(source, destination string, overwrite bool) error {
+	if overwrite {
+		return replaceFile(source, destination)
+	}
+	if err := os.Link(source, destination); err != nil {
+		return err
+	}
+	return os.Remove(source)
+}

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { Activity, Boxes, Cpu, MemoryStick, Plus, RefreshCw, Search, Server, Users } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { request } from "../api";
+import { importArchive } from "../fileApi";
 import { hasPermission } from "../session";
 import ServerEditorDialog from "../components/servers/ServerEditorDialog.vue";
 
@@ -77,19 +78,36 @@ async function load(silent = false) {
   }
 }
 
-async function createServer({ nodeId, config }) {
+async function createServer({ nodeId, config, archive }) {
   submitting.value = true;
+  let created = false;
   try {
     const result = await request(`/api/v1/servers?node_id=${encodeURIComponent(nodeId)}`, {
       method: "POST",
       body: JSON.stringify(config),
     });
+    created = true;
     dialogOpen.value = false;
-    ElMessage.success("服务器已创建");
     if (result?.warnings?.length) ElMessage.warning(result.warnings.join("；"));
+    if (archive) {
+      try {
+        const imported = await importArchive({
+          node_id: nodeId,
+          resource_type: config.type === "mirror" ? "image" : "instance",
+          resource_id: config.server_id,
+          path: ".",
+          scope: "file.import",
+        }, archive);
+        ElMessage.success(`服务器已创建，已导入 ${imported.files} 个文件`);
+      } catch (error) {
+        ElMessage.error(`服务器已创建，但压缩包导入失败：${error.message}`);
+      }
+    } else {
+      ElMessage.success("服务器已创建");
+    }
     await load();
   } catch (error) {
-    ElMessage.error(error.message);
+    ElMessage.error(created ? `服务器已创建，但后续处理失败：${error.message}` : error.message);
   } finally {
     submitting.value = false;
   }

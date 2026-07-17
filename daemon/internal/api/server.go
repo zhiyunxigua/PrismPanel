@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"PrismPanel-daemon/internal/apperr"
 	"PrismPanel-daemon/internal/config"
 	"PrismPanel-daemon/internal/deployment"
 	"PrismPanel-daemon/internal/eventbus"
+	fileservice "PrismPanel-daemon/internal/files"
 	"PrismPanel-daemon/internal/model"
 	pluginservice "PrismPanel-daemon/internal/plugins"
 	"PrismPanel-daemon/internal/protocol"
@@ -35,6 +37,7 @@ type Server struct {
 	tickets     *ticket.Manager
 	deployments *deployment.Manager
 	plugins     *pluginservice.Service
+	files       *fileservice.Service
 	hub         *controlHub
 	http        *http.Server
 	startedAt   time.Time
@@ -50,12 +53,13 @@ func NewServer(
 	tickets *ticket.Manager,
 	deployments *deployment.Manager,
 	plugins *pluginservice.Service,
+	files *fileservice.Service,
 	events *eventbus.Bus,
 	logger *slog.Logger,
 ) *Server {
 	api := &Server{
 		config: cfg, secret: mainSecret, nodeID: nodeID, servers: servers, supervisor: manager,
-		tickets: tickets, deployments: deployments, plugins: plugins,
+		tickets: tickets, deployments: deployments, plugins: plugins, files: files,
 		hub: newControlHub(), startedAt: time.Now().UTC(), logger: logger,
 	}
 	events.Subscribe(api.hub.broadcast)
@@ -65,6 +69,7 @@ func NewServer(
 	mux.HandleFunc("/api/v1/ws/console", api.handleConsole)
 	mux.HandleFunc("/api/v1/ws/plugin", api.handlePlugin)
 	mux.HandleFunc("/api/v1/plugins/deploy", api.handlePluginDeploy)
+	mux.HandleFunc("/api/v1/files/", api.handleFiles)
 	api.http = &http.Server{
 		Addr:              net.JoinHostPort(cfg.Server.Listen, fmt.Sprintf("%d", cfg.Server.Port)),
 		Handler:           securityHeaders(mux),
@@ -148,7 +153,7 @@ func (s *Server) handleControl(writer http.ResponseWriter, request *http.Request
 		Data: map[string]any{
 			"node_id": s.nodeID, "version": Version, "protocol_version": ProtocolVersion,
 			"public_url":   s.config.Server.PublicURL,
-			"capabilities": []string{"server.manage", "instance.lifecycle", "console", "deployment", "plugin.telemetry", "plugin.manage", "metrics"},
+			"capabilities": []string{"server.manage", "instance.lifecycle", "console", "deployment", "plugin.telemetry", "plugin.manage", "metrics", "files"},
 		},
 	})
 	client.enqueue(s.supervisor.SnapshotEvent())
@@ -328,11 +333,20 @@ func (s *Server) execute(messageType string, raw json.RawMessage) (any, error) {
 
 func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 	var input struct {
-		Scope      string `json:"scope"`
-		InstanceID string `json:"instance_id"`
-		TTLSeconds int    `json:"ttl_seconds"`
-		SHA256     string `json:"sha256,omitempty"`
-		Size       int64  `json:"size,omitempty"`
+		Scope        string   `json:"scope"`
+		InstanceID   string   `json:"instance_id"`
+		TTLSeconds   int      `json:"ttl_seconds"`
+		SHA256       string   `json:"sha256,omitempty"`
+		Size         int64    `json:"size,omitempty"`
+		ResourceType string   `json:"resource_type,omitempty"`
+		ResourceID   string   `json:"resource_id,omitempty"`
+		Path         string   `json:"path,omitempty"`
+		Paths        []string `json:"paths,omitempty"`
+		PathPrefix   bool     `json:"path_prefix,omitempty"`
+		Method       string   `json:"method,omitempty"`
+		OperationID  string   `json:"operation_id,omitempty"`
+		Overwrite    bool     `json:"overwrite,omitempty"`
+		Recursive    bool     `json:"recursive,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, invalidJSON(err)
@@ -353,6 +367,67 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			"ticket_id": created.ID, "ticket": created.Token, "expires_at": created.ExpiresAt,
 			"scope": created.Scope, "instance_id": created.InstanceID,
 			"public_url": s.config.Server.PublicURL, "upload_path": "/api/v1/plugins/deploy",
+		}, nil
+	}
+	if strings.HasPrefix(input.Scope, "file.") {
+		allowed := map[string]string{
+			"file.list": http.MethodPost, "file.read": http.MethodGet,
+			"file.edit": http.MethodPut, "file.upload": http.MethodPost,
+			"file.import":   http.MethodPost,
+			"file.download": http.MethodGet, "file.create": http.MethodPost,
+			"file.move": http.MethodPost, "file.delete": http.MethodPost,
+		}
+		method, exists := allowed[input.Scope]
+		if !exists || (input.Method != "" && !strings.EqualFold(input.Method, method)) {
+			return nil, apperr.New("INVALID_TICKET", "文件凭证范围或请求方法无效")
+		}
+		if input.ResourceType == "instance" {
+			if _, err := s.supervisor.Get(input.ResourceID); err != nil {
+				return nil, err
+			}
+		} else if input.ResourceType == "image" {
+			server, err := s.servers.Get(input.ResourceID)
+			if err != nil {
+				return nil, err
+			}
+			if server.Type != "mirror" {
+				return nil, apperr.New("INVALID_STATE", "目标服务器没有镜像源")
+			}
+		} else {
+			return nil, apperr.New("INVALID_TICKET", "文件凭证资源类型无效")
+		}
+		if input.TTLSeconds == 0 {
+			input.TTLSeconds = 120
+		}
+		maxUses := 1
+		if input.Scope == "file.list" {
+			maxUses = 64
+			input.PathPrefix = true
+		}
+		maxBytes := input.Size
+		if input.Scope == "file.edit" || input.Scope == "file.read" {
+			maxBytes = s.config.Files.MaxEditFileSize
+		}
+		if input.Scope == "file.upload" || input.Scope == "file.import" {
+			if maxBytes < 0 || maxBytes > s.config.Files.MaxUploadFileSize {
+				return nil, apperr.New("FILE_TOO_LARGE", "上传文件超过节点限制")
+			}
+		}
+		created, err := s.tickets.CreateRestricted(ticket.RestrictedOptions{
+			Scope: input.Scope, ResourceType: input.ResourceType, ResourceID: input.ResourceID,
+			Path: input.Path, Paths: input.Paths, PathPrefix: input.PathPrefix, Method: method,
+			OperationID: input.OperationID, MaxBytes: maxBytes, SHA256: input.SHA256,
+			AllowOverwrite: input.Overwrite, AllowRecursive: input.Recursive,
+			TTL: time.Duration(input.TTLSeconds) * time.Second, MaxUses: maxUses,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ticket_id": created.ID, "ticket": created.Token, "expires_at": created.ExpiresAt,
+			"scope": created.Scope, "resource_type": created.ResourceType,
+			"resource_id": created.ResourceID, "path": created.Path, "paths": created.Paths,
+			"public_url": s.config.Server.PublicURL, "max_bytes": created.MaxBytes,
 		}, nil
 	}
 	if input.Scope != "console.read" {

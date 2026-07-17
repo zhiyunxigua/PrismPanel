@@ -1,6 +1,7 @@
 <script setup>
-import { computed, reactive, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
+import { FileArchive } from "lucide-vue-next";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -12,6 +13,8 @@ const props = defineProps({
 const emit = defineEmits(["update:modelValue", "submit"]);
 
 const formRef = ref();
+const archiveUploadRef = ref();
+const archiveFile = ref(null);
 const form = reactive({
   nodeId: "",
   type: "standalone",
@@ -33,7 +36,10 @@ const form = reactive({
 
 const open = computed({
   get: () => props.modelValue,
-  set: (value) => emit("update:modelValue", value),
+  set: (value) => {
+    if (!value && props.submitting) return;
+    emit("update:modelValue", value);
+  },
 });
 const editing = computed(() => Boolean(props.server));
 const availableNodes = computed(() => props.nodes.map((item) => item.node || item));
@@ -73,6 +79,8 @@ function resetForm() {
     autoRestart: source?.process?.auto_restart || false,
     encoding: source?.console?.encoding || "utf-8",
   });
+  archiveFile.value = null;
+  nextTick(() => archiveUploadRef.value?.clearFiles());
   formRef.value?.clearValidate();
 }
 
@@ -89,6 +97,30 @@ function parsePorts() {
 
 function validPort(value) {
   return Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+
+function handleArchiveChange(uploadFile) {
+  const file = uploadFile.raw;
+  if (!file?.name.toLowerCase().endsWith(".zip")) {
+    archiveFile.value = null;
+    archiveUploadRef.value?.clearFiles();
+    ElMessage.warning("初始化文件仅支持 ZIP 压缩包");
+    return;
+  }
+  archiveFile.value = file;
+}
+
+function handleArchiveRemove() {
+  archiveFile.value = null;
+}
+
+function handleArchiveExceed(files) {
+  archiveUploadRef.value?.clearFiles();
+  if (files[0]) archiveUploadRef.value?.handleStart(files[0]);
+}
+
+function beforeClose(done) {
+  if (!props.submitting) done();
 }
 
 async function submit() {
@@ -144,12 +176,20 @@ async function submit() {
       exclude: props.server?.exclude || [],
     });
   }
-  emit("submit", { nodeId: form.nodeId, config });
+  emit("submit", { nodeId: form.nodeId, config, archive: archiveFile.value });
 }
 </script>
 
 <template>
-  <el-dialog v-model="open" :title="editing ? '编辑服务器' : '新增服务器'" width="720px">
+  <el-dialog
+    v-model="open"
+    :title="editing ? '编辑服务器' : '新增服务器'"
+    width="720px"
+    :before-close="beforeClose"
+    :close-on-click-modal="!submitting"
+    :close-on-press-escape="!submitting"
+    :show-close="!submitting"
+  >
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
       <el-form-item v-if="!editing" label="目标节点" prop="nodeId">
         <el-select v-model="form.nodeId" class="full-control" placeholder="选择节点">
@@ -198,6 +238,25 @@ async function submit() {
         </el-form-item>
       </template>
 
+      <el-form-item v-if="!editing" label="初始化文件">
+        <el-upload
+          ref="archiveUploadRef"
+          class="archive-upload"
+          accept=".zip,application/zip"
+          :auto-upload="false"
+          :limit="1"
+          :disabled="submitting"
+          :on-change="handleArchiveChange"
+          :on-remove="handleArchiveRemove"
+          :on-exceed="handleArchiveExceed"
+        >
+          <el-button :disabled="submitting">
+            <FileArchive :size="16" />
+            选择 ZIP
+          </el-button>
+        </el-upload>
+      </el-form-item>
+
       <el-divider content-position="left">进程与控制台</el-divider>
       <el-form-item label="启动命令" prop="startCommand">
         <el-input v-model="form.startCommand" type="textarea" :rows="2" />
@@ -226,7 +285,7 @@ async function submit() {
       </div>
     </el-form>
     <template #footer>
-      <el-button @click="open = false">取消</el-button>
+      <el-button :disabled="submitting" @click="open = false">取消</el-button>
       <el-button type="primary" :loading="submitting" @click="submit">保存</el-button>
     </template>
   </el-dialog>

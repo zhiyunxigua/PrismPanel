@@ -2,8 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
 	"sort"
 	"sync"
 )
@@ -34,11 +37,18 @@ type managedConnection struct {
 type Manager struct {
 	logger   *slog.Logger
 	onStatus func(string, RuntimeStatus)
+	onEvent  func(string, string, json.RawMessage)
 
 	mu          sync.RWMutex
 	ctx         context.Context
 	connections map[string]managedConnection
 	statuses    map[string]RuntimeStatus
+}
+
+func (m *Manager) SetEventCallback(callback func(string, string, json.RawMessage)) {
+	m.mu.Lock()
+	m.onEvent = callback
+	m.mu.Unlock()
 }
 
 func NewManager(logger *slog.Logger, onStatus func(string, RuntimeStatus)) *Manager {
@@ -79,6 +89,14 @@ func (m *Manager) Upsert(definition ConnectionDefinition) {
 		m.mu.Unlock()
 		if m.onStatus != nil {
 			m.onStatus(definition.PanelNodeID, status)
+		}
+	})
+	client.SetEventCallback(func(eventType string, data json.RawMessage) {
+		m.mu.RLock()
+		callback := m.onEvent
+		m.mu.RUnlock()
+		if callback != nil {
+			callback(definition.PanelNodeID, eventType, data)
 		}
 	})
 	m.connections[definition.PanelNodeID] = managedConnection{client: client, cancel: cancel}
@@ -138,6 +156,16 @@ func (m *Manager) UploadPlugin(ctx context.Context, panelNodeID, ticket, serverI
 		return ErrDisconnected
 	}
 	return connection.client.UploadPlugin(ctx, ticket, serverID, path, output)
+}
+
+func (m *Manager) FileRequest(ctx context.Context, panelNodeID, operation, method string, headers http.Header, body io.Reader, contentLength int64) (*http.Response, error) {
+	m.mu.RLock()
+	connection, exists := m.connections[panelNodeID]
+	m.mu.RUnlock()
+	if !exists {
+		return nil, ErrDisconnected
+	}
+	return connection.client.FileRequest(ctx, operation, method, headers, body, contentLength)
 }
 
 func (m *Manager) Close() {

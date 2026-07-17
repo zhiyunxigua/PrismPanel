@@ -11,6 +11,7 @@ import { hasPermission } from "../session";
 import ConsoleOutput from "../components/servers/ConsoleOutput.vue";
 import MetricLineChart from "../components/metrics/MetricLineChart.vue";
 import ServerEditorDialog from "../components/servers/ServerEditorDialog.vue";
+import FileManager from "../components/files/FileManager.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -49,6 +50,7 @@ const canConfigure = computed(() => hasPermission("server.configure"));
 const canDeploy = computed(() => hasPermission("server.deploy"));
 const canDelete = computed(() => hasPermission("server.delete"));
 const canReadConsole = computed(() => hasPermission("console.read"));
+const canReadFiles = computed(() => hasPermission("file.read"));
 const canCommand = computed(() => hasPermission("console.command"));
 const canViewPlugins = computed(() => hasPermission("plugin.view"));
 const canDeployPlugins = computed(() => hasPermission("plugin.deploy"));
@@ -745,6 +747,15 @@ onBeforeRouteLeave(async () => {
             <template #empty><div class="table-empty"><Users :size="24" /><span>暂无玩家数据</span></div></template>
           </el-table>
         </section>
+      </el-tab-pane>
+
+      <el-tab-pane v-if="canReadFiles" label="文件" name="files" lazy>
+        <FileManager
+          v-if="server"
+          :node-id="nodeId"
+          :server="server"
+          :instances="instances"
+        />
       </el-tab-pane>
 
       <el-tab-pane v-if="canViewPlugins" label="插件" name="plugins">

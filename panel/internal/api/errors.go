@@ -47,10 +47,16 @@ func writeRequestError(writer http.ResponseWriter, err error) {
 		panelError = apiError("DAEMON_UNAVAILABLE", "守护进程当前不可用")
 	case errors.As(err, &daemonError):
 		switch daemonError.Code {
-		case "SERVER_NOT_FOUND", "INSTANCE_NOT_FOUND":
+		case "SERVER_NOT_FOUND", "INSTANCE_NOT_FOUND", "FILE_NOT_FOUND":
 			status = http.StatusNotFound
-		case "INSTANCE_BUSY", "PORT_CONFLICT", "SERVER_ID_CONFLICT", "DEPLOYMENT_ALREADY_RUNNING":
+		case "INSTANCE_BUSY", "PORT_CONFLICT", "SERVER_ID_CONFLICT", "DEPLOYMENT_ALREADY_RUNNING", "FILE_EXISTS", "FILE_CHANGED":
 			status = http.StatusConflict
+		case "PERMISSION_DENIED", "PATH_ESCAPE":
+			status = http.StatusForbidden
+		case "FILE_TOO_LARGE":
+			status = http.StatusRequestEntityTooLarge
+		case "TOO_MANY_REQUESTS":
+			status = http.StatusTooManyRequests
 		case "INTERNAL", "CONFIG_WRITE_FAILED":
 			status = http.StatusInternalServerError
 		}

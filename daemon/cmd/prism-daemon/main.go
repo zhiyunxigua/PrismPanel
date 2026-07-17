@@ -17,6 +17,7 @@ import (
 	"PrismPanel-daemon/internal/config"
 	"PrismPanel-daemon/internal/deployment"
 	"PrismPanel-daemon/internal/eventbus"
+	fileservice "PrismPanel-daemon/internal/files"
 	pluginservice "PrismPanel-daemon/internal/plugins"
 	"PrismPanel-daemon/internal/secret"
 	serverservice "PrismPanel-daemon/internal/server"
@@ -87,9 +88,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	fileManager := fileservice.NewService(
+		serverService, manager, deploymentManager, cfg.Files.MaxEditFileSize,
+		cfg.Files.MaxUploadFileSize, cfg.Files.MaxExtractedSize, cfg.Files.MaxConcurrentTransfers,
+	)
 	httpServer := api.NewServer(
 		cfg, secretFile.Secret, secretFile.NodeID, serverService, manager, ticketManager,
-		deploymentManager, pluginManager, events, slog.Default(),
+		deploymentManager, pluginManager, fileManager, events, slog.Default(),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

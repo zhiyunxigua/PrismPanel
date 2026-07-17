@@ -144,6 +144,27 @@ type AuditList struct {
 	PageSize int        `json:"page_size"`
 }
 
+type FileOperation struct {
+	ID               string         `json:"id"`
+	RequestID        string         `json:"request_id"`
+	CreatedAt        time.Time      `json:"created_at"`
+	ExpiresAt        time.Time      `json:"expires_at"`
+	CompletedAt      *time.Time     `json:"completed_at,omitempty"`
+	ActorUserID      string         `json:"actor_user_id,omitempty"`
+	SessionID        string         `json:"session_id,omitempty"`
+	ActorUsername    string         `json:"actor_username"`
+	ActorDisplayName string         `json:"actor_display_name"`
+	SourceIP         string         `json:"source_ip"`
+	UserAgent        string         `json:"user_agent"`
+	Action           string         `json:"action"`
+	NodeID           string         `json:"node_id"`
+	ResourceType     string         `json:"resource_type"`
+	ResourceID       string         `json:"resource_id"`
+	Status           string         `json:"status"`
+	ErrorCode        string         `json:"error_code,omitempty"`
+	Detail           map[string]any `json:"detail,omitempty"`
+}
+
 type Node struct {
 	ID              string     `json:"id"`
 	DaemonID        string     `json:"daemon_id"`

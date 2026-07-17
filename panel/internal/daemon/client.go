@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -60,6 +61,7 @@ type Client struct {
 	connectedAt     time.Time
 	lastError       string
 	onStatus        func(RuntimeStatus)
+	onEvent         func(string, json.RawMessage)
 	writeMu         sync.Mutex
 
 	pendingMu sync.Mutex
@@ -96,6 +98,12 @@ type RuntimeStatus struct {
 func (c *Client) SetStatusCallback(callback func(RuntimeStatus)) {
 	c.mu.Lock()
 	c.onStatus = callback
+	c.mu.Unlock()
+}
+
+func (c *Client) SetEventCallback(callback func(string, json.RawMessage)) {
+	c.mu.Lock()
+	c.onEvent = callback
 	c.mu.Unlock()
 }
 
@@ -202,6 +210,13 @@ func (c *Client) readLoop(conn *websocket.Conn) error {
 			return err
 		}
 		if message.Type != "response" || message.RequestID == "" {
+			c.mu.RLock()
+			callback := c.onEvent
+			c.mu.RUnlock()
+			if callback != nil && message.Type != "" {
+				data := append(json.RawMessage(nil), message.Data...)
+				go callback(message.Type, data)
+			}
 			continue
 		}
 		c.pendingMu.Lock()
@@ -219,6 +234,22 @@ func (c *Client) readLoop(conn *websocket.Conn) error {
 			waiter <- result{err: errors.New("daemon request failed")}
 		}
 	}
+}
+
+func (c *Client) FileRequest(ctx context.Context, operation, method string, headers http.Header, body io.Reader, contentLength int64) (*http.Response, error) {
+	endpoint, err := url.Parse(c.baseURL)
+	if err != nil {
+		return nil, err
+	}
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/v1/files/" + strings.Trim(operation, "/")
+	endpoint.RawQuery = ""
+	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
+	if err != nil {
+		return nil, err
+	}
+	request.ContentLength = contentLength
+	request.Header = headers.Clone()
+	return http.DefaultClient.Do(request)
 }
 
 func (c *Client) Call(ctx context.Context, messageType string, input any, output any) error {
