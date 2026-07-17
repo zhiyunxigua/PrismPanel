@@ -5,5 +5,11 @@ import "element-plus/dist/index.css";
 import "./styles.css";
 import App from "./App.vue";
 import router from "./router";
+import { initializeRuntime } from "./runtime";
 
-createApp(App).use(ElementPlus, { locale: zhCn }).use(router).mount("#app");
+async function bootstrap() {
+  await initializeRuntime();
+  createApp(App).use(ElementPlus, { locale: zhCn }).use(router).mount("#app");
+}
+
+bootstrap();

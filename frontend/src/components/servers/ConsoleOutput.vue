@@ -4,6 +4,7 @@ import Convert from "ansi-to-html";
 import { Eraser, RefreshCw, Send } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { request } from "../../api";
+import { websocketURL } from "../../runtime";
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -34,13 +35,6 @@ function createConverter() {
     escapeXML: true,
     stream: true,
   });
-}
-
-function websocketURL(value) {
-  const target = new URL(value, window.location.href);
-  if (target.protocol === "http:") target.protocol = "ws:";
-  if (target.protocol === "https:") target.protocol = "wss:";
-  return target.toString();
 }
 
 function stopConnection() {

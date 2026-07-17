@@ -13,6 +13,7 @@ import {
   Network,
   Package,
   Server,
+  Settings,
   ShieldCheck,
   UserRound,
   Users,
@@ -20,6 +21,7 @@ import {
 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { changePassword, hasPermission, logout, sessionState } from "../session";
+import { isWinApp } from "../runtime";
 
 const route = useRoute();
 const router = useRouter();
@@ -75,6 +77,7 @@ async function signOut() {
 
 function handleUserCommand(command) {
   if (command === "password") passwordDialogOpen.value = true;
+  if (command === "panel") router.push({ name: "panel-setup" });
   if (command === "logout") signOut();
 }
 
@@ -184,6 +187,9 @@ async function submitPassword() {
               <el-dropdown-menu>
                 <el-dropdown-item command="password">
                   <ShieldCheck :size="16" /> 修改密码
+                </el-dropdown-item>
+                <el-dropdown-item v-if="isWinApp()" command="panel">
+                  <Settings :size="16" /> 面板地址
                 </el-dropdown-item>
                 <el-dropdown-item command="logout" divided>
                   <LogOut :size="16" /> 退出登录

@@ -1,8 +1,9 @@
 <script setup>
 import { reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Boxes, LogIn } from "lucide-vue-next";
+import { Boxes, LogIn, Settings } from "lucide-vue-next";
 import { login, sessionState } from "../session";
+import { isWinApp } from "../runtime";
 
 const route = useRoute();
 const router = useRouter();
@@ -54,7 +55,7 @@ async function submit() {
     <section class="login-form-wrap" aria-labelledby="login-title">
       <div class="login-product">
         <span class="login-brand-mark"><Boxes :size="21" /></span>
-        <div><strong>PrismPanel</strong><span>控制面板</span></div>
+        <div><strong>PrismPanel</strong><span>{{ isWinApp() ? "Windows 客户端" : "控制面板" }}</span></div>
       </div>
       <h1 id="login-title">{{ sessionState.initialized ? "登录" : "创建超级管理员" }}</h1>
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent="submit">
@@ -75,6 +76,10 @@ async function submit() {
           {{ sessionState.initialized ? "登录" : "创建并登录" }}
         </el-button>
       </el-form>
+      <el-button v-if="isWinApp()" class="login-panel-settings" text @click="router.push({ name: 'panel-setup' })">
+        <Settings :size="15" />
+        面板地址
+      </el-button>
     </section>
   </main>
 </template>

@@ -1,3 +1,5 @@
+import { apiURL, runtimeHeaders, runtimeConfig } from "./runtime";
+
 export class ApiError extends Error {
 	constructor(code, message, status, requestId = "") {
     super(message);
@@ -9,14 +11,14 @@ export class ApiError extends Error {
 }
 
 export async function request(path, options = {}) {
-  const headers = new Headers(options.headers || {});
+  const headers = runtimeHeaders(options.headers || {});
   if (options.body !== undefined && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(path, {
+  const response = await fetch(apiURL(path), {
     ...options,
     headers,
-    credentials: "same-origin",
+    credentials: runtimeConfig.proxySession ? "omit" : "same-origin",
   });
   let payload;
   try {

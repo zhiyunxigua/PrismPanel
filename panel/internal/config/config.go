@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -41,12 +43,14 @@ type DatabaseConfig struct {
 type AuthConfig struct {
 	CookieName      string `yaml:"cookie_name"`
 	CookieSecure    bool   `yaml:"cookie_secure"`
+	CookieSameSite  string `yaml:"cookie_same_site"`
 	SessionLifetime string `yaml:"session_lifetime"`
 	IdleTimeout     string `yaml:"idle_timeout"`
 }
 
 type SecurityConfig struct {
-	MasterKeyFile string `yaml:"master_key_file"`
+	MasterKeyFile  string   `yaml:"master_key_file"`
+	AllowedOrigins []string `yaml:"allowed_origins"`
 }
 
 type Frontend struct {
@@ -65,9 +69,15 @@ func Default() Config {
 			MaxIdleConns: 5,
 		},
 		Auth: AuthConfig{
-			CookieName: "prism_session", SessionLifetime: "24h", IdleTimeout: "2h",
+			CookieName: "prism_session", CookieSameSite: "lax",
+			SessionLifetime: "24h", IdleTimeout: "2h",
 		},
-		Security: SecurityConfig{MasterKeyFile: "data/master.key"},
+		Security: SecurityConfig{
+			MasterKeyFile: "data/master.key",
+			AllowedOrigins: []string{
+				"wails://wails.localhost", "http://wails.localhost", "https://wails.localhost",
+			},
+		},
 		Frontend: Frontend{Directory: "../frontend/dist"},
 	}
 }
@@ -115,6 +125,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Auth.CookieName) == "" || strings.ContainsAny(c.Auth.CookieName, " ;=\t\r\n") {
 		return errors.New("auth.cookie_name is invalid")
 	}
+	if err := c.Auth.Validate(); err != nil {
+		return err
+	}
 	if _, err := c.SessionLifetime(); err != nil {
 		return err
 	}
@@ -124,10 +137,70 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Security.MasterKeyFile) == "" {
 		return errors.New("security.master_key_file is required")
 	}
+	if err := c.Security.Validate(); err != nil {
+		return err
+	}
 	if c.Frontend.Directory == "" {
 		return errors.New("frontend.directory is required")
 	}
 	return nil
+}
+
+func (c AuthConfig) Validate() error {
+	switch strings.ToLower(strings.TrimSpace(c.CookieSameSite)) {
+	case "", "lax", "strict":
+		return nil
+	case "none":
+		if !c.CookieSecure {
+			return errors.New("auth.cookie_same_site none requires auth.cookie_secure")
+		}
+		return nil
+	default:
+		return errors.New("auth.cookie_same_site must be lax, strict, or none")
+	}
+}
+
+func (c AuthConfig) CookieSameSiteMode() http.SameSite {
+	switch strings.ToLower(strings.TrimSpace(c.CookieSameSite)) {
+	case "strict":
+		return http.SameSiteStrictMode
+	case "none":
+		return http.SameSiteNoneMode
+	default:
+		return http.SameSiteLaxMode
+	}
+}
+
+func (c SecurityConfig) Validate() error {
+	seen := make(map[string]struct{}, len(c.AllowedOrigins))
+	for _, raw := range c.AllowedOrigins {
+		origin, err := NormalizeOrigin(raw)
+		if err != nil {
+			return fmt.Errorf("security.allowed_origins: %w", err)
+		}
+		if _, exists := seen[origin]; exists {
+			return fmt.Errorf("security.allowed_origins contains duplicate origin %q", origin)
+		}
+		seen[origin] = struct{}{}
+	}
+	return nil
+}
+
+func NormalizeOrigin(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || value != raw {
+		return "", errors.New("origin must not be empty or padded")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("origin %q is invalid", raw)
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" && scheme != "wails" {
+		return "", fmt.Errorf("origin %q uses unsupported scheme", raw)
+	}
+	return scheme + "://" + strings.ToLower(parsed.Host), nil
 }
 
 var databaseIdentifierPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)

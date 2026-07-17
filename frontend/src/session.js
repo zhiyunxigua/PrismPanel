@@ -62,6 +62,13 @@ export function hasPermission(permission) {
 	return permissions.includes("*") || permissions.includes(permission);
 }
 
+export function resetSession() {
+  bootstrapPromise = undefined;
+  sessionState.ready = false;
+  sessionState.initialized = true;
+  sessionState.user = null;
+}
+
 window.addEventListener("prism:session-expired", () => {
   sessionState.user = null;
 });

@@ -1,15 +1,16 @@
 import { ApiError, request } from "./api";
+import { apiURL, runtimeHeaders, runtimeConfig } from "./runtime";
 
 const proxyNodes = new Set();
 const mutatingScopes = new Set(["file.edit", "file.upload", "file.import", "file.create", "file.move", "file.delete"]);
 
 export async function fileJSON(authorization, method, body, extraHeaders = {}) {
   return withAuthorization(authorization, async (grant) => {
-    const response = await fetch(grant.endpoint, {
+    const response = await fetch(endpointURL(grant), {
       method,
-      headers: fileHeaders(grant, extraHeaders),
+      headers: grantHeaders(grant, extraHeaders),
       body: body === undefined ? undefined : JSON.stringify(body),
-      credentials: grant.mode === "proxy" ? "same-origin" : "omit",
+      credentials: credentialsFor(grant),
     });
     return decodeJSON(response);
   });
@@ -19,14 +20,14 @@ export async function uploadFile(authorization, file, overwrite = false) {
   return withAuthorization(
     { ...authorization, size: file.size, overwrite },
     async (grant) => {
-      const response = await fetch(grant.endpoint, {
+      const response = await fetch(endpointURL(grant), {
         method: "POST",
-        headers: fileHeaders(grant, {
+        headers: grantHeaders(grant, {
           "Content-Type": file.type || "application/octet-stream",
           "X-Prism-Overwrite": String(overwrite),
         }),
         body: file,
-        credentials: grant.mode === "proxy" ? "same-origin" : "omit",
+        credentials: credentialsFor(grant),
       });
       return decodeJSON(response);
     },
@@ -37,11 +38,11 @@ export async function importArchive(authorization, file) {
   return withAuthorization(
     { ...authorization, size: file.size },
     async (grant) => {
-      const response = await fetch(grant.endpoint, {
+      const response = await fetch(endpointURL(grant), {
         method: "POST",
-        headers: fileHeaders(grant, { "Content-Type": "application/zip" }),
+        headers: grantHeaders(grant, { "Content-Type": "application/zip" }),
         body: file,
-        credentials: grant.mode === "proxy" ? "same-origin" : "omit",
+        credentials: credentialsFor(grant),
       });
       return decodeJSON(response);
     },
@@ -56,10 +57,10 @@ export async function downloadFile(authorization, suggestedName) {
   }
   try {
     const response = await withAuthorization(authorization, async (grant) => {
-      const result = await fetch(grant.endpoint, {
+      const result = await fetch(endpointURL(grant), {
         method: "GET",
-        headers: fileHeaders(grant),
-        credentials: grant.mode === "proxy" ? "same-origin" : "omit",
+        headers: grantHeaders(grant),
+        credentials: credentialsFor(grant),
       });
       if (!result.ok) await decodeJSON(result);
       return result;
@@ -111,6 +112,19 @@ function fileHeaders(grant, extra = {}) {
     "X-Prism-Path": grant.path,
     ...extra,
   };
+}
+
+function endpointURL(grant) {
+  return grant.mode === "proxy" ? apiURL(grant.endpoint) : grant.endpoint;
+}
+
+function grantHeaders(grant, extra = {}) {
+  const headers = fileHeaders(grant, extra);
+  return grant.mode === "proxy" ? runtimeHeaders(headers) : headers;
+}
+function credentialsFor(grant) {
+  if (runtimeConfig.proxySession) return "omit";
+  return grant.mode === "proxy" ? "same-origin" : "omit";
 }
 
 async function decodeJSON(response) {

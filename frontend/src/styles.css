@@ -921,6 +921,9 @@ code {
 }
 .login-submit { width: 100%; margin-top: 4px; }
 .login-submit span { gap: 8px; }
+.login-panel-settings { width: 100%; margin-top: 12px; color: #67716b; }
+.login-panel-settings span { gap: 7px; }
+.login-panel-settings:hover { color: #2f6650; background: #edf3ef; }
 .form-error {
   min-height: 34px;
   margin: -5px 0 13px;

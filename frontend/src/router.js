@@ -1,8 +1,10 @@
 import { createRouter, createWebHashHistory } from "vue-router";
 import { ensureSession, sessionState } from "./session";
+import { isWinApp, runtimeConfig } from "./runtime";
 
 const AppLayout = () => import("./layouts/AppLayout.vue");
 const LoginView = () => import("./views/LoginView.vue");
+const PanelSetupView = () => import("./views/PanelSetupView.vue");
 const OverviewView = () => import("./views/OverviewView.vue");
 const UsersView = () => import("./views/UsersView.vue");
 const NodesView = () => import("./views/NodesView.vue");
@@ -14,6 +16,11 @@ const PlaceholderView = () => import("./views/PlaceholderView.vue");
 
 const routes = [
   {
+    path: "/panel-setup",
+    name: "panel-setup",
+    component: PanelSetupView,
+    meta: { guest: true, desktopSetup: true, title: "面板连接" },
+  },  {
     path: "/login",
     name: "login",
     component: LoginView,
@@ -78,7 +85,13 @@ const router = createRouter({
 });
 
 router.beforeEach(async (to) => {
-  await ensureSession();
+  if (isWinApp() && !runtimeConfig.configured && to.name !== "panel-setup") {
+    return { name: "panel-setup" };
+  }
+  if (to.name === "panel-setup") {
+    if (!isWinApp()) return { name: sessionState.user ? "overview" : "login" };
+    return true;
+  }  await ensureSession();
   if (to.meta.guest && sessionState.user) return { name: "overview" };
   if (!to.meta.guest && !sessionState.user) {
     return { name: "login", query: { redirect: to.fullPath } };

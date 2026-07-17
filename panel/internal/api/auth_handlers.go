@@ -131,7 +131,7 @@ func (s *Server) setSessionCookie(writer http.ResponseWriter, token string) {
 	lifetime, _ := s.config.SessionLifetime()
 	http.SetCookie(writer, &http.Cookie{
 		Name: s.config.Auth.CookieName, Value: token, Path: "/",
-		HttpOnly: true, Secure: s.config.Auth.CookieSecure, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: s.config.Auth.CookieSecure, SameSite: s.config.Auth.CookieSameSiteMode(),
 		MaxAge: int(lifetime.Seconds()),
 	})
 }
@@ -139,7 +139,7 @@ func (s *Server) setSessionCookie(writer http.ResponseWriter, token string) {
 func (s *Server) clearSessionCookie(writer http.ResponseWriter) {
 	http.SetCookie(writer, &http.Cookie{
 		Name: s.config.Auth.CookieName, Value: "", Path: "/",
-		HttpOnly: true, Secure: s.config.Auth.CookieSecure, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: s.config.Auth.CookieSecure, SameSite: s.config.Auth.CookieSameSiteMode(),
 		MaxAge: -1,
 	})
 }
