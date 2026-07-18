@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-func (r *Repository) importFiles(report *ScanReport) {
-	importDir := filepath.Join(r.root, "import")
+func (r *Repository) importFiles(report *ScanReport, pluginType string) {
+	importDir := filepath.Join(r.typeRoot(pluginType), "import")
 	entries, err := os.ReadDir(importDir)
 	if err != nil {
 		report.Warnings = append(report.Warnings, fmt.Sprintf("read import directory: %v", err))
@@ -36,7 +36,8 @@ func (r *Repository) importFiles(report *ScanReport) {
 			}
 		}
 		result, uploadErr := r.Upload(UploadInput{
-			JARFilename: entry.Name(), JAR: contents, ConfigZIP: config, Uploader: repositoryScanner,
+			PluginType: pluginType, JARFilename: entry.Name(),
+			JAR: contents, ConfigZIP: config, Uploader: repositoryScanner,
 		})
 		if uploadErr != nil {
 			report.Warnings = append(report.Warnings, fmt.Sprintf("import %s: %v", entry.Name(), uploadErr))

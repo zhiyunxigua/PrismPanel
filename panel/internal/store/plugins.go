@@ -7,6 +7,7 @@ import (
 )
 
 type PluginArtifactIndex struct {
+	PluginType   string
 	PluginID     string
 	ArtifactID   int64
 	PluginName   string
@@ -26,16 +27,16 @@ func (s *Store) ReplacePluginCatalog(ctx context.Context, artifacts []PluginArti
 		return fmt.Errorf("begin plugin catalog rebuild: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, "DELETE FROM plugin_artifacts"); err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM plugin_artifacts_v2"); err != nil {
 		return fmt.Errorf("clear plugin catalog: %w", err)
 	}
-	statement := "INSERT INTO plugin_artifacts " +
-		"(plugin_id, artifact_id, plugin_name, version, main_class, jar_sha256, " +
+	statement := "INSERT INTO plugin_artifacts_v2 " +
+		"(plugin_type, plugin_id, artifact_id, plugin_name, version, main_class, jar_sha256, " +
 		"config_sha256, current_artifact, manifest, uploaded_at) " +
-		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+		"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 	for _, artifact := range artifacts {
 		if _, err := tx.ExecContext(ctx, statement,
-			artifact.PluginID, artifact.ArtifactID, artifact.PluginName, artifact.Version,
+			artifact.PluginType, artifact.PluginID, artifact.ArtifactID, artifact.PluginName, artifact.Version,
 			artifact.MainClass, artifact.JARSHA256, artifact.ConfigSHA256, artifact.Current,
 			artifact.ManifestJSON, artifact.UploadedAt); err != nil {
 			return fmt.Errorf("index plugin %s artifact %d: %w", artifact.PluginID, artifact.ArtifactID, err)

@@ -38,6 +38,7 @@ func NewManager(cfg config.Config, events *eventbus.Bus, servers []model.ServerC
 		config: cfg, events: events, instances: make(map[string]*instance),
 	}
 	for _, server := range servers {
+		server.Normalize()
 		if err := manager.validateServerLocked(server, ""); err != nil {
 			return nil, fmt.Errorf("validate server %s: %w", server.ServerID, err)
 		}
@@ -137,7 +138,7 @@ func (m *Manager) ApplyServer(server model.ServerConfig) ([]string, error) {
 			current.managed = true
 			current.mu.Unlock()
 		}
-		if info, err := os.Stat(cfg.Workspace); err == nil && info.IsDir() {
+		if info, err := os.Stat(cfg.Workspace); err == nil && info.IsDir() && !model.IsProxyPlatform(cfg.Platform) {
 			if err := writeServerPort(cfg.Workspace, cfg.Port); err != nil {
 				warnings = append(warnings, fmt.Sprintf("%s: %v", id, err))
 			}

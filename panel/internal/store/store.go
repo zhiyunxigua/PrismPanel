@@ -36,7 +36,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Store, error) {
 }
 
 var logicalTablePattern = regexp.MustCompile(
-	`\b(user_permission_overrides|group_permissions|user_groups|sessions|users|nodes|audit_logs|file_operations|plugin_artifacts)\b`,
+	`\b(user_permission_overrides|group_permissions|user_groups|sessions|users|nodes|audit_logs|file_operations|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences)\b`,
 )
 
 type database struct {
@@ -237,7 +237,8 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			KEY idx_file_operations_status (status, expires_at),
 			KEY idx_file_operations_actor (actor_user_id, created_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-		`CREATE TABLE IF NOT EXISTS plugin_artifacts (
+		`CREATE TABLE IF NOT EXISTS plugin_artifacts_v2 (
+			plugin_type VARCHAR(16) CHARACTER SET ascii NOT NULL,
 			plugin_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
 			artifact_id BIGINT UNSIGNED NOT NULL,
 			plugin_name VARCHAR(100) NOT NULL,
@@ -248,11 +249,38 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			current_artifact BOOLEAN NOT NULL DEFAULT FALSE,
 			manifest JSON NOT NULL,
 			uploaded_at DATETIME(6) NOT NULL,
-			PRIMARY KEY (plugin_id, artifact_id),
+			PRIMARY KEY (plugin_type, plugin_id, artifact_id),
+			KEY idx_plugin_artifacts_type (plugin_type, current_artifact),
 			KEY idx_plugin_artifacts_name (plugin_name),
 			KEY idx_plugin_artifacts_version (version),
 			KEY idx_plugin_artifacts_sha256 (jar_sha256),
 			KEY idx_plugin_artifacts_current (current_artifact, plugin_name)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS proxy_sync_owners (
+			proxy_node_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			proxy_server_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (proxy_node_id, proxy_server_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS proxy_sync_rules (
+			proxy_node_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			proxy_server_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			target_node_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			target_server_id VARCHAR(64) CHARACTER SET ascii NOT NULL DEFAULT '',
+			enabled BOOLEAN NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (proxy_node_id, proxy_server_id, target_node_id, target_server_id),
+			KEY idx_proxy_sync_target (target_node_id, target_server_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS plugin_deploy_preferences (
+			plugin_type VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			plugin_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			target_node_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			target_server_id VARCHAR(64) CHARACTER SET ascii NOT NULL DEFAULT '',
+			enabled BOOLEAN NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (plugin_type, plugin_id, target_node_id, target_server_id),
+			KEY idx_plugin_deploy_target (target_node_id, target_server_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 	for _, statement := range statements {

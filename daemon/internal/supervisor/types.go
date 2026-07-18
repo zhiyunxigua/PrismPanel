@@ -35,6 +35,7 @@ type PlayerSnapshot struct {
 	Name     string `json:"name"`
 	Ping     int    `json:"ping"`
 	JoinedAt string `json:"joined_at,omitempty"`
+	ServerID string `json:"server_id,omitempty"`
 }
 
 type LoadedPlugin struct {
@@ -63,6 +64,7 @@ type Snapshot struct {
 	InstanceID           string           `json:"instance_id"`
 	ServerID             string           `json:"server_id"`
 	ServerType           string           `json:"server_type"`
+	Platform             string           `json:"platform"`
 	Slot                 int              `json:"slot,omitempty"`
 	Name                 string           `json:"name"`
 	Workspace            string           `json:"workspace"`
@@ -81,6 +83,8 @@ type Snapshot struct {
 	CPUPercent           *float64         `json:"cpu_percent,omitempty"`
 	MemoryBytes          *uint64          `json:"memory_bytes,omitempty"`
 	PluginConnected      bool             `json:"plugin_connected"`
+	PluginCapabilities   []string         `json:"plugin_capabilities,omitempty"`
+	ProxySync            *ProxySyncStatus `json:"proxy_sync,omitempty"`
 	PluginLastSeen       *time.Time       `json:"plugin_last_seen_at,omitempty"`
 	TPS                  *float64         `json:"tps,omitempty"`
 	MSPT                 *float64         `json:"mspt,omitempty"`
@@ -151,6 +155,10 @@ type instance struct {
 	pluginConnected      bool
 	pluginLastSeen       *time.Time
 	pluginReport         PluginReport
+	pluginCapabilities   []string
+	pluginConnection     *PluginConnection
+	proxyCatalog         *ProxyBackendCatalog
+	proxySync            ProxySyncStatus
 	pluginPendingRestart bool
 	deploymentLocked     bool
 }
@@ -185,7 +193,7 @@ func (i *instance) snapshot() Snapshot {
 	defer i.mu.RUnlock()
 	filePort, _ := readServerPort(i.cfg.Workspace)
 	snapshot := Snapshot{
-		InstanceID: i.cfg.InstanceID, ServerID: i.cfg.ServerID, ServerType: i.cfg.ServerType,
+		InstanceID: i.cfg.InstanceID, ServerID: i.cfg.ServerID, ServerType: i.cfg.ServerType, Platform: i.cfg.Platform,
 		Slot: i.cfg.Slot, Name: i.cfg.Name, Workspace: i.cfg.Workspace, State: i.state,
 		PID: i.pid, SessionID: i.sessionID, ConfiguredPort: i.cfg.Port, FilePort: filePort,
 		RuntimePort: copyInt(i.runtimePort), PendingRestart: i.pluginPendingRestart || i.runtimePort != nil &&
@@ -194,7 +202,8 @@ func (i *instance) snapshot() Snapshot {
 		DeploymentLocked:     i.deploymentLocked,
 		StartedAt:            i.startedAt, LastError: i.lastError, ConsoleSequence: i.sequence,
 		CPUPercent: copyFloat64(i.cpuPercent), MemoryBytes: copyUint64(i.memoryBytes),
-		PluginConnected: i.pluginConnected, PluginLastSeen: copyTime(i.pluginLastSeen),
+		PluginConnected: i.pluginConnected, PluginCapabilities: append([]string(nil), i.pluginCapabilities...),
+		PluginLastSeen: copyTime(i.pluginLastSeen), ProxySync: copyProxySync(i.proxySync),
 	}
 	if i.pluginConnected {
 		snapshot.TPS = copyFloat64(i.pluginReport.TPS)
@@ -239,6 +248,14 @@ func copyTime(value *time.Time) *time.Time {
 		return nil
 	}
 	copied := *value
+	return &copied
+}
+
+func copyProxySync(value ProxySyncStatus) *ProxySyncStatus {
+	if value.State == "" {
+		return nil
+	}
+	copied := value
 	return &copied
 }
 

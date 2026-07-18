@@ -21,7 +21,9 @@ func (r *Repository) Rescan() (ScanReport, error) {
 	}
 	r.mu.Unlock()
 
-	r.importFiles(&report)
+	for _, pluginType := range []string{PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee} {
+		r.importFiles(&report, pluginType)
+	}
 	plugins, err := r.List()
 	if err != nil {
 		return report, err
@@ -31,23 +33,25 @@ func (r *Repository) Rescan() (ScanReport, error) {
 }
 
 func (r *Repository) repairLocked(report *ScanReport) error {
-	entries, err := os.ReadDir(r.root)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "import" || !pluginIDPattern.MatchString(entry.Name()) {
-			continue
+	for _, pluginType := range []string{PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee} {
+		entries, err := os.ReadDir(r.typeRoot(pluginType))
+		if err != nil {
+			return err
 		}
-		if err := r.repairPluginLocked(entry.Name(), report); err != nil {
-			report.Warnings = append(report.Warnings, fmt.Sprintf("%s: %v", entry.Name(), err))
+		for _, entry := range entries {
+			if !entry.IsDir() || entry.Name() == "import" || !pluginIDPattern.MatchString(entry.Name()) {
+				continue
+			}
+			if err := r.repairPluginLocked(pluginType, entry.Name(), report); err != nil {
+				report.Warnings = append(report.Warnings, fmt.Sprintf("%s/%s: %v", pluginType, entry.Name(), err))
+			}
 		}
 	}
 	return nil
 }
 
-func (r *Repository) repairPluginLocked(pluginID string, report *ScanReport) error {
-	pluginDir := filepath.Join(r.root, pluginID)
+func (r *Repository) repairPluginLocked(pluginType, pluginID string, report *ScanReport) error {
+	pluginDir := filepath.Join(r.typeRoot(pluginType), pluginID)
 	entries, err := os.ReadDir(pluginDir)
 	if err != nil {
 		return err
@@ -74,6 +78,7 @@ func (r *Repository) repairPluginLocked(pluginID string, report *ScanReport) err
 			report.Warnings = append(report.Warnings, fmt.Sprintf("%s/%d invalid manifest: %v", pluginID, id, readErr))
 			continue
 		}
+		manifest.PluginType = pluginType
 		observed, observeErr := inspectArtifact(pluginID, id, artifactDir, manifest)
 		if observeErr != nil {
 			report.Warnings = append(report.Warnings, fmt.Sprintf("%s/%d unreadable: %v", pluginID, id, observeErr))
@@ -122,7 +127,8 @@ func (r *Repository) repairPluginLocked(pluginID string, report *ScanReport) err
 		}
 	}
 	index = Index{
-		SchemaVersion: manifestSchemaVersion, PluginID: pluginID, Name: name,
+		SchemaVersion: manifestSchemaVersion, PluginID: pluginID, PluginType: pluginType,
+		Name: name, AutoInstall: index.AutoInstall,
 		CurrentArtifactID: currentID, NextArtifactID: nextID,
 	}
 	return atomicYAML(filepath.Join(pluginDir, "index.yaml"), index)

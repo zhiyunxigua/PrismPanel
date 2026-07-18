@@ -4,40 +4,34 @@ import { ArchiveRestore, Boxes, Package, Plus, RefreshCw, Search, Upload } from 
 import { ElMessage } from "element-plus";
 import { request } from "../api";
 import { hasPermission } from "../session";
+import TargetSelectionTree from "../components/TargetSelectionTree.vue";
 
 const loading = ref(false);
 const submitting = ref(false);
 const catalog = ref([]);
 const nodeContents = ref([]);
 const search = ref("");
+const typeFilter = ref("");
 const uploadOpen = ref(false);
 const deployOpen = ref(false);
 const uploadJAR = ref(null);
 const uploadConfig = ref(null);
-const uploadForm = ref({ configDirectory: "" });
-const deployForm = ref({ pluginId: "", artifactId: null, target: "" });
+const uploadForm = ref({ pluginType: "spigot", autoInstall: false, configDirectory: "" });
+const deployForm = ref({ pluginType: "spigot", pluginId: "", artifactId: null, rules: [] });
 
 const canUpload = computed(() => hasPermission("plugin.upload"));
 const canDeploy = computed(() => hasPermission("plugin.deploy"));
 const filteredCatalog = computed(() => {
   const keyword = search.value.trim().toLowerCase();
-  if (!keyword) return catalog.value;
   return catalog.value.filter((item) => {
     const artifact = currentArtifact(item);
-    return [item.name, item.plugin_id, artifact?.version, artifact?.main]
-      .join(" ").toLowerCase().includes(keyword);
+    return (!typeFilter.value || item.plugin_type === typeFilter.value)
+      && (!keyword || [item.name, item.plugin_id, artifact?.version, artifact?.main]
+        .join(" ").toLowerCase().includes(keyword));
   });
 });
-const deployPlugin = computed(() => catalog.value.find((item) => item.plugin_id === deployForm.value.pluginId));
-const deployTargets = computed(() => nodeContents.value.flatMap((content) => (
-  (content.servers || []).map((item) => ({
-    value: content.node.id + ":" + item.server_id,
-    nodeId: content.node.id,
-    serverId: item.server_id,
-    label: item.name,
-    nodeName: content.node.name,
-    type: item.type,
-  }))
+const deployPlugin = computed(() => catalog.value.find((item) => (
+  item.plugin_id === deployForm.value.pluginId && item.plugin_type === deployForm.value.pluginType
 )));
 
 function currentArtifact(plugin) {
@@ -69,7 +63,7 @@ function clearConfig() { uploadConfig.value = null; }
 function resetUpload() {
   uploadJAR.value = null;
   uploadConfig.value = null;
-  uploadForm.value = { configDirectory: "" };
+  uploadForm.value = { pluginType: "spigot", autoInstall: false, configDirectory: "" };
 }
 
 async function uploadPlugin() {
@@ -81,6 +75,8 @@ async function uploadPlugin() {
   try {
     const body = new FormData();
     body.append("jar", uploadJAR.value);
+    body.append("plugin_type", uploadForm.value.pluginType);
+    body.append("auto_install", String(uploadForm.value.autoInstall));
     if (uploadConfig.value) body.append("config", uploadConfig.value);
     if (uploadForm.value.configDirectory.trim()) {
       body.append("config_directory", uploadForm.value.configDirectory.trim());
@@ -112,30 +108,41 @@ async function rescan() {
   }
 }
 
-function openDeploy(plugin, artifact = currentArtifact(plugin)) {
+async function openDeploy(plugin, artifact = currentArtifact(plugin)) {
   deployForm.value = {
+    pluginType: plugin.plugin_type,
     pluginId: plugin.plugin_id,
     artifactId: artifact?.artifact_id || null,
-    target: deployTargets.value[0]?.value || "",
+    rules: [],
   };
   deployOpen.value = true;
+  try {
+    const query = "?plugin_type=" + encodeURIComponent(plugin.plugin_type)
+      + "&plugin_id=" + encodeURIComponent(plugin.plugin_id);
+    const data = await request("/api/v1/plugin-deploy-preferences" + query);
+    deployForm.value.rules = data.rules || [];
+  } catch (error) {
+    ElMessage.error(error.message);
+  }
 }
 
 async function deploy() {
-  const target = deployTargets.value.find((item) => item.value === deployForm.value.target);
-  if (!target || !deployForm.value.artifactId) {
-    ElMessage.warning("请选择制品版本和服务器组");
+  if (!deployForm.value.artifactId) {
+    ElMessage.warning("请选择制品版本");
     return;
   }
   submitting.value = true;
   try {
-    const path = "/api/v1/plugins/" + encodeURIComponent(deployForm.value.pluginId) + "/" +
-      encodeURIComponent(deployForm.value.artifactId) + "/deploy?node_id=" + encodeURIComponent(target.nodeId);
+    const path = "/api/v1/plugins/" + encodeURIComponent(deployForm.value.pluginType) + "/"
+      + encodeURIComponent(deployForm.value.pluginId) + "/"
+      + encodeURIComponent(deployForm.value.artifactId) + "/deploy";
     const result = await request(path, {
-      method: "POST", body: JSON.stringify({ server_id: target.serverId }),
+      method: "POST", body: JSON.stringify({ rules: deployForm.value.rules }),
     });
+    const failed = (result.targets || []).filter((item) => item.error);
+    if (failed.length) ElMessage.warning("部署完成，其中 " + failed.length + " 个目标失败");
+    else ElMessage.success("插件已部署到 " + (result.targets?.length || 0) + " 个服务器");
     deployOpen.value = false;
-    ElMessage.success(result.pending_restart ? "部署完成，运行中的子服需要重启" : "插件已部署");
   } catch (error) {
     ElMessage.error(error.message);
   } finally {
@@ -184,10 +191,15 @@ onMounted(load);
       <el-input v-model="search" class="search-input" clearable placeholder="搜索名称、版本或主类">
         <template #prefix><Search :size="15" /></template>
       </el-input>
+      <el-select v-model="typeFilter" class="status-filter" clearable placeholder="全部平台">
+        <el-option label="Spigot / Paper" value="spigot" />
+        <el-option label="Velocity" value="velocity" />
+        <el-option label="BungeeCord" value="bungee" />
+      </el-select>
     </div>
 
     <div v-loading="loading" class="table-frame plugin-repository-table">
-      <el-table :data="filteredCatalog" row-key="plugin_id">
+      <el-table :data="filteredCatalog" :row-key="(row) => row.plugin_type + ':' + row.plugin_id">
         <el-table-column type="expand">
           <template #default="{ row }">
             <div class="artifact-list">
@@ -211,6 +223,18 @@ onMounted(load);
               <span class="node-symbol"><Package :size="16" /></span>
               <div><strong>{{ row.name }}</strong><small>{{ currentArtifact(row)?.main || row.plugin_id }}</small></div>
             </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="平台" width="130">
+          <template #default="{ row }">
+            <el-tag effect="plain">{{ row.plugin_type === "spigot" ? "Spigot / Paper" : row.plugin_type }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="新服安装" width="110">
+          <template #default="{ row }">
+            <el-tag :type="row.auto_install ? 'success' : 'info'" effect="plain">
+              {{ row.auto_install ? "自动" : "手动" }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="当前版本" width="130">
@@ -239,6 +263,18 @@ onMounted(load);
 
   <el-dialog v-model="uploadOpen" title="上传插件制品" width="min(560px, 94vw)" @closed="resetUpload">
     <el-form label-position="top">
+      <div class="dialog-form-grid">
+        <el-form-item label="插件平台" required>
+          <el-select v-model="uploadForm.pluginType" class="full-control">
+            <el-option label="Spigot / Paper" value="spigot" />
+            <el-option label="Velocity" value="velocity" />
+            <el-option label="BungeeCord" value="bungee" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="新服务器自动安装">
+          <el-switch v-model="uploadForm.autoInstall" />
+        </el-form-item>
+      </div>
       <el-form-item label="插件 JAR" required>
         <el-upload :auto-upload="false" :limit="1" accept=".jar" :on-change="handleJAR" :on-remove="clearJAR">
           <el-button><Package :size="15" />选择 JAR</el-button>
@@ -259,7 +295,7 @@ onMounted(load);
     </template>
   </el-dialog>
 
-  <el-dialog v-model="deployOpen" title="部署插件" width="min(520px, 94vw)">
+  <el-dialog v-model="deployOpen" title="部署插件" width="min(720px, 94vw)">
     <el-form label-position="top">
       <el-form-item label="插件"><el-input :model-value="deployPlugin?.name" disabled /></el-form-item>
       <el-form-item label="制品版本" required>
@@ -272,12 +308,13 @@ onMounted(load);
           />
         </el-select>
       </el-form-item>
-      <el-form-item label="服务器组" required>
-        <el-select v-model="deployForm.target" class="full-control" filterable>
-          <el-option v-for="target in deployTargets" :key="target.value" :value="target.value" :label="target.label">
-            <div class="deploy-target-option"><span>{{ target.label }}</span><small>{{ target.nodeName }} · {{ target.type === "mirror" ? "镜像组" : "固定实例" }}</small></div>
-          </el-option>
-        </el-select>
+      <el-form-item label="部署目标">
+        <TargetSelectionTree
+          v-model="deployForm.rules"
+          :nodes="nodeContents"
+          :plugin-type="deployForm.pluginType"
+          :disabled="submitting"
+        />
       </el-form-item>
     </el-form>
     <template #footer>

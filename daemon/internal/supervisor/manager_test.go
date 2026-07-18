@@ -25,7 +25,7 @@ func TestProcessLifecycleAndConsole(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	server := model.ServerConfig{
-		SchemaVersion: 1, Type: "standalone", ServerID: "test", Name: "Test",
+		SchemaVersion: model.SchemaVersion, Type: "standalone", ServerID: "test", Name: "Test",
 		Workspace: workspace, Port: 25565,
 		Process: model.ProcessConfig{
 			StartCommand: string('"') + helperPath + string('"') + " --fake-server",
@@ -69,7 +69,7 @@ func TestProcessLifecycleAndConsole(t *testing.T) {
 
 func TestManagerRegistersMirrorInstances(t *testing.T) {
 	server := model.ServerConfig{
-		SchemaVersion: 1, Type: "mirror", ServerID: "bedwars", Name: "BedWars",
+		SchemaVersion: model.SchemaVersion, Type: "mirror", ServerID: "bedwars", Name: "BedWars",
 		RootPath: t.TempDir(), ImageDirectory: "image", InstanceCount: 2,
 		Ports: []int{25571, 25572},
 		Process: model.ProcessConfig{

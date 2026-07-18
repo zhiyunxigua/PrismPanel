@@ -86,10 +86,11 @@ async function submitPassword() {
   if (!valid) return;
   passwordSubmitting.value = true;
   try {
-    await changePassword(passwordForm.value.currentPassword, passwordForm.value.newPassword);
+    const result = await changePassword(passwordForm.value.currentPassword, passwordForm.value.newPassword);
     passwordDialogOpen.value = false;
     passwordForm.value = { currentPassword: "", newPassword: "", confirmPassword: "" };
-    ElMessage.success("密码已更新");
+    if (result?.warning) ElMessage.warning(result.warning);
+    else ElMessage.success("密码已更新");
   } catch (error) {
     ElMessage.error(error.message);
   } finally {

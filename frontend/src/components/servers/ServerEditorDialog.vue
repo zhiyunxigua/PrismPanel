@@ -2,12 +2,16 @@
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import { FileArchive } from "lucide-vue-next";
+import TargetSelectionTree from "../TargetSelectionTree.vue";
+import { request } from "../../api";
+import { hasPermission } from "../../session";
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   server: { type: Object, default: null },
   nodeId: { type: String, default: "" },
   nodes: { type: Array, default: () => [] },
+  nodeContents: { type: Array, default: () => [] },
   submitting: { type: Boolean, default: false },
 });
 const emit = defineEmits(["update:modelValue", "submit"]);
@@ -15,9 +19,15 @@ const emit = defineEmits(["update:modelValue", "submit"]);
 const formRef = ref();
 const archiveUploadRef = ref();
 const archiveFile = ref(null);
+const proxyTargetsLoading = ref(false);
+const proxyTargetsReady = ref(true);
+const proxyTargetDefaults = ref(new Map());
+let proxyTargetRequest = 0;
+let resettingForm = false;
 const form = reactive({
   nodeId: "",
-  type: "standalone",
+  kind: "ordinary",
+  platform: "paper",
   serverId: "",
   name: "",
   workspace: "",
@@ -32,6 +42,8 @@ const form = reactive({
   autoStart: false,
   autoRestart: false,
   encoding: "utf-8",
+  proxyRules: [],
+  proxyTargets: [],
 });
 
 const open = computed({
@@ -42,11 +54,73 @@ const open = computed({
   },
 });
 const editing = computed(() => Boolean(props.server));
+const canConfigureProxy = computed(() => hasPermission("server.configure"));
 const availableNodes = computed(() => props.nodes.map((item) => item.node || item));
 const typeOptions = [
-  { label: "固定实例", value: "standalone" },
-  { label: "镜像组", value: "mirror" },
+  { label: "普通服务器", value: "ordinary" },
+  { label: "镜像服", value: "mirror" },
+  { label: "代理服", value: "proxy" },
 ];
+const platformOptions = computed(() => (
+  form.kind === "proxy"
+    ? [{ label: "Velocity", value: "velocity" }, { label: "BungeeCord", value: "bungee" }]
+    : [{ label: "Paper", value: "paper" }, { label: "Spigot", value: "spigot" }]
+));
+const proxyOptions = computed(() => props.nodeContents.flatMap((content) => (
+  (content.servers || [])
+    .filter((server) => ["velocity", "bungee"].includes(server.platform))
+    .map((server) => ({
+      node_id: content.node.id,
+      server_id: server.server_id,
+    }))
+)));
+
+function proxyTargetKey(nodeId, serverId) {
+  return nodeId + "\x00" + serverId;
+}
+
+function selectedByTargetRules(rules, nodeId, serverId) {
+  const serverRule = rules.find((rule) => rule.node_id === nodeId && rule.server_id === serverId);
+  if (serverRule) return Boolean(serverRule.enabled);
+  const nodeRule = rules.find((rule) => rule.node_id === nodeId && !rule.server_id);
+  return Boolean(nodeRule?.enabled);
+}
+
+async function loadProxyTargetDefaults() {
+  const requestID = ++proxyTargetRequest;
+  form.proxyTargets = [];
+  proxyTargetDefaults.value = new Map();
+  if (editing.value || form.kind === "proxy" || !form.nodeId || !canConfigureProxy.value || !proxyOptions.value.length) {
+    proxyTargetsLoading.value = false;
+    proxyTargetsReady.value = true;
+    return;
+  }
+  proxyTargetsLoading.value = true;
+  proxyTargetsReady.value = false;
+  try {
+    const query = "?target_node_id=" + encodeURIComponent(form.nodeId);
+    const data = await request("/api/v1/proxy-sync-rules" + query);
+    if (requestID !== proxyTargetRequest) return;
+    const selected = new Map((data.proxies || []).map((item) => (
+      [proxyTargetKey(item.node_id, item.server_id), Boolean(item.selected)]
+    )));
+    const defaults = new Map();
+    form.proxyTargets = proxyOptions.value.map((item) => {
+      const enabled = selected.get(proxyTargetKey(item.node_id, item.server_id)) ?? false;
+      defaults.set(proxyTargetKey(item.node_id, item.server_id), enabled);
+      return { node_id: item.node_id, server_id: item.server_id, enabled };
+    });
+    proxyTargetDefaults.value = defaults;
+    proxyTargetsReady.value = true;
+  } catch (error) {
+    if (requestID === proxyTargetRequest) {
+      ElMessage.error("读取代理服默认同步规则失败：" + error.message);
+    }
+  } finally {
+    if (requestID === proxyTargetRequest) proxyTargetsLoading.value = false;
+  }
+}
+
 const rules = {
   nodeId: [{ required: true, message: "请选择目标节点", trigger: "change" }],
   serverId: [
@@ -61,9 +135,13 @@ const rules = {
 function resetForm() {
   const source = props.server;
   const firstOnline = availableNodes.value.find((node) => node.status === "ONLINE");
+  resettingForm = true;
   Object.assign(form, {
     nodeId: props.nodeId || firstOnline?.id || availableNodes.value[0]?.id || "",
-    type: source?.type || "standalone",
+    kind: source?.type === "mirror"
+      ? "mirror"
+      : (["velocity", "bungee"].includes(source?.platform) ? "proxy" : "ordinary"),
+    platform: source?.platform || "paper",
     serverId: source?.server_id || "",
     name: source?.name || "",
     workspace: source?.workspace || "",
@@ -78,14 +156,33 @@ function resetForm() {
     autoStart: source?.process?.auto_start || false,
     autoRestart: source?.process?.auto_restart || false,
     encoding: source?.console?.encoding || "utf-8",
+    proxyRules: [],
+    proxyTargets: [],
   });
+  resettingForm = false;
   archiveFile.value = null;
   nextTick(() => archiveUploadRef.value?.clearFiles());
   formRef.value?.clearValidate();
 }
 
 watch(() => props.modelValue, (value) => {
-  if (value) resetForm();
+  if (value) {
+    resetForm();
+    void loadProxyTargetDefaults();
+  }
+});
+watch(() => form.kind, (value) => {
+  if (value === "proxy" && !["velocity", "bungee"].includes(form.platform)) form.platform = "velocity";
+  if (value !== "proxy" && !["paper", "spigot"].includes(form.platform)) form.platform = "paper";
+  if (open.value && !editing.value && !resettingForm) void loadProxyTargetDefaults();
+});
+watch(() => form.nodeId, () => {
+  if (open.value && !editing.value && form.kind !== "proxy" && !resettingForm) {
+    void loadProxyTargetDefaults();
+  }
+});
+watch(() => proxyOptions.value.map((item) => proxyTargetKey(item.node_id, item.server_id)).join("|"), () => {
+  if (open.value && !editing.value && form.kind !== "proxy") void loadProxyTargetDefaults();
 });
 
 function parsePorts() {
@@ -126,7 +223,7 @@ function beforeClose(done) {
 async function submit() {
   const valid = await formRef.value?.validate().catch(() => false);
   if (!valid) return;
-  if (form.type === "standalone") {
+  if (form.kind !== "mirror") {
     if (!form.workspace.trim()) {
       ElMessage.warning("请输入服务器工作目录");
       return;
@@ -137,7 +234,7 @@ async function submit() {
     }
   }
   const ports = parsePorts();
-  if (form.type === "mirror") {
+  if (form.kind === "mirror") {
     if (!form.rootPath.trim() || !form.imageDirectory.trim()) {
       ElMessage.warning("请输入镜像组根目录和镜像目录");
       return;
@@ -151,9 +248,25 @@ async function submit() {
       return;
     }
   }
+  let proxyTargets = null;
+  if (!editing.value && form.kind !== "proxy" && canConfigureProxy.value) {
+    if (proxyTargetsLoading.value || !proxyTargetsReady.value) {
+      ElMessage.warning("代理服同步规则尚未读取完成");
+      return;
+    }
+    proxyTargets = proxyOptions.value.flatMap((item) => {
+      const key = proxyTargetKey(item.node_id, item.server_id);
+      const selected = selectedByTargetRules(form.proxyTargets, item.node_id, item.server_id);
+      const inherited = proxyTargetDefaults.value.get(key) ?? false;
+      return selected === inherited
+        ? []
+        : [{ node_id: item.node_id, server_id: item.server_id, enabled: selected }];
+    });
+  }
   const config = {
-    schema_version: 1,
-    type: form.type,
+    schema_version: 2,
+    type: form.kind === "mirror" ? "mirror" : "standalone",
+    platform: form.platform,
     server_id: form.serverId,
     name: form.name.trim(),
     process: {
@@ -165,7 +278,7 @@ async function submit() {
     },
     console: { encoding: form.encoding },
   };
-  if (form.type === "standalone") {
+  if (form.kind !== "mirror") {
     Object.assign(config, { workspace: form.workspace.trim(), port: form.port });
   } else {
     Object.assign(config, {
@@ -176,7 +289,13 @@ async function submit() {
       exclude: props.server?.exclude || [],
     });
   }
-  emit("submit", { nodeId: form.nodeId, config, archive: archiveFile.value });
+  emit("submit", {
+    nodeId: form.nodeId,
+    config,
+    archive: archiveFile.value,
+    proxyRules: canConfigureProxy.value ? form.proxyRules : null,
+    proxyTargets,
+  });
 }
 </script>
 
@@ -201,9 +320,16 @@ async function submit() {
           />
         </el-select>
       </el-form-item>
-      <el-form-item label="服务器类型">
-        <el-segmented v-model="form.type" :options="typeOptions" :disabled="editing" />
-      </el-form-item>
+      <div class="dialog-form-grid">
+        <el-form-item label="服务器类型">
+          <el-segmented v-model="form.kind" :options="typeOptions" :disabled="editing" />
+        </el-form-item>
+        <el-form-item label="服务端平台">
+          <el-select v-model="form.platform" class="full-control" :disabled="editing">
+            <el-option v-for="item in platformOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+        </el-form-item>
+      </div>
       <div class="dialog-form-grid">
         <el-form-item label="服务器 ID" prop="serverId">
           <el-input v-model="form.serverId" :disabled="editing" placeholder="survival" />
@@ -213,7 +339,7 @@ async function submit() {
         </el-form-item>
       </div>
 
-      <template v-if="form.type === 'standalone'">
+      <template v-if="form.kind !== 'mirror'">
         <el-form-item label="工作目录">
           <el-input v-model="form.workspace" placeholder="/srv/minecraft/survival" />
         </el-form-item>
@@ -237,6 +363,23 @@ async function submit() {
           <el-input v-model="form.portsText" placeholder="25565, 25566, 25567" />
         </el-form-item>
       </template>
+
+      <el-form-item v-if="!editing && form.kind === 'proxy' && canConfigureProxy" label="初始下游服务器">
+        <TargetSelectionTree v-model="form.proxyRules" :nodes="nodeContents" exclude-proxy :disabled="submitting" />
+      </el-form-item>
+      <el-form-item
+        v-if="!editing && form.kind !== 'proxy' && canConfigureProxy && proxyOptions.length"
+        label="同步到代理服"
+      >
+        <div v-loading="proxyTargetsLoading" class="full-control">
+          <TargetSelectionTree
+            v-model="form.proxyTargets"
+            :nodes="nodeContents"
+            proxy-only
+            :disabled="submitting || proxyTargetsLoading"
+          />
+        </div>
+      </el-form-item>
 
       <el-form-item v-if="!editing" label="初始化文件">
         <el-upload

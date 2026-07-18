@@ -16,6 +16,26 @@ export async function configurePanelURL(panelURL) {
   return replaceRuntime(await app.ConfigurePanelURL(panelURL));
 }
 
+export async function savedAccounts() {
+  return callWinApp("SavedAccounts");
+}
+
+export async function loginWinApp(username, password, remember) {
+  return callWinApp("Login", username, password, Boolean(remember));
+}
+
+export async function loginSavedAccountWinApp(accountID) {
+  return callWinApp("LoginSavedAccount", accountID);
+}
+
+export async function deleteSavedAccountWinApp(accountID) {
+  return callWinApp("DeleteSavedAccount", accountID);
+}
+
+export async function updateSavedPasswordWinApp(username, password) {
+  return callWinApp("UpdateSavedPassword", username, password);
+}
+
 export function isWinApp() {
   return runtime.mode === "winapp";
 }
@@ -55,4 +75,12 @@ function replaceRuntime(value) {
   Object.assign(runtime, value || {});
   window.__PRISM_RUNTIME__ = runtime;
   return runtime;
+}
+
+function callWinApp(method, ...args) {
+  const operation = window.go?.main?.App?.[method];
+  if (typeof operation !== "function") {
+    throw new Error("Windows 客户端登录服务不可用");
+  }
+  return operation(...args);
 }

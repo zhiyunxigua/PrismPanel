@@ -11,14 +11,22 @@ import (
 	"time"
 
 	"PrismPanel-daemon/internal/apperr"
+	"PrismPanel-daemon/internal/model"
 )
 
 func (s *Service) Deploy(serverID, bundlePath string) (OperationResult, error) {
+	server, err := s.servers.Get(serverID)
+	if err != nil {
+		return OperationResult{}, err
+	}
 	bundle, cleanup, err := prepareBundle(bundlePath)
 	if err != nil {
 		return OperationResult{}, apperr.Wrap("INVALID_PLUGIN_BUNDLE", "plugin bundle is invalid", err)
 	}
 	defer cleanup()
+	if bundle.plugin.PluginType != model.PluginTypeForPlatform(server.Platform) {
+		return OperationResult{}, apperr.New("PLUGIN_TYPE_MISMATCH", "plugin type does not match target server platform")
+	}
 	targets, release, err := s.targets(serverID)
 	if err != nil {
 		return OperationResult{}, err
@@ -27,7 +35,9 @@ func (s *Service) Deploy(serverID, bundlePath string) (OperationResult, error) {
 	result := OperationResult{ServerID: serverID, PluginName: bundle.plugin.Name, Version: bundle.plugin.Version}
 	var targetErrors []error
 	for _, target := range targets {
-		item, applyErr := s.applyOrQueue(target, pendingOperation{Type: "deploy", PluginName: bundle.plugin.Name}, bundlePath,
+		item, applyErr := s.applyOrQueue(target, pendingOperation{
+			Type: "deploy", PluginType: bundle.plugin.PluginType, PluginName: bundle.plugin.Name,
+		}, bundlePath,
 			func() error { return deployBundleToWorkspace(target.Workspace, bundle) })
 		result.Targets = append(result.Targets, item)
 		result.PendingRestart = result.PendingRestart || item.PendingRestart
@@ -37,6 +47,78 @@ func (s *Service) Deploy(serverID, bundlePath string) (OperationResult, error) {
 	}
 	if len(targetErrors) > 0 {
 		return result, apperr.Wrap("PLUGIN_DEPLOY_FAILED", "plugin deployment failed", errors.Join(targetErrors...))
+	}
+	return result, nil
+}
+
+func (s *Service) UploadInstance(instanceID, jarPath, originalFilename string, overwrite bool) (InstanceUploadResult, error) {
+	snapshot, err := s.supervisor.Get(instanceID)
+	if err != nil {
+		return InstanceUploadResult{}, err
+	}
+	pluginType := model.PluginTypeForPlatform(snapshot.Platform)
+	bundle, err := prepareUploadedJAR(jarPath, originalFilename, pluginType)
+	if err != nil {
+		return InstanceUploadResult{}, apperr.Wrap("INVALID_PLUGIN", "上传文件不是有效的服务端插件", err)
+	}
+	result := InstanceUploadResult{
+		InstanceID: instanceID, PluginType: bundle.plugin.PluginType,
+		PluginName: bundle.plugin.Name, Version: bundle.plugin.Version,
+	}
+	release, err := s.supervisor.ReserveDeployment([]string{instanceID})
+	if err != nil {
+		return result, err
+	}
+	defer release()
+
+	// Keep conflict detection and installation under one reservation so
+	// concurrent uploads cannot both pass the duplicate check.
+	snapshot, err = s.supervisor.Get(instanceID)
+	if err != nil {
+		return result, err
+	}
+	pluginDir := filepath.Join(snapshot.Workspace, "plugins")
+	existing, existingPath, err := findPluginDetails(pluginDir, bundle.plugin.Name, pluginType)
+	if err != nil {
+		return result, apperr.Wrap("PLUGIN_NAME_CONFLICT", "当前子服存在多个同名插件文件", err)
+	}
+	if existingPath != "" {
+		result.ExistingFile = existing.SourceFile
+		result.ExistingVersion = existing.Version
+		result.SourceFile = existing.SourceFile
+		if !overwrite {
+			result.Outcome = "conflict"
+			return result, apperr.New("PLUGIN_EXISTS", "当前子服已安装同名插件")
+		}
+		result.Replaced = true
+	} else {
+		result.SourceFile = sanitizeJARFilename(originalFilename, bundle.plugin.Name, bundle.plugin.Version)
+		if pathExists(filepath.Join(pluginDir, result.SourceFile)) {
+			return result, apperr.New("PLUGIN_FILE_CONFLICT", "插件目标文件名已被其他文件占用")
+		}
+	}
+
+	target := operationTarget{
+		ID: instanceID, Workspace: snapshot.Workspace, Running: snapshot.State == "running",
+		PluginType: pluginType,
+	}
+	operation := pendingOperation{
+		Type: "upload", PluginType: pluginType,
+		PluginName: bundle.plugin.Name, OriginalFilename: originalFilename,
+	}
+	targetResult, applyErr := s.applyOrQueue(
+		target, operation, jarPath, func() error { return deployBundleToWorkspace(snapshot.Workspace, bundle) },
+	)
+	result.PendingRestart = targetResult.PendingRestart
+	if applyErr != nil {
+		return result, apperr.Wrap("PLUGIN_UPLOAD_FAILED", "插件上传失败", applyErr)
+	}
+	if targetResult.Status == "pending" {
+		result.Outcome = "queued"
+	} else if result.Replaced {
+		result.Outcome = "replaced"
+	} else {
+		result.Outcome = "installed"
 	}
 	return result, nil
 }
@@ -143,6 +225,12 @@ func (s *Service) applyPending(instanceID, workspace string) error {
 			}
 			defer cleanup()
 			return deployBundleToWorkspace(workspace, bundle)
+		case "upload":
+			bundle, err := prepareUploadedJAR(bundlePath, operation.OriginalFilename, operation.PluginType)
+			if err != nil {
+				return err
+			}
+			return deployBundleToWorkspace(workspace, bundle)
 		case "enable":
 			return setPluginEnabled(workspace, operation.PluginName, true)
 		case "disable":
@@ -164,7 +252,7 @@ func deployBundleToWorkspace(workspace string, bundle *preparedBundle) error {
 	if err := os.MkdirAll(pluginDir, 0o750); err != nil {
 		return err
 	}
-	existing, err := findPlugin(pluginDir, bundle.plugin.Name)
+	existing, err := findPlugin(pluginDir, bundle.plugin.Name, bundle.plugin.PluginType)
 	if err != nil {
 		return err
 	}
@@ -305,24 +393,29 @@ func uninstallPlugin(workspace, pluginName string, deleteConfig bool, configDire
 	return nil
 }
 
-func findPlugin(pluginDir, pluginName string) (string, error) {
-	items, warnings := newScanCache().scan(filepath.Dir(pluginDir))
+func findPlugin(pluginDir, pluginName string, pluginTypes ...string) (string, error) {
+	_, path, err := findPluginDetails(pluginDir, pluginName, pluginTypes...)
+	return path, err
+}
+
+func findPluginDetails(pluginDir, pluginName string, pluginTypes ...string) (FilePlugin, string, error) {
+	items, warnings := newScanCache().scan(filepath.Dir(pluginDir), pluginTypes...)
 	if len(warnings) > 0 && len(items) == 0 {
-		return "", errors.New(warnings[0])
+		return FilePlugin{}, "", errors.New(warnings[0])
 	}
-	matches := make([]string, 0)
+	matches := make([]FilePlugin, 0)
 	for _, item := range items {
 		if strings.EqualFold(item.Name, pluginName) {
-			matches = append(matches, filepath.Join(pluginDir, item.SourceFile))
+			matches = append(matches, item)
 		}
 	}
 	if len(matches) > 1 {
-		return "", errors.New("multiple plugin files use the same name")
+		return FilePlugin{}, "", errors.New("multiple plugin files use the same name")
 	}
 	if len(matches) == 0 {
-		return "", nil
+		return FilePlugin{}, "", nil
 	}
-	return matches[0], nil
+	return matches[0], filepath.Join(pluginDir, matches[0].SourceFile), nil
 }
 
 func sanitizeJARFilename(original, name, version string) string {

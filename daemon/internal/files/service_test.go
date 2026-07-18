@@ -3,6 +3,7 @@ package files
 import (
 	"archive/zip"
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -93,6 +94,73 @@ func TestListUsesBoundedPagination(t *testing.T) {
 	second, err := service.List(target, []DirectoryRequest{{Path: ".", Limit: 2, Cursor: results[0].NextCursor}}, true)
 	if err != nil || len(second[0].Entries) != 1 {
 		t.Fatalf("unexpected second page: %#v, %v", second, err)
+	}
+}
+
+func TestOpenDownloadArchivesDirectory(t *testing.T) {
+	service, target, root := newTestService(t)
+	if err := os.MkdirAll(filepath.Join(root, "plugins", "empty"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "plugins", "example.jar"), []byte("jar"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	download, err := service.OpenDownload(target, "plugins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer download.Close()
+	if download.Name != "plugins.zip" {
+		t.Fatalf("unexpected archive name: %s", download.Name)
+	}
+	reader, err := zip.NewReader(download.File, download.Size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make(map[string]*zip.File, len(reader.File))
+	for _, entry := range reader.File {
+		entries[entry.Name] = entry
+	}
+	for _, expected := range []string{"plugins/", "plugins/empty/", "plugins/example.jar"} {
+		if entries[expected] == nil {
+			t.Fatalf("archive is missing %s: %#v", expected, entries)
+		}
+	}
+	stream, err := entries["plugins/example.jar"].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, readErr := io.ReadAll(stream)
+	closeErr := stream.Close()
+	if readErr != nil || closeErr != nil || string(contents) != "jar" {
+		t.Fatalf("unexpected archived contents: %q, %v, %v", contents, readErr, closeErr)
+	}
+}
+
+func TestCreateDirectoryIsIdempotent(t *testing.T) {
+	service, target, root := newTestService(t)
+	if err := service.Create(target, "plugins", "directory"); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(target, "plugins", "directory"); err != nil {
+		t.Fatalf("recreating a directory should succeed: %v", err)
+	}
+	info, err := os.Stat(filepath.Join(root, "plugins"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("directory was not preserved: %#v, %v", info, err)
+	}
+}
+
+func TestOpenDownloadRejectsDirectorySymlink(t *testing.T) {
+	service, target, root := newTestService(t)
+	if err := os.Mkdir(filepath.Join(root, "plugins"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "plugins", "link")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	if _, err := service.OpenDownload(target, "plugins"); err == nil {
+		t.Fatal("expected directory symlink to be rejected")
 	}
 }
 

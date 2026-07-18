@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -439,6 +440,60 @@ func (c *Client) UploadPlugin(ctx context.Context, ticket, serverID, path string
 		return nil
 	}
 	return json.Unmarshal(payload.Data, output)
+}
+
+func (c *Client) UploadInstancePlugin(
+	ctx context.Context,
+	ticket string,
+	instanceID string,
+	filename string,
+	overwrite bool,
+	body io.Reader,
+	contentLength int64,
+	output any,
+) error {
+	endpoint, err := url.Parse(c.baseURL)
+	if err != nil {
+		return err
+	}
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/v1/plugins/upload"
+	query := endpoint.Query()
+	query.Set("instance_id", instanceID)
+	query.Set("filename", filename)
+	endpoint.RawQuery = query.Encode()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), body)
+	if err != nil {
+		return err
+	}
+	request.ContentLength = contentLength
+	request.Header.Set("Authorization", "Bearer "+ticket)
+	request.Header.Set("Content-Type", "application/java-archive")
+	request.Header.Set("X-Prism-Overwrite", strconv.FormatBool(overwrite))
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	var payload struct {
+		Success bool
+		Data    json.RawMessage
+		Error   *APIError
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if output != nil && len(payload.Data) > 0 {
+		if err := json.Unmarshal(payload.Data, output); err != nil {
+			return err
+		}
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 || !payload.Success {
+		if payload.Error != nil {
+			return payload.Error
+		}
+		return errors.New("daemon instance plugin upload failed")
+	}
+	return nil
 }
 
 func websocketEndpoint(base, path string) (string, error) {

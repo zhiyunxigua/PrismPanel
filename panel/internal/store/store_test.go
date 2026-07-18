@@ -31,3 +31,18 @@ func TestPrefixStatement(t *testing.T) {
 		t.Fatalf("missing prefixed file operation table in %q", fileOperationQuery)
 	}
 }
+
+func TestPrefixStatementNewPluginAndSelectionTables(t *testing.T) {
+	for _, table := range []string{
+		`plugin_artifacts_v2`,
+		`proxy_sync_owners`,
+		`proxy_sync_rules`,
+		`plugin_deploy_preferences`,
+	} {
+		statement := prefixStatement(`DELETE FROM `+table, `prism_`)
+		quotedTable := string(rune(96)) + `prism_` + table + string(rune(96))
+		if !strings.Contains(statement, quotedTable) {
+			t.Fatalf(`missing prefixed table %q in %q`, table, statement)
+		}
+	}
+}

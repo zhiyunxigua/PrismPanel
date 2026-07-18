@@ -3,6 +3,7 @@ package plugins
 import "time"
 
 type Descriptor struct {
+	PluginType   string   `json:"plugin_type"`
 	File         string   `json:"file"`
 	Name         string   `json:"name"`
 	Version      string   `json:"version"`
@@ -17,6 +18,7 @@ type Descriptor struct {
 }
 
 type FilePlugin struct {
+	PluginType   string                `json:"plugin_type"`
 	Name         string                `json:"name"`
 	Version      string                `json:"version"`
 	Main         string                `json:"main,omitempty"`
@@ -72,4 +74,17 @@ type OperationResult struct {
 	Version        string         `json:"version,omitempty"`
 	PendingRestart bool           `json:"pending_restart"`
 	Targets        []TargetResult `json:"targets"`
+}
+
+type InstanceUploadResult struct {
+	Outcome         string `json:"outcome"`
+	InstanceID      string `json:"instance_id"`
+	PluginName      string `json:"plugin_name"`
+	PluginType      string `json:"plugin_type"`
+	Version         string `json:"version"`
+	SourceFile      string `json:"source_file,omitempty"`
+	ExistingVersion string `json:"existing_version,omitempty"`
+	ExistingFile    string `json:"existing_file,omitempty"`
+	Replaced        bool   `json:"replaced"`
+	PendingRestart  bool   `json:"pending_restart"`
 }

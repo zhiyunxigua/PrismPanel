@@ -7,7 +7,7 @@ import (
 
 func TestMirrorInstances(t *testing.T) {
 	cfg := ServerConfig{
-		SchemaVersion: 1, Type: "mirror", ServerID: "bedwars", Name: "BedWars",
+		SchemaVersion: SchemaVersion, Type: "mirror", Platform: "paper", ServerID: "bedwars", Name: "BedWars",
 		RootPath: filepath.Join(t.TempDir(), "bedwars"), ImageDirectory: "image", InstanceCount: 2,
 		Ports:   []int{25571, 25572},
 		Process: ProcessConfig{StartCommand: "java -jar server.jar nogui", StopCommand: "stop", StopTimeoutSeconds: 30},
@@ -24,7 +24,7 @@ func TestMirrorInstances(t *testing.T) {
 
 func TestMissingStartCommandIsRejected(t *testing.T) {
 	cfg := ServerConfig{
-		SchemaVersion: 1, Type: "standalone", ServerID: "legacy", Name: "Legacy",
+		SchemaVersion: SchemaVersion, Type: "standalone", ServerID: "legacy", Name: "Legacy",
 		Workspace: t.TempDir(), Port: 25565,
 		Process: ProcessConfig{StopCommand: "stop", StopTimeoutSeconds: 30},
 		Console: ConsoleConfig{Encoding: "utf-8"},
@@ -48,7 +48,7 @@ func TestConsoleEncodingNormalization(t *testing.T) {
 
 func TestUnsupportedConsoleEncodingIsRejected(t *testing.T) {
 	cfg := ServerConfig{
-		SchemaVersion: 1, Type: "standalone", ServerID: "invalid-encoding", Name: "Invalid",
+		SchemaVersion: SchemaVersion, Type: "standalone", ServerID: "invalid-encoding", Name: "Invalid",
 		Workspace: t.TempDir(), Port: 25565,
 		Process: ProcessConfig{StartCommand: "java -jar server.jar", StopCommand: "stop", StopTimeoutSeconds: 30},
 		Console: ConsoleConfig{Encoding: "big5"},

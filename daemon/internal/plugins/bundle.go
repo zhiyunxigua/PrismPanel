@@ -17,10 +17,11 @@ import (
 const maxBundleSize = int64(800 * 1024 * 1024)
 
 type bundleManifest struct {
-	Name     string `yaml:"name"`
-	Version  string `yaml:"version"`
-	Main     string `yaml:"main"`
-	Artifact struct {
+	PluginType string `yaml:"plugin_type"`
+	Name       string `yaml:"name"`
+	Version    string `yaml:"version"`
+	Main       string `yaml:"main"`
+	Artifact   struct {
 		OriginalFilename string `yaml:"original_filename"`
 		SHA256           string `yaml:"sha256"`
 	} `yaml:"artifact"`
@@ -115,12 +116,19 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 		cleanup()
 		return nil, nil, fmt.Errorf("decode plugin bundle manifest: %w", err)
 	}
+	if manifest.PluginType == "" {
+		manifest.PluginType = PluginTypeSpigot
+	}
+	if !validPluginType(manifest.PluginType) {
+		cleanup()
+		return nil, nil, errors.New("plugin bundle type is invalid")
+	}
 	jarInfo, err := os.Stat(jarPath)
 	if err != nil {
 		cleanup()
 		return nil, nil, errors.New("plugin bundle has no jar")
 	}
-	plugin, err := scanFile(jarPath, "plugin.jar", true, jarInfo)
+	plugin, err := scanFile(jarPath, "plugin.jar", true, jarInfo, manifest.PluginType)
 	if err != nil {
 		cleanup()
 		return nil, nil, err
@@ -144,6 +152,27 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 		root: root, jarPath: jarPath, configPath: filepath.Join(root, "config"),
 		manifest: manifest, plugin: plugin,
 	}, cleanup, nil
+}
+
+func prepareUploadedJAR(path, originalFilename string, pluginTypes ...string) (*preparedBundle, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 {
+		return nil, errors.New("plugin jar is unavailable")
+	}
+	plugin, err := scanFile(path, originalFilename, true, info, requestedPluginType(pluginTypes))
+	if err != nil {
+		return nil, err
+	}
+	var manifest bundleManifest
+	manifest.PluginType = plugin.PluginType
+	manifest.Name = plugin.Name
+	manifest.Version = plugin.Version
+	manifest.Main = plugin.Main
+	manifest.Artifact.OriginalFilename = originalFilename
+	manifest.Artifact.SHA256 = plugin.SHA256
+	return &preparedBundle{
+		jarPath: path, manifest: manifest, plugin: plugin,
+	}, nil
 }
 
 func cleanBundlePath(value string) (string, error) {

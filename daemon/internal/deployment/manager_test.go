@@ -26,7 +26,7 @@ func TestMirrorDeploymentTransaction(t *testing.T) {
 	mustWrite(t, filepath.Join(instancePath, "server.properties"), "motd=test\nserver-port=25500\n")
 
 	serverConfig := model.ServerConfig{
-		SchemaVersion: 1, Type: "mirror", ServerID: "bedwars", Name: "BedWars",
+		SchemaVersion: model.SchemaVersion, Type: "mirror", ServerID: "bedwars", Name: "BedWars",
 		RootPath: root, ImageDirectory: "image", InstanceCount: 1, Ports: []int{25571},
 		Exclude: []model.ExcludeEntry{{Path: "world", Type: "directory"}},
 		Process: model.ProcessConfig{

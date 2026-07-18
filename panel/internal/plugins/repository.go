@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	manifestSchemaVersion = 1
+	manifestSchemaVersion = 2
 	maxPluginJARSize      = 256 * 1024 * 1024
 )
 
@@ -39,19 +39,29 @@ func NewRepository(root string) (*Repository, error) {
 		}
 		root = absolute
 	}
-	if err := os.MkdirAll(filepath.Join(root, "import"), 0o750); err != nil {
-		return nil, fmt.Errorf("create plugin repository: %w", err)
+	for _, pluginType := range []string{PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee} {
+		if err := os.MkdirAll(filepath.Join(root, pluginType, "import"), 0o750); err != nil {
+			return nil, fmt.Errorf("create plugin repository: %w", err)
+		}
 	}
 	return &Repository{root: root}, nil
 }
 
-func (r *Repository) Root() string { return r.root }
+func (r *Repository) Root() string { return r.typeRoot(PluginTypeSpigot) }
+
+func (r *Repository) typeRoot(pluginType string) string {
+	return filepath.Join(r.root, pluginType)
+}
 
 func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 	if len(input.JAR) == 0 || len(input.JAR) > maxPluginJARSize {
 		return UploadResult{}, fmt.Errorf("plugin jar must be between 1 byte and %d bytes", maxPluginJARSize)
 	}
-	descriptors, primary, err := ParseJAR(input.JAR)
+	input.PluginType = normalizePluginType([]string{input.PluginType})
+	if !ValidPluginType(input.PluginType) {
+		return UploadResult{}, errors.New("plugin type must be spigot, velocity or bungee")
+	}
+	descriptors, primary, err := ParseJAR(input.JAR, input.PluginType)
 	if err != nil {
 		return UploadResult{}, err
 	}
@@ -65,18 +75,24 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	pluginID, err := r.resolvePluginIDLocked(primary.Name)
+	typeRoot := r.typeRoot(input.PluginType)
+	pluginID, err := r.resolvePluginIDLocked(typeRoot, primary.Name)
 	if err != nil {
 		return UploadResult{}, err
 	}
-	pluginDir := filepath.Join(r.root, pluginID)
+	pluginDir := filepath.Join(typeRoot, pluginID)
 	index, _ := r.loadIndexLocked(pluginDir)
 	if index.PluginID == "" {
-		index = Index{SchemaVersion: 1, PluginID: pluginID, Name: primary.Name, NextArtifactID: 1}
+		index = Index{
+			SchemaVersion: manifestSchemaVersion, PluginID: pluginID, PluginType: input.PluginType,
+			Name: primary.Name, AutoInstall: input.AutoInstall, NextArtifactID: 1,
+		}
 	}
 	if !strings.EqualFold(index.Name, primary.Name) {
 		return UploadResult{}, errors.New("plugin id is already used by another plugin name")
 	}
+	index.PluginType = input.PluginType
+	index.AutoInstall = input.AutoInstall
 	current, _ := r.loadManifestLocked(pluginDir, index.CurrentArtifactID)
 	configDirectory := strings.TrimSpace(input.ConfigDirectory)
 	if configDirectory == "" && current.Config.Directory != "" {
@@ -143,6 +159,9 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 	for _, artifact := range artifacts {
 		if artifact.Artifact.SHA256 == jarHashText && artifact.Config.SHA256 == config.SHA256 &&
 			artifact.Config.Directory == config.Directory {
+			if err := atomicYAML(filepath.Join(pluginDir, "index.yaml"), index); err != nil {
+				return UploadResult{}, err
+			}
 			return UploadResult{Plugin: buildPlugin(index, artifacts), Artifact: artifact, Duplicate: true}, nil
 		}
 	}
@@ -154,7 +173,8 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 	}
 	manifest := Manifest{
 		SchemaVersion: manifestSchemaVersion, ArtifactID: artifactID,
-		PluginID: pluginID, Name: primary.Name, Version: primary.Version,
+		PluginID: pluginID, PluginType: input.PluginType,
+		Name: primary.Name, Version: primary.Version,
 		Main: primary.Main, Authors: append([]string(nil), primary.Authors...),
 		Description: primary.Description, Website: primary.Website, Descriptors: descriptors,
 		Artifact: ArtifactFile{
@@ -186,18 +206,20 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 func (r *Repository) List() ([]Plugin, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	entries, err := os.ReadDir(r.root)
-	if err != nil {
-		return nil, err
-	}
 	result := make([]Plugin, 0)
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "import" || !pluginIDPattern.MatchString(entry.Name()) {
-			continue
+	for _, pluginType := range []string{PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee} {
+		entries, err := os.ReadDir(r.typeRoot(pluginType))
+		if err != nil {
+			return nil, err
 		}
-		plugin, err := r.loadPluginLocked(entry.Name())
-		if err == nil {
-			result = append(result, plugin)
+		for _, entry := range entries {
+			if !entry.IsDir() || entry.Name() == "import" || !pluginIDPattern.MatchString(entry.Name()) {
+				continue
+			}
+			plugin, err := r.loadPluginLocked(pluginType, entry.Name())
+			if err == nil {
+				result = append(result, plugin)
+			}
 		}
 	}
 	sort.Slice(result, func(left, right int) bool {
@@ -206,22 +228,22 @@ func (r *Repository) List() ([]Plugin, error) {
 	return result, nil
 }
 
-func (r *Repository) Get(pluginID string) (Plugin, error) {
+func (r *Repository) Get(pluginID string, pluginTypes ...string) (Plugin, error) {
 	if !pluginIDPattern.MatchString(pluginID) {
 		return Plugin{}, errors.New("invalid plugin id")
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.loadPluginLocked(pluginID)
+	return r.loadPluginLocked(normalizePluginType(pluginTypes), pluginID)
 }
 
-func (r *Repository) Artifact(pluginID string, artifactID int64) (Manifest, string, error) {
+func (r *Repository) Artifact(pluginID string, artifactID int64, pluginTypes ...string) (Manifest, string, error) {
 	if !pluginIDPattern.MatchString(pluginID) || artifactID < 1 {
 		return Manifest{}, "", errors.New("invalid plugin artifact")
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	pluginDir := filepath.Join(r.root, pluginID)
+	pluginDir := filepath.Join(r.typeRoot(normalizePluginType(pluginTypes)), pluginID)
 	manifest, err := r.loadManifestLocked(pluginDir, artifactID)
 	if err != nil {
 		return Manifest{}, "", err
@@ -229,8 +251,8 @@ func (r *Repository) Artifact(pluginID string, artifactID int64) (Manifest, stri
 	return manifest, filepath.Join(pluginDir, strconv.FormatInt(artifactID, 10)), nil
 }
 
-func (r *Repository) loadPluginLocked(pluginID string) (Plugin, error) {
-	pluginDir := filepath.Join(r.root, pluginID)
+func (r *Repository) loadPluginLocked(pluginType, pluginID string) (Plugin, error) {
+	pluginDir := filepath.Join(r.typeRoot(pluginType), pluginID)
 	index, err := r.loadIndexLocked(pluginDir)
 	if err != nil {
 		return Plugin{}, err
@@ -286,7 +308,7 @@ func (r *Repository) loadArtifactsLocked(pluginDir string) ([]Manifest, error) {
 	return artifacts, nil
 }
 
-func (r *Repository) resolvePluginIDLocked(name string) (string, error) {
+func (r *Repository) resolvePluginIDLocked(typeRoot, name string) (string, error) {
 	base := normalizePluginID(name)
 	for index := 0; index < 100; index++ {
 		candidate := base
@@ -297,7 +319,7 @@ func (r *Repository) resolvePluginIDLocked(name string) (string, error) {
 		if len(candidate) > 64 {
 			candidate = candidate[:64]
 		}
-		pluginDir := filepath.Join(r.root, candidate)
+		pluginDir := filepath.Join(typeRoot, candidate)
 		stored, err := r.loadIndexLocked(pluginDir)
 		if errors.Is(err, os.ErrNotExist) || stored.PluginID == "" {
 			return candidate, nil
@@ -347,6 +369,8 @@ func nextArtifactID(artifacts []Manifest) int64 {
 }
 
 func buildPlugin(index Index, artifacts []Manifest) Plugin {
-	return Plugin{PluginID: index.PluginID, Name: index.Name,
+	return Plugin{
+		PluginID: index.PluginID, PluginType: index.PluginType, Name: index.Name,
+		AutoInstall:       index.AutoInstall,
 		CurrentArtifactID: index.CurrentArtifactID, Artifacts: artifacts}
 }

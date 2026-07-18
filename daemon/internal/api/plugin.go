@@ -11,12 +11,17 @@ import (
 )
 
 type pluginMessage struct {
-	Type       string          `json:"type"`
-	Token      string          `json:"token,omitempty"`
-	InstanceID string          `json:"instance_id,omitempty"`
-	SessionID  string          `json:"session_id,omitempty"`
-	PID        int             `json:"pid,omitempty"`
-	Data       json.RawMessage `json:"data,omitempty"`
+	Type         string          `json:"type"`
+	RequestID    string          `json:"request_id,omitempty"`
+	Token        string          `json:"token,omitempty"`
+	InstanceID   string          `json:"instance_id,omitempty"`
+	SessionID    string          `json:"session_id,omitempty"`
+	PID          int             `json:"pid,omitempty"`
+	Platform     string          `json:"platform,omitempty"`
+	Capabilities []string        `json:"capabilities,omitempty"`
+	Success      bool            `json:"success,omitempty"`
+	Data         json.RawMessage `json:"data,omitempty"`
+	Error        *apperr.Error   `json:"error,omitempty"`
 }
 
 func (s *Server) handlePlugin(writer http.ResponseWriter, request *http.Request) {
@@ -37,7 +42,7 @@ func (s *Server) handlePlugin(writer http.ResponseWriter, request *http.Request)
 		return
 	}
 	connection, err := s.supervisor.RegisterPlugin(
-		auth.InstanceID, auth.SessionID, auth.Token, auth.PID,
+		auth.InstanceID, auth.SessionID, auth.Token, auth.PID, auth.Platform, auth.Capabilities,
 	)
 	if err != nil {
 		writePluginAuthResult(conn, nil, err)
@@ -46,10 +51,12 @@ func (s *Server) handlePlugin(writer http.ResponseWriter, request *http.Request)
 	defer connection.Close()
 	if err := writePluginAuthResult(conn, map[string]any{
 		"instance_id": auth.InstanceID, "session_id": auth.SessionID,
-		"protocol_version": "1", "sample_interval_seconds": 5,
+		"protocol_version": "2", "sample_interval_seconds": 5,
 	}, nil); err != nil {
 		return
 	}
+	go writePluginCommands(conn, connection)
+	go s.supervisor.RestoreProxyBackends(auth.InstanceID)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(35 * time.Second))
 		var message pluginMessage
@@ -66,16 +73,39 @@ func (s *Server) handlePlugin(writer http.ResponseWriter, request *http.Request)
 			} else {
 				err = connection.Update(report)
 			}
+		case "response":
+			connection.HandleResponse(supervisor.PluginResponse{
+				RequestID: message.RequestID,
+				Success:   message.Success,
+				Data:      message.Data,
+				Error:     message.Error,
+			})
+			err = nil
 		default:
 			err = apperr.New("UNKNOWN_COMMAND", "不支持的插件消息")
 		}
 		if err != nil {
-			_ = conn.WriteJSON(map[string]any{
-				"type": "error", "error": apperr.From(err),
-			})
-			if apperr.From(err).Code == "UNAUTHENTICATED" {
+			return
+		}
+	}
+}
+
+func writePluginCommands(
+	conn interface {
+		WriteJSON(any) error
+		Close() error
+	},
+	connection *supervisor.PluginConnection,
+) {
+	for {
+		select {
+		case message := <-connection.Outgoing():
+			if err := conn.WriteJSON(message); err != nil {
+				_ = conn.Close()
 				return
 			}
+		case <-connection.Done():
+			return
 		}
 	}
 }

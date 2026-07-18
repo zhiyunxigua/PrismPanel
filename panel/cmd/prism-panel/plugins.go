@@ -18,7 +18,7 @@ func syncPluginCatalog(ctx context.Context, repository *store.Store, catalog []p
 				return fmt.Errorf("encode plugin %s artifact %d: %w", plugin.PluginID, artifact.ArtifactID, err)
 			}
 			artifacts = append(artifacts, store.PluginArtifactIndex{
-				PluginID: plugin.PluginID, ArtifactID: artifact.ArtifactID,
+				PluginType: plugin.PluginType, PluginID: plugin.PluginID, ArtifactID: artifact.ArtifactID,
 				PluginName: artifact.Name, Version: artifact.Version, MainClass: artifact.Main,
 				JARSHA256: artifact.Artifact.SHA256, ConfigSHA256: artifact.Config.SHA256,
 				Current:      artifact.ArtifactID == plugin.CurrentArtifactID,

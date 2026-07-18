@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"PrismPanel-daemon/internal/apperr"
+	"PrismPanel-daemon/internal/model"
 )
 
 func (m *Manager) Start(instanceID string) error {
@@ -99,6 +100,7 @@ func (m *Manager) startLocked(current *instance) error {
 	current.pluginConnected = false
 	current.pluginLastSeen = nil
 	current.pluginReport = PluginReport{}
+	current.pluginCapabilities = nil
 	current.pluginPendingRestart = false
 	current.cpuPercent = nil
 	current.memoryBytes = nil
@@ -130,8 +132,10 @@ func (m *Manager) prepareCommand(
 	if _, err := filepath.EvalSymlinks(cfg.Workspace); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("resolve workspace: %w", err)
 	}
-	if err := writeServerPort(cfg.Workspace, cfg.Port); err != nil {
-		return nil, nil, nil, nil, err
+	if !model.IsProxyPlatform(cfg.Platform) {
+		if err := writeServerPort(cfg.Workspace, cfg.Port); err != nil {
+			return nil, nil, nil, nil, err
+		}
 	}
 	cmd := shellCommand(cfg.Process.StartCommand)
 	cmd.Dir = cfg.Workspace
@@ -212,9 +216,12 @@ func (m *Manager) waitProcess(current *instance, cmd *exec.Cmd, done chan struct
 	current.memoryBytes = nil
 	current.pluginTokenHash = [32]byte{}
 	current.pluginTokenSet = false
+	pluginConnection := current.pluginConnection
+	current.pluginConnection = nil
 	current.pluginGeneration++
 	current.pluginConnected = false
 	current.pluginReport = PluginReport{}
+	current.pluginCapabilities = nil
 	if expected {
 		current.state = StateStopped
 		current.lastError = ""
@@ -229,6 +236,9 @@ func (m *Manager) waitProcess(current *instance, cmd *exec.Cmd, done chan struct
 	shouldRestart := !expected && current.managed && current.cfg.Process.AutoRestart && m.allowAutoRestartLocked(current)
 	close(done)
 	current.mu.Unlock()
+	if pluginConnection != nil {
+		pluginConnection.Close()
+	}
 	if err != nil {
 		current.addConsole("system", fmt.Sprintf("process exited: %v", err))
 	} else {

@@ -199,6 +199,81 @@ func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.R
 	})
 }
 
+func (s *Server) handleFileExport(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, "GET")
+		return
+	}
+	input := fileAuthorizeInput{
+		NodeID:       strings.TrimSpace(request.URL.Query().Get("node_id")),
+		Scope:        "file.download",
+		ResourceType: strings.TrimSpace(request.URL.Query().Get("resource_type")),
+		ResourceID:   strings.TrimSpace(request.URL.Query().Get("resource_id")),
+		Path:         strings.TrimSpace(request.URL.Query().Get("path")),
+	}
+	err := s.authorize(request, "file.read")
+	if err == nil {
+		err = validateFileAuthorization(input.NodeID, input.ResourceType, input.ResourceID, input.Path, nil)
+	}
+	node, nodeErr := s.nodes.Get(request.Context(), input.NodeID)
+	if err == nil {
+		err = nodeErr
+	}
+	if err == nil && !containsString(node.Capabilities, "files") {
+		err = apiError("UNSUPPORTED_CAPABILITY", "目标节点尚不支持文件管理")
+	}
+	if err != nil {
+		writeRequestError(writer, err)
+		return
+	}
+
+	var issued struct {
+		Ticket string
+	}
+	callContext, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	err = s.connections.Call(callContext, input.NodeID, "ticket.create", map[string]any{
+		"scope": input.Scope, "resource_type": input.ResourceType, "resource_id": input.ResourceID,
+		"path": input.Path, "method": http.MethodGet, "ttl_seconds": 120,
+	}, &issued)
+	if err != nil {
+		s.record(request, "file.download", input.ResourceID, map[string]any{"path": input.Path}, err)
+		writeRequestError(writer, err)
+		return
+	}
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+issued.Ticket)
+	headers.Set("X-Prism-Resource-Type", input.ResourceType)
+	headers.Set("X-Prism-Resource-ID", input.ResourceID)
+	headers.Set("X-Prism-Path", input.Path)
+	if value := request.Header.Get("Range"); value != "" {
+		headers.Set("Range", value)
+	}
+	response, err := s.connections.FileRequest(
+		request.Context(), input.NodeID, "download", http.MethodGet, headers, nil, 0,
+	)
+	if err != nil {
+		s.record(request, "file.download", input.ResourceID, map[string]any{"path": input.Path}, err)
+		writeRequestError(writer, err)
+		return
+	}
+	defer response.Body.Close()
+	copyFileResponseHeaders(writer.Header(), response.Header)
+	writer.WriteHeader(response.StatusCode)
+	_, copyErr := io.Copy(writer, response.Body)
+	s.record(request, "file.download", input.ResourceID, map[string]any{"path": input.Path}, copyErr)
+}
+
+func copyFileResponseHeaders(destination, source http.Header) {
+	for _, name := range []string{
+		"Content-Type", "Content-Length", "Content-Disposition", "Accept-Ranges", "Content-Range",
+	} {
+		if value := source.Get(name); value != "" {
+			destination.Set(name, value)
+		}
+	}
+}
+
 func (s *Server) handleFileProxy(writer http.ResponseWriter, request *http.Request) {
 	operation := strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/v1/files/proxy/"), "/")
 	scope := proxyFileScope(operation, request.Method)
@@ -247,13 +322,7 @@ func (s *Server) handleFileProxy(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	defer response.Body.Close()
-	for _, name := range []string{
-		"Content-Type", "Content-Length", "Content-Disposition", "Accept-Ranges", "Content-Range",
-	} {
-		if value := response.Header.Get(name); value != "" {
-			writer.Header().Set(name, value)
-		}
-	}
+	copyFileResponseHeaders(writer.Header(), response.Header)
 	writer.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(writer, response.Body)
 }

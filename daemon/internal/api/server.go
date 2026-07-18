@@ -69,6 +69,7 @@ func NewServer(
 	mux.HandleFunc("/api/v1/ws/console", api.handleConsole)
 	mux.HandleFunc("/api/v1/ws/plugin", api.handlePlugin)
 	mux.HandleFunc("/api/v1/plugins/deploy", api.handlePluginDeploy)
+	mux.HandleFunc("/api/v1/plugins/upload", api.handlePluginUpload)
 	mux.HandleFunc("/api/v1/files/", api.handleFiles)
 	api.http = &http.Server{
 		Addr:              net.JoinHostPort(cfg.Server.Listen, fmt.Sprintf("%d", cfg.Server.Port)),
@@ -152,8 +153,12 @@ func (s *Server) handleControl(writer http.ResponseWriter, request *http.Request
 		Type: "auth.result", Success: boolPointer(true),
 		Data: map[string]any{
 			"node_id": s.nodeID, "version": Version, "protocol_version": ProtocolVersion,
-			"public_url":   s.config.Server.PublicURL,
-			"capabilities": []string{"server.manage", "instance.lifecycle", "console", "deployment", "plugin.telemetry", "plugin.manage", "metrics", "files"},
+			"public_url": s.config.Server.PublicURL,
+			"capabilities": []string{
+				"server.manage", "instance.lifecycle", "console", "deployment",
+				"plugin.telemetry", "plugin.manage", "proxy.backends", "player.transfer",
+				"metrics", "files",
+			},
 		},
 	})
 	client.enqueue(s.supervisor.SnapshotEvent())
@@ -211,6 +216,37 @@ func (s *Server) execute(messageType string, raw json.RawMessage) (any, error) {
 		default:
 			return s.plugins.Uninstall(input)
 		}
+	case "proxy.backends.sync":
+		var input struct {
+			InstanceID string                    `json:"instance_id"`
+			Revision   int64                     `json:"revision"`
+			Servers    []supervisor.ProxyBackend `json:"servers"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		return s.supervisor.SyncProxyBackends(ctx, input.InstanceID, supervisor.ProxyBackendCatalog{
+			Revision: input.Revision,
+			Servers:  input.Servers,
+		})
+	case "proxy.backends.status":
+		var input struct {
+			InstanceID string `json:"instance_id"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		return s.supervisor.ProxySyncStatus(input.InstanceID)
+	case "player.transfer":
+		var input supervisor.PlayerTransferInput
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		return map[string]any{}, s.supervisor.TransferPlayer(ctx, input)
 	case "server.get":
 		var input struct {
 			ServerID string `json:"server_id"`
@@ -350,6 +386,30 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 	}
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, invalidJSON(err)
+	}
+	if input.Scope == "plugin.upload" {
+		if _, err := s.supervisor.Get(input.InstanceID); err != nil {
+			return nil, err
+		}
+		if input.Size <= 0 || input.Size > maxInstancePluginUploadSize {
+			return nil, apperr.New("FILE_TOO_LARGE", "插件 JAR 超过上传限制")
+		}
+		if input.TTLSeconds == 0 {
+			input.TTLSeconds = 300
+		}
+		created, err := s.tickets.CreateRestricted(ticket.RestrictedOptions{
+			Scope: input.Scope, ResourceType: "instance", ResourceID: input.InstanceID,
+			Path: ".", Method: http.MethodPost, MaxBytes: input.Size, SHA256: input.SHA256,
+			AllowOverwrite: input.Overwrite, TTL: time.Duration(input.TTLSeconds) * time.Second, MaxUses: 1,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"ticket_id": created.ID, "ticket": created.Token, "expires_at": created.ExpiresAt,
+			"scope": created.Scope, "instance_id": input.InstanceID,
+			"public_url": s.config.Server.PublicURL, "upload_path": "/api/v1/plugins/upload",
+		}, nil
 	}
 	if input.Scope == "plugin.deploy" {
 		if _, err := s.servers.Get(input.InstanceID); err != nil {

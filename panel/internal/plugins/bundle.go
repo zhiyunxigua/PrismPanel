@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 )
 
-func (r *Repository) BuildBundle(pluginID string, artifactID int64) (string, Manifest, error) {
-	manifest, artifactDir, err := r.Artifact(pluginID, artifactID)
+func (r *Repository) BuildBundle(pluginID string, artifactID int64, pluginTypes ...string) (string, Manifest, error) {
+	manifest, artifactDir, err := r.Artifact(pluginID, artifactID, pluginTypes...)
 	if err != nil {
 		return "", Manifest{}, err
 	}

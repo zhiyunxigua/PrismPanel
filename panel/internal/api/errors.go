@@ -49,7 +49,8 @@ func writeRequestError(writer http.ResponseWriter, err error) {
 		switch daemonError.Code {
 		case "SERVER_NOT_FOUND", "INSTANCE_NOT_FOUND", "FILE_NOT_FOUND":
 			status = http.StatusNotFound
-		case "INSTANCE_BUSY", "PORT_CONFLICT", "SERVER_ID_CONFLICT", "DEPLOYMENT_ALREADY_RUNNING", "FILE_EXISTS", "FILE_CHANGED":
+		case "INSTANCE_BUSY", "PORT_CONFLICT", "SERVER_ID_CONFLICT", "DEPLOYMENT_ALREADY_RUNNING",
+			"FILE_EXISTS", "FILE_CHANGED", "PLUGIN_EXISTS", "PLUGIN_NAME_CONFLICT", "PLUGIN_FILE_CONFLICT":
 			status = http.StatusConflict
 		case "PERMISSION_DENIED", "PATH_ESCAPE":
 			status = http.StatusForbidden

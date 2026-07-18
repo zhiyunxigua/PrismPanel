@@ -8,13 +8,14 @@ import (
 	"strings"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 var serverIDPattern = regexp.MustCompile("^[a-z0-9_-]+$")
 
 type ServerConfig struct {
 	SchemaVersion  int            `json:"schema_version"`
 	Type           string         `json:"type"`
+	Platform       string         `json:"platform"`
 	ServerID       string         `json:"server_id"`
 	Name           string         `json:"name"`
 	Workspace      string         `json:"workspace,omitempty"`
@@ -50,6 +51,7 @@ type InstanceConfig struct {
 	ServerID   string
 	Slot       int
 	ServerType string
+	Platform   string
 	Name       string
 	Workspace  string
 	Port       int
@@ -58,6 +60,9 @@ type InstanceConfig struct {
 }
 
 func (s *ServerConfig) Normalize() {
+	if s.Platform == "" {
+		s.Platform = "paper"
+	}
 	if s.Process.StopCommand == "" {
 		s.Process.StopCommand = "stop"
 	}
@@ -79,6 +84,12 @@ func (s ServerConfig) Validate() error {
 	}
 	if s.Type != "standalone" && s.Type != "mirror" {
 		return errors.New("type must be standalone or mirror")
+	}
+	if !IsSupportedPlatform(s.Platform) {
+		return errors.New("platform must be paper, spigot, velocity or bungee")
+	}
+	if s.Type == "mirror" && IsProxyPlatform(s.Platform) {
+		return errors.New("mirror servers only support paper or spigot")
 	}
 	if strings.TrimSpace(s.Process.StartCommand) == "" {
 		return errors.New("process.start_command cannot be empty")
@@ -146,7 +157,7 @@ func normalizeConsoleEncoding(value string) string {
 func (s ServerConfig) Instances() []InstanceConfig {
 	if s.Type == "standalone" {
 		return []InstanceConfig{{
-			InstanceID: s.ServerID, ServerID: s.ServerID, ServerType: s.Type,
+			InstanceID: s.ServerID, ServerID: s.ServerID, ServerType: s.Type, Platform: s.Platform,
 			Name: s.Name, Workspace: filepath.Clean(s.Workspace), Port: s.Port,
 			Process: s.Process, Console: s.Console,
 		}}
@@ -155,13 +166,33 @@ func (s ServerConfig) Instances() []InstanceConfig {
 	for slot := 1; slot <= s.InstanceCount; slot++ {
 		instanceID := fmt.Sprintf("%s_%d", s.ServerID, slot)
 		instances = append(instances, InstanceConfig{
-			InstanceID: instanceID, ServerID: s.ServerID, Slot: slot, ServerType: s.Type,
+			InstanceID: instanceID, ServerID: s.ServerID, Slot: slot, ServerType: s.Type, Platform: s.Platform,
 			Name:      fmt.Sprintf("%s #%d", s.Name, slot),
 			Workspace: filepath.Join(s.RootPath, instanceID), Port: s.Ports[slot-1],
 			Process: s.Process, Console: s.Console,
 		})
 	}
 	return instances
+}
+
+func IsSupportedPlatform(platform string) bool {
+	switch platform {
+	case "paper", "spigot", "velocity", "bungee":
+		return true
+	default:
+		return false
+	}
+}
+
+func IsProxyPlatform(platform string) bool {
+	return platform == "velocity" || platform == "bungee"
+}
+
+func PluginTypeForPlatform(platform string) string {
+	if IsProxyPlatform(platform) {
+		return platform
+	}
+	return "spigot"
 }
 
 func validatePort(port int) error {

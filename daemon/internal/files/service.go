@@ -271,7 +271,10 @@ func (s *Service) Create(target Target, relative, kind string) error {
 		if err != nil {
 			return err
 		}
-		if _, err := os.Lstat(targetPath); err == nil {
+		if info, err := os.Lstat(targetPath); err == nil {
+			if kind == "directory" && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+				return nil
+			}
 			return apperr.New("FILE_EXISTS", "目标已存在")
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fileError(err, "无法检查目标路径")
@@ -287,6 +290,12 @@ func (s *Service) Create(target Target, relative, kind string) error {
 			}
 		case "directory":
 			if err := os.Mkdir(targetPath, 0o750); err != nil {
+				if errors.Is(err, os.ErrExist) {
+					info, statErr := os.Lstat(targetPath)
+					if statErr == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+						return nil
+					}
+				}
 				return fileError(err, "目录创建失败")
 			}
 		default:
@@ -369,11 +378,16 @@ type Download struct {
 	Name    string
 	Size    int64
 	Mode    time.Time
+	cleanup func()
 	release func()
 }
 
 func (d *Download) Close() error {
 	err := d.File.Close()
+	if d.cleanup != nil {
+		d.cleanup()
+		d.cleanup = nil
+	}
 	if d.release != nil {
 		d.release()
 		d.release = nil
@@ -393,26 +407,39 @@ func (s *Service) OpenDownload(target Target, relative string) (*Download, error
 	clean, err := normalizeRelative(relative)
 	if err != nil || clean == "." {
 		s.releaseTransfer()
-		return nil, apperr.New("INVALID_REQUEST", "必须指定下载文件路径")
+		return nil, apperr.New("INVALID_REQUEST", "必须指定下载文件或目录路径")
 	}
 	filePath, err := securePath(root, clean, false)
 	if err != nil {
 		s.releaseTransfer()
 		return nil, err
 	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		s.releaseTransfer()
+		return nil, fileError(err, "下载目标读取失败")
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		s.releaseTransfer()
+		return nil, apperr.New("PATH_ESCAPE", "下载目标不能是符号链接")
+	}
+	if info.IsDir() {
+		download, archiveErr := createDirectoryDownload(filePath, path.Base(clean))
+		if archiveErr != nil {
+			s.releaseTransfer()
+			return nil, archiveErr
+		}
+		download.release = s.releaseTransfer
+		return download, nil
+	}
+	if !info.Mode().IsRegular() {
+		s.releaseTransfer()
+		return nil, apperr.New("INVALID_REQUEST", "下载目标不是普通文件或目录")
+	}
 	file, err := os.Open(filePath)
 	if err != nil {
 		s.releaseTransfer()
 		return nil, fileError(err, "文件打开失败")
-	}
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		file.Close()
-		s.releaseTransfer()
-		if err != nil {
-			return nil, fileError(err, "文件状态读取失败")
-		}
-		return nil, apperr.New("INVALID_REQUEST", "下载目标不是普通文件")
 	}
 	return &Download{File: file, Name: path.Base(clean), Size: info.Size(), Mode: info.ModTime().UTC(), release: s.releaseTransfer}, nil
 }

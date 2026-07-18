@@ -11,7 +11,7 @@ import (
 
 func TestDeploymentReservationBlocksInstanceOperations(t *testing.T) {
 	server := model.ServerConfig{
-		SchemaVersion: 1, Type: "mirror", ServerID: "test", Name: "Test",
+		SchemaVersion: model.SchemaVersion, Type: "mirror", ServerID: "test", Name: "Test",
 		RootPath: t.TempDir(), ImageDirectory: "image", InstanceCount: 1, Ports: []int{25565},
 		Process: model.ProcessConfig{StartCommand: "server", StopCommand: "stop", StopTimeoutSeconds: 30},
 		Console: model.ConsoleConfig{Encoding: "utf-8"},

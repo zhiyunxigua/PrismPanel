@@ -1,5 +1,8 @@
 import { reactive } from "vue";
-import { ApiError, request } from "./api";
+import { ApiError, request } from "./api.js";
+import {
+  isWinApp, loginSavedAccountWinApp, loginWinApp, runtimeConfig, updateSavedPasswordWinApp,
+} from "./runtime.js";
 
 export const sessionState = reactive({
   ready: false,
@@ -13,15 +16,17 @@ export async function ensureSession() {
   if (sessionState.ready) return;
   if (bootstrapPromise) return bootstrapPromise;
   bootstrapPromise = (async () => {
-    const status = await request("/api/v1/auth/status");
-    sessionState.initialized = status.initialized;
-    if (status.initialized) {
-      try {
+    try {
+      const status = await request("/api/v1/auth/status");
+      sessionState.initialized = status.initialized;
+      if (status.initialized) {
         const session = await request("/api/v1/auth/session");
         sessionState.user = session.user;
-      } catch (error) {
-        if (!(error instanceof ApiError) || error.status !== 401) throw error;
       }
+    } catch (error) {
+      const unauthenticated = error instanceof ApiError && error.status === 401;
+      if (!unauthenticated && (!isWinApp() || !runtimeConfig.configured)) throw error;
+      sessionState.user = null;
     }
     sessionState.ready = true;
   })().finally(() => {
@@ -30,11 +35,25 @@ export async function ensureSession() {
   return bootstrapPromise;
 }
 
-export async function login(username, password) {
-  const data = await request("/api/v1/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ username, password }),
-  });
+export async function login(username, password, remember = false) {
+  const data = isWinApp()
+    ? await loginWinApp(username, password, remember)
+    : await request("/api/v1/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+  applyLogin(data);
+  return data;
+}
+
+export async function loginSavedAccount(accountID) {
+  if (!isWinApp()) throw new Error("保存账号登录仅支持 Windows 客户端");
+  const data = await loginSavedAccountWinApp(accountID);
+  applyLogin(data);
+  return data;
+}
+
+function applyLogin(data) {
   sessionState.user = data.user;
   sessionState.initialized = true;
 }
@@ -55,6 +74,15 @@ export async function changePassword(currentPassword, newPassword) {
       new_password: newPassword,
     }),
   });
+  if (!isWinApp() || !sessionState.user?.username) return {};
+  try {
+    const updated = await updateSavedPasswordWinApp(sessionState.user.username, newPassword);
+    return { savedCredentialUpdated: Boolean(updated) };
+  } catch (error) {
+    return {
+      warning: "密码已更新，但 Windows 自动登录凭据更新失败：" + (error.message || "未知错误"),
+    };
+  }
 }
 
 export function hasPermission(permission) {

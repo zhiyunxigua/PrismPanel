@@ -1,12 +1,12 @@
-import { apiURL, runtimeHeaders, runtimeConfig } from "./runtime";
+import { apiURL, runtimeHeaders, runtimeConfig } from "./runtime.js";
 
 export class ApiError extends Error {
-	constructor(code, message, status, requestId = "") {
+  constructor(code, message, status, requestId = "") {
     super(message);
     this.name = "ApiError";
     this.code = code;
-		this.status = status;
-		this.requestId = requestId;
+    this.status = status;
+    this.requestId = requestId;
   }
 }
 
@@ -31,9 +31,10 @@ export async function request(path, options = {}) {
     const apiError = new ApiError(
       error.code || "REQUEST_FAILED",
       error.message || "请求失败",
-		  response.status,
-		  payload.request_id || response.headers.get("X-Request-ID") || "",
+      response.status,
+      payload.request_id || response.headers.get("X-Request-ID") || "",
     );
+    apiError.data = payload.data;
     if (response.status === 401) {
       window.dispatchEvent(new CustomEvent("prism:session-expired"));
     }

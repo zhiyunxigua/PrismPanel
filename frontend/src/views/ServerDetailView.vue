@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import {
-  Activity, ArrowLeft, Cpu, Edit3, MemoryStick, OctagonX, Play,
+  Activity, ArrowLeft, ArrowRightLeft, Cpu, Edit3, MemoryStick, OctagonX, Play,
   PlugZap, Puzzle, RefreshCw, RotateCw, Server, Square, Terminal, Trash2, Upload, Users,
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -12,6 +12,7 @@ import ConsoleOutput from "../components/servers/ConsoleOutput.vue";
 import MetricLineChart from "../components/metrics/MetricLineChart.vue";
 import ServerEditorDialog from "../components/servers/ServerEditorDialog.vue";
 import FileManager from "../components/files/FileManager.vue";
+import TargetSelectionTree from "../components/TargetSelectionTree.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -26,12 +27,29 @@ const pluginSearch = ref("");
 const pluginData = ref({ items: [], warnings: [], pending_restart: false });
 const pluginLoading = ref(false);
 const pluginActionLoading = ref("");
+const pluginUploadInput = ref(null);
+const pluginUploadState = ref({
+  active: false, completed: 0, total: 0, name: "",
+  installed: 0, replaced: 0, skipped: 0, failed: 0,
+});
+const pluginDropActive = ref(false);
+const pluginConflictOpen = ref(false);
+const pluginConflict = ref({ fileName: "", incoming: {}, existing: {} });
+let pluginConflictResolver = null;
 const uninstallOpen = ref(false);
 const uninstallTarget = ref(null);
 const uninstallForm = ref({ deleteConfig: false, configDirectory: "" });
 const metricSeries = ref([]);
 const healthInstanceId = ref("");
 const editorOpen = ref(false);
+const allNodeContents = ref([]);
+const proxyRules = ref([]);
+const proxyStatus = ref(null);
+const proxySelections = ref([]);
+const proxyConfigLoading = ref(false);
+const transferOpen = ref(false);
+const transferSubmitting = ref(false);
+const transferForm = ref({ player: null, targetServerId: "" });
 const deploymentOpen = ref(false);
 const deploymentTargets = ref([]);
 const deploymentTask = ref(null);
@@ -55,7 +73,26 @@ const canCommand = computed(() => hasPermission("console.command"));
 const canViewPlugins = computed(() => hasPermission("plugin.view"));
 const canDeployPlugins = computed(() => hasPermission("plugin.deploy"));
 const canRemovePlugins = computed(() => hasPermission("plugin.remove"));
+const canRestartUploadedPlugin = computed(() => (
+  hasPermission("instance.restart")
+  && pluginInstance.value?.state === "running"
+  && !pluginInstance.value?.deployment_locked
+));
+const pluginConflictRestartNote = computed(() => {
+  if (pluginInstance.value?.state === "stopped" || pluginInstance.value?.state === "failed") {
+    return "新版本将在下次启动时生效。";
+  }
+  if (!hasPermission("instance.restart")) {
+    return "替换后需要由有权限的管理员重启当前子服。";
+  }
+  if (!canRestartUploadedPlugin.value) {
+    return "当前子服状态不允许立即重启，替换后将在下次启动时生效。";
+  }
+  return "替换后需要重启当前子服才能加载新版本。";
+});
 const canViewPlayers = computed(() => hasPermission("player.view"));
+const canTransferPlayers = computed(() => hasPermission("player.transfer"));
+const isProxyServer = computed(() => ["velocity", "bungee"].includes(server.value?.platform));
 const canViewTasks = computed(() => hasPermission("task.view"));
 const canCancelTasks = computed(() => hasPermission("task.cancel"));
 const canReadDeployment = computed(() => canViewTasks.value || canDeploy.value);
@@ -90,8 +127,21 @@ const deploymentCopyProgress = computed(() => {
   return deploymentTask.value?.copy_stage === "finalizing" ? 100 : 0;
 });
 const pluginRestartPending = computed(() => (
-  pluginData.value.pending_restart || instances.value.some((item) => item.plugin_pending_restart)
+  (pluginData.value.instance_id === pluginInstanceId.value && pluginData.value.pending_restart)
+  || pluginInstance.value?.plugin_pending_restart
 ));
+const pluginRestartRequired = computed(() => (
+  pluginRestartPending.value && pluginInstance.value?.state === "running"
+));
+const pluginPendingTitle = computed(() => {
+  if (pluginRestartRequired.value) {
+    return "插件文件已变更，需要重启当前子服才能应用";
+  }
+  if (["stopped", "failed"].includes(pluginInstance.value?.state)) {
+    return "插件文件已变更，将在下次启动当前子服时应用";
+  }
+  return "插件文件已变更，将在当前状态切换完成后应用";
+});
 const deploymentStatusLabels = {
   queued: "等待执行", running: "部署中", cancel_requested: "正在取消",
   force_stop_requested: "正在强制结束", cancelled: "已取消", force_stopped: "已强制结束",
@@ -110,6 +160,24 @@ const players = computed(() => instances.value.flatMap((instance) => (
     ? instance.players.map((player) => ({ ...player, instance_name: instance.name, instance_id: instance.instance_id }))
     : []
 )));
+const backendOptions = computed(() => {
+  const servers = new Map();
+  for (const content of allNodeContents.value) {
+    for (const item of content.servers || []) {
+      servers.set(content.node.id + ":" + item.server_id, item);
+    }
+  }
+  return allNodeContents.value.flatMap((content) => (content.instances || [])
+    .filter((instance) => {
+      const target = servers.get(content.node.id + ":" + instance.server_id);
+      return target && !["velocity", "bungee"].includes(target.platform);
+    })
+    .map((instance) => ({
+      value: instance.instance_id,
+      label: instance.name || instance.instance_id,
+      nodeName: content.node.name,
+    })));
+});
 const filteredPlugins = computed(() => {
   const source = Array.isArray(pluginData.value.items) ? pluginData.value.items : [];
   const keyword = pluginSearch.value.trim().toLowerCase();
@@ -123,6 +191,7 @@ const pluginStatusLabels = {
   file_disabled: "文件已禁用",
   not_loaded: "未装载",
   disabled: "已禁用",
+  runtime_only: "内置插件",
   disabled_pending_restart: "禁用待重启",
   update_pending_restart: "更新待重启",
   uninstall_pending_restart: "卸载待重启",
@@ -159,20 +228,252 @@ async function loadMetrics() {
   }
 }
 
+async function loadSyncConfiguration() {
+  if (!server.value || !canConfigure.value) return;
+  proxyConfigLoading.value = true;
+  try {
+    const catalog = await request("/api/v1/servers");
+    allNodeContents.value = catalog.nodes || [];
+    if (isProxyServer.value) {
+      const query = "?node_id=" + encodeURIComponent(nodeId.value)
+        + "&server_id=" + encodeURIComponent(serverId.value);
+      const data = await request("/api/v1/proxy-sync-rules" + query);
+      proxyRules.value = data.rules || [];
+      proxyStatus.value = data.status || null;
+    } else {
+      const query = "?target_node_id=" + encodeURIComponent(nodeId.value)
+        + "&target_server_id=" + encodeURIComponent(serverId.value);
+      const data = await request("/api/v1/proxy-sync-rules" + query);
+      proxySelections.value = data.proxies || [];
+    }
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    proxyConfigLoading.value = false;
+  }
+}
+
+async function saveProxyRules() {
+  proxyConfigLoading.value = true;
+  try {
+    const query = "?node_id=" + encodeURIComponent(nodeId.value)
+      + "&server_id=" + encodeURIComponent(serverId.value);
+    const data = await request("/api/v1/proxy-sync-rules" + query, {
+      method: "PUT",
+      body: JSON.stringify({ rules: proxyRules.value }),
+    });
+    proxyStatus.value = data.status;
+    ElMessage.success("代理服务器列表已同步");
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    proxyConfigLoading.value = false;
+  }
+}
+
+async function saveProxySelections() {
+  proxyConfigLoading.value = true;
+  try {
+    const query = "?target_node_id=" + encodeURIComponent(nodeId.value)
+      + "&target_server_id=" + encodeURIComponent(serverId.value);
+    await request("/api/v1/proxy-sync-rules" + query, {
+      method: "PUT",
+      body: JSON.stringify({
+        proxies: proxySelections.value.map((item) => ({
+          node_id: item.node_id,
+          server_id: item.server_id,
+          enabled: item.selected,
+        })),
+      }),
+    });
+    ElMessage.success("代理同步配置已保存");
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    proxyConfigLoading.value = false;
+  }
+}
+
+function openTransfer(player) {
+  transferForm.value = { player, targetServerId: player.server_id || backendOptions.value[0]?.value || "" };
+  transferOpen.value = true;
+}
+
+async function transferPlayer() {
+  if (!transferForm.value.player || !transferForm.value.targetServerId) {
+    ElMessage.warning("请选择目标服务器");
+    return;
+  }
+  transferSubmitting.value = true;
+  try {
+    await request("/api/v1/players/transfer", {
+      method: "POST",
+      body: JSON.stringify({
+        node_id: nodeId.value,
+        instance_id: transferForm.value.player.instance_id,
+        player_uuid: transferForm.value.player.uuid,
+        target_server_id: transferForm.value.targetServerId,
+      }),
+    });
+    transferOpen.value = false;
+    ElMessage.success("玩家转移请求已完成");
+    await load(true);
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    transferSubmitting.value = false;
+  }
+}
+
 async function loadPlugins(silent = false) {
   if (!pluginInstanceId.value || !canViewPlugins.value) return;
+  const instanceID = pluginInstanceId.value;
   if (!silent) pluginLoading.value = true;
   try {
-    const path = "/api/v1/instances/" + encodeURIComponent(pluginInstanceId.value) +
+    const path = "/api/v1/instances/" + encodeURIComponent(instanceID) +
       "/plugins?node_id=" + encodeURIComponent(nodeId.value);
-    pluginData.value = await request(path);
+    const data = await request(path);
+    if (pluginInstanceId.value !== instanceID) return;
+    pluginData.value = data;
     if (!silent && pluginData.value.warnings?.length) {
       ElMessage.warning(pluginData.value.warnings.join("；"));
     }
   } catch (error) {
-    if (!silent) ElMessage.error(error.message);
+    if (!silent && pluginInstanceId.value === instanceID) ElMessage.error(error.message);
   } finally {
-    if (!silent) pluginLoading.value = false;
+    if (!silent && pluginInstanceId.value === instanceID) pluginLoading.value = false;
+  }
+}
+
+function choosePluginFiles() {
+  if (canDeployPlugins.value && pluginInstanceId.value && !pluginUploadState.value.active) {
+    pluginUploadInput.value?.click();
+  }
+}
+
+async function handlePluginFileInput(event) {
+  const files = Array.from(event.target.files || []);
+  event.target.value = "";
+  await uploadPluginFiles(files);
+}
+
+function handlePluginDragOver(event) {
+  if (!canDeployPlugins.value || !pluginInstanceId.value || pluginUploadState.value.active) return;
+  if (!Array.from(event.dataTransfer?.types || []).includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  pluginDropActive.value = true;
+}
+
+function handlePluginDragLeave(event) {
+  if (!event.currentTarget.contains(event.relatedTarget)) pluginDropActive.value = false;
+}
+
+async function handlePluginDrop(event) {
+  if (!canDeployPlugins.value || !pluginInstanceId.value || pluginUploadState.value.active) return;
+  event.preventDefault();
+  pluginDropActive.value = false;
+  const dropped = Array.from(event.dataTransfer?.files || []);
+  const files = dropped.filter((file) => file.name.toLowerCase().endsWith(".jar"));
+  if (files.length !== dropped.length) ElMessage.warning("已忽略非 JAR 文件");
+  await uploadPluginFiles(files);
+}
+
+async function uploadInstancePluginFile(file, overwrite, instanceID) {
+  const query = "?node_id=" + encodeURIComponent(nodeId.value)
+    + "&filename=" + encodeURIComponent(file.name)
+    + "&overwrite=" + String(overwrite);
+  return request(
+    "/api/v1/instances/" + encodeURIComponent(instanceID) + "/plugins" + query,
+    {
+      method: "POST",
+      headers: { "Content-Type": file.type || "application/java-archive" },
+      body: file,
+    },
+  );
+}
+
+function askPluginConflict(file, data) {
+  pluginConflict.value = {
+    fileName: file.name,
+    incoming: { name: data?.plugin_name || file.name, version: data?.version || "未知" },
+    existing: { file: data?.existing_file || "未知文件", version: data?.existing_version || "未知" },
+  };
+  pluginConflictOpen.value = true;
+  return new Promise((resolve) => {
+    pluginConflictResolver = resolve;
+  });
+}
+
+function decidePluginConflict(action) {
+  pluginConflictOpen.value = false;
+  const resolve = pluginConflictResolver;
+  pluginConflictResolver = null;
+  resolve?.(action);
+}
+
+async function uploadPluginFiles(files) {
+  if (!files.length || pluginUploadState.value.active || !pluginInstanceId.value) return;
+  const instanceID = pluginInstanceId.value;
+  let restartRequested = false;
+  pluginUploadState.value = {
+    active: true, completed: 0, total: files.length, name: files[0].name,
+    installed: 0, replaced: 0, skipped: 0, failed: 0,
+  };
+  for (const file of files) {
+    pluginUploadState.value.name = file.name;
+    try {
+      let result;
+      try {
+        result = await uploadInstancePluginFile(file, false, instanceID);
+      } catch (error) {
+        if (error.code !== "PLUGIN_EXISTS") throw error;
+        const action = await askPluginConflict(file, error.data);
+        if (action === "skip") {
+          pluginUploadState.value.skipped += 1;
+          continue;
+        }
+        result = await uploadInstancePluginFile(file, true, instanceID);
+        restartRequested = restartRequested || action === "replace-restart";
+      }
+      if (result.replaced) pluginUploadState.value.replaced += 1;
+      else pluginUploadState.value.installed += 1;
+    } catch (error) {
+      pluginUploadState.value.failed += 1;
+      ElMessage.error(file.name + "：" + (error.message || "上传失败"));
+    } finally {
+      pluginUploadState.value.completed += 1;
+    }
+  }
+  pluginUploadState.value.active = false;
+  await Promise.all([loadPlugins(true), load(true)]);
+  showPluginUploadSummary();
+  if (restartRequested) await restartAfterPluginUpload(instanceID);
+}
+
+function showPluginUploadSummary() {
+  const state = pluginUploadState.value;
+  const parts = [];
+  if (state.installed) parts.push("安装 " + state.installed);
+  if (state.replaced) parts.push("替换 " + state.replaced);
+  if (state.skipped) parts.push("跳过 " + state.skipped);
+  if (state.failed) parts.push("失败 " + state.failed);
+  const message = parts.join("，") || "未上传插件";
+  if (state.failed) ElMessage.warning(message);
+  else ElMessage.success(message);
+}
+
+async function restartAfterPluginUpload(instanceID) {
+  try {
+    await request(
+      "/api/v1/instances/" + encodeURIComponent(instanceID)
+        + "/restart?node_id=" + encodeURIComponent(nodeId.value),
+      { method: "POST", body: "{}" },
+    );
+    ElMessage.success("插件已替换，子服正在重启");
+    await Promise.all([load(true), loadPlugins(true)]);
+  } catch (error) {
+    ElMessage.error("插件已替换，但子服重启失败。新版本将在下次成功启动后生效。");
   }
 }
 
@@ -226,7 +527,7 @@ async function uninstallPlugin() {
 }
 
 function beforeWindowUnload(event) {
-  if (!pluginRestartPending.value) return;
+  if (!pluginRestartRequired.value) return;
   event.preventDefault();
   event.returnValue = "";
 }
@@ -570,15 +871,18 @@ onBeforeUnmount(() => {
   window.clearInterval(refreshTimer);
   stopDeploymentPolling();
   window.removeEventListener("beforeunload", beforeWindowUnload);
+  pluginConflictResolver?.("skip");
+  pluginConflictResolver = null;
 });
 
 watch(pluginInstanceId, () => loadPlugins());
 watch(activeTab, (value) => {
   if (value === "plugins") loadPlugins();
+  if (value === "config") loadSyncConfiguration();
 });
 
 onBeforeRouteLeave(async () => {
-  if (!pluginRestartPending.value) return true;
+  if (!pluginRestartRequired.value) return true;
   try {
     await ElMessageBox.confirm(
       "插件文件已变更，需要手动重启子服才能应用。确认离开当前页面？",
@@ -741,9 +1045,14 @@ onBeforeRouteLeave(async () => {
           <div class="section-title"><div><h3>在线玩家</h3><p>{{ players.length }} 人在线</p></div></div>
           <el-table :data="players" row-key="uuid">
             <el-table-column label="玩家" min-width="180"><template #default="{ row }"><strong>{{ row.name || row.username }}</strong><small v-if="row.uuid" class="block muted">{{ row.uuid }}</small></template></el-table-column>
-            <el-table-column label="子服" min-width="150"><template #default="{ row }">{{ row.instance_name }}</template></el-table-column>
+            <el-table-column label="当前服务器" min-width="150"><template #default="{ row }">{{ row.server_id || row.instance_name }}</template></el-table-column>
             <el-table-column label="延迟" width="100"><template #default="{ row }">{{ Number.isFinite(Number(row.ping)) ? row.ping + " ms" : "-" }}</template></el-table-column>
             <el-table-column label="加入时间" min-width="150"><template #default="{ row }">{{ formatDate(row.joined_at) }}</template></el-table-column>
+            <el-table-column v-if="isProxyServer && canTransferPlayers" label="操作" width="100" align="right">
+              <template #default="{ row }">
+                <el-button type="primary" link @click="openTransfer(row)"><ArrowRightLeft :size="14" />转移</el-button>
+              </template>
+            </el-table-column>
             <template #empty><div class="table-empty"><Users :size="24" /><span>暂无玩家数据</span></div></template>
           </el-table>
         </section>
@@ -762,7 +1071,7 @@ onBeforeRouteLeave(async () => {
         <div class="plugin-toolbar">
           <div>
             <span>子服</span>
-            <el-select v-model="pluginInstanceId" placeholder="选择子服">
+            <el-select v-model="pluginInstanceId" :disabled="pluginUploadState.active" placeholder="选择子服">
               <el-option v-for="item in instances" :key="item.instance_id" :label="item.name" :value="item.instance_id" />
             </el-select>
           </div>
@@ -771,6 +1080,14 @@ onBeforeRouteLeave(async () => {
             <el-tag :type="pluginData.plugin_connected ? 'success' : 'info'" effect="plain">
               <PlugZap :size="13" />{{ pluginData.plugin_connected ? "Prism 已连接" : "仅文件扫描" }}
             </el-tag>
+            <el-tooltip v-if="canDeployPlugins" content="上传插件 JAR">
+              <el-button
+                class="square-button"
+                :disabled="pluginUploadState.active || !pluginInstanceId"
+                aria-label="上传插件 JAR"
+                @click="choosePluginFiles"
+              ><Upload :size="15" /></el-button>
+            </el-tooltip>
             <el-tooltip content="刷新插件">
               <el-button class="square-button" :loading="pluginLoading" aria-label="刷新插件" @click="loadPlugins()">
                 <RefreshCw v-if="!pluginLoading" :size="15" />
@@ -783,7 +1100,7 @@ onBeforeRouteLeave(async () => {
           type="warning"
           :closable="false"
           show-icon
-          title="插件文件已变更，需要手动重启对应子服才能应用"
+          :title="pluginPendingTitle"
           class="plugin-restart-alert"
         >
           <template #default>
@@ -795,7 +1112,25 @@ onBeforeRouteLeave(async () => {
             ><RotateCw :size="14" />重启当前子服</el-button>
           </template>
         </el-alert>
-        <div v-loading="pluginLoading" class="table-frame">
+        <div
+          v-loading="pluginLoading"
+          class="table-frame plugin-drop-frame"
+          :class="{ 'drop-active': pluginDropActive }"
+          @dragover="handlePluginDragOver"
+          @dragleave="handlePluginDragLeave"
+          @drop="handlePluginDrop"
+        >
+          <div v-if="pluginUploadState.active" class="plugin-upload-progress">
+            <div>
+              <span>{{ pluginUploadState.name }}</span>
+              <strong>{{ pluginUploadState.completed }}/{{ pluginUploadState.total }}</strong>
+            </div>
+            <el-progress
+              :percentage="Math.round(pluginUploadState.completed / pluginUploadState.total * 100)"
+              :stroke-width="3"
+              :show-text="false"
+            />
+          </div>
           <el-table :data="filteredPlugins" :row-key="(row) => (row.source_file || 'runtime') + ':' + row.name">
             <el-table-column label="插件" min-width="230">
               <template #default="{ row }">
@@ -848,6 +1183,7 @@ onBeforeRouteLeave(async () => {
             <template #empty><div class="table-empty"><Puzzle :size="24" /><span>暂无插件数据</span></div></template>
           </el-table>
         </div>
+        <input ref="pluginUploadInput" type="file" accept=".jar,application/java-archive" multiple hidden @change="handlePluginFileInput" />
       </el-tab-pane>
 
       <el-tab-pane label="配置" name="config">
@@ -855,7 +1191,8 @@ onBeforeRouteLeave(async () => {
           <div class="section-title"><div><h3>运行配置</h3><p>由 daemon 保存并用于派生子服</p></div></div>
           <el-descriptions :column="2" border class="detail-descriptions">
             <el-descriptions-item label="服务器组 ID"><code>{{ server.server_id }}</code></el-descriptions-item>
-            <el-descriptions-item label="类型">{{ server.type === "mirror" ? "镜像服务器组" : "固定实例" }}</el-descriptions-item>
+            <el-descriptions-item label="类型">{{ isProxyServer ? "代理服" : (server.type === "mirror" ? "镜像服" : "普通服务器") }}</el-descriptions-item>
+            <el-descriptions-item label="平台">{{ server.platform || "paper" }}</el-descriptions-item>
             <el-descriptions-item :label="server.type === 'mirror' ? '根目录' : '工作目录'"><code>{{ server.type === "mirror" ? server.root_path : server.workspace }}</code></el-descriptions-item>
             <el-descriptions-item label="端口"><code>{{ server.type === "mirror" ? server.ports.join(", ") : server.port }}</code></el-descriptions-item>
             <el-descriptions-item label="启动命令"><code>{{ server.process.start_command }}</code></el-descriptions-item>
@@ -865,9 +1202,73 @@ onBeforeRouteLeave(async () => {
             <el-descriptions-item label="控制台编码">{{ server.console.encoding.toUpperCase() }}</el-descriptions-item>
           </el-descriptions>
         </section>
+        <section v-if="server && canConfigure" v-loading="proxyConfigLoading" class="data-section">
+          <template v-if="isProxyServer">
+            <div class="section-title">
+              <div><h3>下游服务器同步</h3><p>节点选择会自动包含该节点以后新增的兼容服务器</p></div>
+              <el-button type="primary" :loading="proxyConfigLoading" @click="saveProxyRules">保存并同步</el-button>
+            </div>
+            <TargetSelectionTree v-model="proxyRules" :nodes="allNodeContents" exclude-proxy />
+            <el-alert
+              v-if="proxyStatus"
+              class="plugin-restart-alert"
+              :type="proxyStatus.state === 'failed' ? 'error' : (proxyStatus.state === 'synced' ? 'success' : 'info')"
+              :closable="false"
+              :title="'同步状态：' + proxyStatus.state + (proxyStatus.error ? ' · ' + proxyStatus.error : '')"
+            />
+          </template>
+          <template v-else>
+            <div class="section-title">
+              <div><h3>同步到代理服</h3><p>停止状态仍会保留在代理服务器列表中</p></div>
+              <el-button type="primary" :loading="proxyConfigLoading" @click="saveProxySelections">保存</el-button>
+            </div>
+            <div class="proxy-selection-list">
+              <el-checkbox
+                v-for="item in proxySelections"
+                :key="item.node_id + ':' + item.server_id"
+                v-model="item.selected"
+                border
+              >{{ item.server_id }}</el-checkbox>
+              <span v-if="!proxySelections.length" class="muted">暂无已配置的代理服</span>
+            </div>
+          </template>
+        </section>
       </el-tab-pane>
     </el-tabs>
   </div>
+
+  <el-dialog
+    v-model="pluginConflictOpen"
+    title="发现同名插件"
+    width="min(560px, 94vw)"
+    :show-close="false"
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+  >
+    <div class="plugin-conflict-content">
+      <p>
+        上传文件「{{ pluginConflict.fileName }}」识别为
+        <strong>{{ pluginConflict.incoming.name }} {{ pluginConflict.incoming.version }}</strong>。
+      </p>
+      <p>
+        当前子服「{{ pluginInstance?.name || pluginInstanceId }}」已安装
+        <strong>{{ pluginConflict.incoming.name }} {{ pluginConflict.existing.version }}</strong>
+        （{{ pluginConflict.existing.file }}）。
+      </p>
+      <small>{{ pluginConflictRestartNote }}</small>
+    </div>
+    <template #footer>
+      <el-button @click="decidePluginConflict('skip')">跳过此插件</el-button>
+      <el-button type="primary" plain @click="decidePluginConflict('replace')">仅替换</el-button>
+      <el-button
+        v-if="canRestartUploadedPlugin"
+        type="primary"
+        @click="decidePluginConflict('replace-restart')"
+      >
+        {{ pluginUploadState.total > 1 ? "替换并在完成后重启" : "替换并重启" }}
+      </el-button>
+    </template>
+  </el-dialog>
 
   <el-dialog
     v-model="deploymentOpen"
@@ -1005,6 +1406,30 @@ onBeforeRouteLeave(async () => {
       <el-button @click="uninstallOpen = false">取消</el-button>
       <el-button type="danger" :loading="pluginActionLoading === uninstallTarget?.name" @click="uninstallPlugin">
         <Trash2 :size="15" />卸载
+      </el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="transferOpen" title="转移玩家" width="min(480px, 94vw)">
+    <el-form label-position="top">
+      <el-form-item label="玩家">
+        <el-input :model-value="transferForm.player?.name" disabled />
+      </el-form-item>
+      <el-form-item label="目标服务器" required>
+        <el-select v-model="transferForm.targetServerId" class="full-control" filterable>
+          <el-option
+            v-for="item in backendOptions"
+            :key="item.value"
+            :label="item.label + ' · ' + item.nodeName"
+            :value="item.value"
+          />
+        </el-select>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="transferOpen = false">取消</el-button>
+      <el-button type="primary" :loading="transferSubmitting" @click="transferPlayer">
+        <ArrowRightLeft :size="15" />转移
       </el-button>
     </template>
   </el-dialog>

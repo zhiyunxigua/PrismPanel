@@ -14,6 +14,7 @@ import (
 
 type cacheKey struct {
 	Path       string
+	PluginType string
 	Size       int64
 	ModifiedNS int64
 }
@@ -27,7 +28,8 @@ func newScanCache() *scanCache {
 	return &scanCache{items: make(map[cacheKey]FilePlugin)}
 }
 
-func (c *scanCache) scan(workspace string) ([]FilePlugin, []string) {
+func (c *scanCache) scan(workspace string, pluginTypes ...string) ([]FilePlugin, []string) {
+	pluginType := requestedPluginType(pluginTypes)
 	pluginDir := filepath.Join(workspace, "plugins")
 	entries, err := os.ReadDir(pluginDir)
 	if os.IsNotExist(err) {
@@ -53,7 +55,7 @@ func (c *scanCache) scan(workspace string) ([]FilePlugin, []string) {
 			continue
 		}
 		path := filepath.Join(pluginDir, name)
-		key := cacheKey{Path: path, Size: info.Size(), ModifiedNS: info.ModTime().UnixNano()}
+		key := cacheKey{Path: path, PluginType: pluginType, Size: info.Size(), ModifiedNS: info.ModTime().UnixNano()}
 		live[key] = struct{}{}
 		c.mu.Lock()
 		cached, exists := c.items[key]
@@ -62,7 +64,7 @@ func (c *scanCache) scan(workspace string) ([]FilePlugin, []string) {
 			items = append(items, cached)
 			continue
 		}
-		plugin, scanErr := scanFile(path, name, enabled, info)
+		plugin, scanErr := scanFile(path, name, enabled, info, pluginType)
 		if scanErr != nil {
 			warnings = append(warnings, fmt.Sprintf("scan %s: %v", name, scanErr))
 			continue
@@ -88,8 +90,9 @@ func (c *scanCache) scan(workspace string) ([]FilePlugin, []string) {
 	return items, warnings
 }
 
-func scanFile(path, sourceFile string, enabled bool, info os.FileInfo) (FilePlugin, error) {
-	descriptors, primary, err := parseJAR(path)
+func scanFile(path, sourceFile string, enabled bool, info os.FileInfo, pluginTypes ...string) (FilePlugin, error) {
+	pluginType := requestedPluginType(pluginTypes)
+	descriptors, primary, err := parseJAR(path, pluginType)
 	if err != nil {
 		return FilePlugin{}, err
 	}
@@ -102,7 +105,7 @@ func scanFile(path, sourceFile string, enabled bool, info os.FileInfo) (FilePlug
 		mainClass = primary.Bootstrapper
 	}
 	return FilePlugin{
-		Name: primary.Name, Version: primary.Version, Main: mainClass,
+		PluginType: primary.PluginType, Name: primary.Name, Version: primary.Version, Main: mainClass,
 		Authors: append([]string(nil), primary.Authors...), Description: primary.Description,
 		Website: primary.Website, Dependencies: append([]string(nil), primary.Dependencies...),
 		Descriptors: descriptors, SourceFile: sourceFile, SHA256: hash,

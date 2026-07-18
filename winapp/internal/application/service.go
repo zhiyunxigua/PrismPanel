@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"PrismPanel-winapp/internal/client"
+	"PrismPanel-winapp/internal/credentials"
 	"PrismPanel-winapp/internal/proxy"
 	"PrismPanel-winapp/internal/settings"
 )
@@ -23,18 +24,20 @@ type RuntimeConfig struct {
 	APIBaseURL    string `json:"apiBaseUrl"`
 	ProxySession  string `json:"proxySession"`
 	ConnectionErr string `json:"connectionError,omitempty"`
+	AutoLoginErr  string `json:"autoLoginError,omitempty"`
 }
 
 type Service struct {
-	store settings.Store
+	store       settings.Store
+	credentials credentials.Store
 
 	mu      sync.Mutex
 	client  *client.Client
 	runtime RuntimeConfig
 }
 
-func New(store settings.Store) *Service {
-	return &Service{store: store, runtime: RuntimeConfig{Mode: "winapp"}}
+func New(store settings.Store, credentialStore credentials.Store) *Service {
+	return &Service{store: store, credentials: credentialStore, runtime: RuntimeConfig{Mode: "winapp"}}
 }
 
 func (s *Service) Start(ctx context.Context) error {
@@ -45,13 +48,22 @@ func (s *Service) Start(ctx context.Context) error {
 	if strings.TrimSpace(value.PanelURL) == "" {
 		return nil
 	}
-	runtime, panelClient, err := s.connect(ctx, value.PanelURL)
-	if err != nil {
-		s.mu.Lock()
-		s.runtime.PanelURL = value.PanelURL
-		s.runtime.ConnectionErr = err.Error()
-		s.mu.Unlock()
-		return nil
+	runtime, panelClient, initialized, err := s.connect(ctx, value.PanelURL)
+	if panelClient == nil {
+		runtime = RuntimeConfig{
+			Mode: "winapp", Configured: true, PanelURL: value.PanelURL,
+			ConnectionErr: err.Error(),
+		}
+	} else if err != nil {
+		runtime.ConnectionErr = err.Error()
+	}
+	if err == nil && initialized {
+		loginContext, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err := s.autoLogin(loginContext, value.PanelURL, panelClient)
+		cancel()
+		if err != nil {
+			runtime.AutoLoginErr = err.Error()
+		}
 	}
 	s.mu.Lock()
 	s.client = panelClient
@@ -65,8 +77,11 @@ func (s *Service) ConfigurePanelURL(ctx context.Context, rawURL string) (Runtime
 	if err != nil {
 		return RuntimeConfig{}, err
 	}
-	runtime, panelClient, err := s.connect(ctx, panelURL)
+	runtime, panelClient, _, err := s.connect(ctx, panelURL)
 	if err != nil {
+		if panelClient != nil {
+			_ = panelClient.Close(context.Background())
+		}
 		return RuntimeConfig{}, err
 	}
 	if err := s.store.Save(settings.Settings{PanelURL: panelURL}); err != nil {
@@ -104,25 +119,26 @@ func (s *Service) Close(ctx context.Context) error {
 	return panelClient.Close(ctx)
 }
 
-func (s *Service) connect(ctx context.Context, panelURL string) (RuntimeConfig, *client.Client, error) {
+func (s *Service) connect(ctx context.Context, panelURL string) (RuntimeConfig, *client.Client, bool, error) {
 	panelClient, err := client.New(panelURL)
 	if err != nil {
-		return RuntimeConfig{}, nil, err
+		return RuntimeConfig{}, nil, false, err
 	}
 	if err := panelClient.Start(); err != nil {
-		return RuntimeConfig{}, nil, err
+		return RuntimeConfig{}, nil, false, err
 	}
 	clientRuntime := panelClient.RuntimeConfig()
-	probeContext, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if err := probePanel(probeContext, clientRuntime); err != nil {
-		_ = panelClient.Close(context.Background())
-		return RuntimeConfig{}, nil, err
-	}
-	return RuntimeConfig{
+	runtime := RuntimeConfig{
 		Mode: "winapp", Configured: true, PanelURL: panelURL,
 		APIBaseURL: clientRuntime.APIBaseURL, ProxySession: clientRuntime.ProxySession,
-	}, panelClient, nil
+	}
+	probeContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	initialized, err := probePanel(probeContext, clientRuntime)
+	if err != nil {
+		return runtime, panelClient, false, err
+	}
+	return runtime, panelClient, initialized, nil
 }
 
 func NormalizePanelURL(raw string) (string, error) {
@@ -140,22 +156,25 @@ func NormalizePanelURL(raw string) (string, error) {
 	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
-func probePanel(ctx context.Context, runtime client.RuntimeConfig) error {
+func probePanel(ctx context.Context, runtime client.RuntimeConfig) (bool, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, runtime.APIBaseURL+"/api/v1/auth/status", nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	request.Header.Set(proxy.ClientSessionHeader, runtime.ProxySession)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return fmt.Errorf("无法连接远程 Panel: %w", err)
+		return false, fmt.Errorf("无法连接远程 Panel: %w", err)
 	}
 	defer response.Body.Close()
 	var payload struct {
 		Success bool `json:"success"`
+		Data    struct {
+			Initialized bool `json:"initialized"`
+		} `json:"data"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil || !payload.Success {
-		return errors.New("远程地址不是可用的 PrismPanel 服务")
+		return false, errors.New("远程地址不是可用的 PrismPanel 服务")
 	}
-	return nil
+	return payload.Data.Initialized, nil
 }

@@ -15,6 +15,10 @@ public final class FileFingerprintCache {
     public void add(Path source, Map<String, Object> target) {
         try {
             Path normalized = source.toAbsolutePath().normalize();
+            Path fileName = normalized.getFileName();
+            if (fileName != null) {
+                target.put("source_file", fileName.toString());
+            }
             if (!Files.isRegularFile(normalized)) {
                 return;
             }
@@ -25,7 +29,6 @@ public final class FileFingerprintCache {
                 cached = new Entry(size, modified, sha256(normalized));
                 entries.put(normalized, cached);
             }
-            target.put("source_file", normalized.getFileName().toString());
             target.put("sha256", cached.sha256());
         } catch (IOException | RuntimeException ignored) {
         }

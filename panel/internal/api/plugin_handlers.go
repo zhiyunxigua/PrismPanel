@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	panelplugins "PrismPanel/internal/plugins"
@@ -98,8 +99,15 @@ func (s *Server) handlePluginUpload(writer http.ResponseWriter, request *http.Re
 		writeRequestError(writer, apiError("INVALID_REQUEST", "插件配置必须是 ZIP 文件"))
 		return
 	}
+	pluginType := strings.ToLower(strings.TrimSpace(request.FormValue("plugin_type")))
+	if !panelplugins.ValidPluginType(pluginType) {
+		writeRequestError(writer, apiError("INVALID_REQUEST", "plugin_type must be spigot, velocity or bungee"))
+		return
+	}
+	autoInstall, _ := strconv.ParseBool(request.FormValue("auto_install"))
 	session := currentSession(request)
 	result, err := s.plugins.Upload(panelplugins.UploadInput{
+		PluginType: pluginType, AutoInstall: autoInstall,
 		JARFilename: jarHeader.Filename, JAR: jar, ConfigZIP: config,
 		ConfigDirectory: request.FormValue("config_directory"),
 		Uploader: panelplugins.Uploader{
@@ -115,6 +123,7 @@ func (s *Server) handlePluginUpload(writer http.ResponseWriter, request *http.Re
 		}
 	}
 	s.record(request, "plugin.upload", result.Plugin.PluginID, map[string]any{
+		"plugin_type": pluginType, "auto_install": autoInstall,
 		"filename": jarHeader.Filename, "version": result.Artifact.Version,
 		"artifact_id": result.Artifact.ArtifactID, "duplicate": result.Duplicate,
 	}, err)
@@ -186,7 +195,7 @@ func syncPluginCatalogAll(ctx context.Context, repository *store.Store, catalog 
 				return err
 			}
 			artifacts = append(artifacts, store.PluginArtifactIndex{
-				PluginID: plugin.PluginID, ArtifactID: artifact.ArtifactID,
+				PluginType: plugin.PluginType, PluginID: plugin.PluginID, ArtifactID: artifact.ArtifactID,
 				PluginName: artifact.Name, Version: artifact.Version, MainClass: artifact.Main,
 				JARSHA256: artifact.Artifact.SHA256, ConfigSHA256: artifact.Config.SHA256,
 				Current:      artifact.ArtifactID == plugin.CurrentArtifactID,

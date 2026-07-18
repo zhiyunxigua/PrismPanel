@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"PrismPanel-daemon/internal/model"
 	serverservice "PrismPanel-daemon/internal/server"
 	"PrismPanel-daemon/internal/supervisor"
 )
@@ -33,7 +34,7 @@ func (s *Service) List(instanceID string) (ListResult, error) {
 	if err != nil {
 		return ListResult{}, err
 	}
-	files, warnings := s.cache.scan(snapshot.Workspace)
+	files, warnings := s.cache.scan(snapshot.Workspace, model.PluginTypeForPlatform(snapshot.Platform))
 	items, pending := merge(files, snapshot.Plugins, snapshot.PluginConnected)
 	if snapshot.PluginConnected {
 		s.supervisor.SetPluginPendingRestart(instanceID, pending)
@@ -47,11 +48,12 @@ func (s *Service) List(instanceID string) (ListResult, error) {
 }
 
 type operationTarget struct {
-	ID        string
-	Workspace string
-	Running   bool
-	Image     bool
-	Optional  bool
+	ID         string
+	Workspace  string
+	Running    bool
+	Image      bool
+	Optional   bool
+	PluginType string
 }
 
 func (s *Service) targets(serverID string) ([]operationTarget, func(), error) {
@@ -72,6 +74,7 @@ func (s *Service) targets(serverID string) ([]operationTarget, func(), error) {
 	if cfg.Type == "mirror" {
 		targets = append(targets, operationTarget{
 			ID: "image", Workspace: filepath.Join(cfg.RootPath, cfg.ImageDirectory), Image: true,
+			PluginType: model.PluginTypeForPlatform(cfg.Platform),
 		})
 	}
 	for _, instance := range instances {
@@ -83,6 +86,7 @@ func (s *Service) targets(serverID string) ([]operationTarget, func(), error) {
 		targets = append(targets, operationTarget{
 			ID: instance.InstanceID, Workspace: instance.Workspace,
 			Running: snapshot.State == supervisor.StateRunning, Optional: cfg.Type == "mirror",
+			PluginType: model.PluginTypeForPlatform(cfg.Platform),
 		})
 	}
 	return targets, release, nil
@@ -127,6 +131,16 @@ func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool
 				}
 			}
 			if !exists {
+				if strings.TrimSpace(loaded.SourceFile) == "" {
+					items = append(items, Plugin{
+						FilePlugin: FilePlugin{Name: loaded.Name, Version: loaded.Version, Main: loaded.Main,
+							Authors: append([]string(nil), loaded.Authors...), Enabled: loaded.Enabled},
+						Loaded: true, RuntimeVersion: loaded.Version, RuntimeMain: loaded.Main,
+						RuntimeSHA256: loaded.SHA256, Status: "runtime_only",
+						Issues: []string{"runtime_plugin_source_unavailable"},
+					})
+					continue
+				}
 				items = append(items, Plugin{
 					FilePlugin: FilePlugin{Name: loaded.Name, Version: loaded.Version, Main: loaded.Main,
 						Authors: append([]string(nil), loaded.Authors...), SourceFile: filepath.Base(loaded.SourceFile),

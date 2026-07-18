@@ -8,7 +8,9 @@ import {
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { hasPermission } from "../../session";
-import { downloadFile, fileJSON, importArchive, uploadFile } from "../../fileApi";
+import { downloadFile, fileExportURL, fileJSON, importArchive, uploadFile } from "../../fileApi";
+import { isExternalFileDrag, plainUploadItems, scanDroppedItems } from "../../fileDrop";
+import UploadConflictDialog from "./UploadConflictDialog.vue";
 
 const CodeEditor = defineAsyncComponent(() => import("./CodeEditor.vue"));
 
@@ -27,7 +29,12 @@ const activeDirectory = ref(".");
 const selectedPath = ref("");
 const uploadInput = ref(null);
 const archiveInput = ref(null);
-const uploadState = ref({ active: false, completed: 0, total: 0, name: "" });
+const conflictDialog = ref(null);
+const dragTargetPath = ref("");
+const uploadState = ref({
+  active: false, completed: 0, total: 0, name: "", scanning: false,
+  directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
+});
 const archiveImporting = ref(false);
 const rootEmpty = ref(false);
 const expandedPaths = ref([]);
@@ -348,7 +355,7 @@ function chooseArchive() {
 async function handleFileInput(event) {
   const files = Array.from(event.target.files || []);
   event.target.value = "";
-  await uploadFiles(files);
+  await uploadItems(plainUploadItems(files), activeDirectory.value);
 }
 
 async function handleArchiveInput(event) {
@@ -372,39 +379,67 @@ async function handleArchiveInput(event) {
   }
 }
 
-async function handleDrop(event) {
-  if (!canWrite.value || writeLocked.value) return;
-  await uploadFiles(Array.from(event.dataTransfer?.files || []));
+function handleDragOver(event, directory = activeDirectory.value) {
+  if (!isExternalFileDrag(event) || !canWrite.value || writeDisabled.value) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+  dragTargetPath.value = directory;
 }
 
-async function uploadFiles(files) {
-  if (!files.length) return;
-  const target = currentTarget.value;
-  uploadState.value = { active: true, completed: 0, total: files.length, name: files[0].name };
+function handleDragLeave(event) {
+  if (!event.currentTarget.contains(event.relatedTarget)) dragTargetPath.value = "";
+}
+
+async function handleDrop(event, directory = activeDirectory.value) {
+  if (!isExternalFileDrag(event) || !canWrite.value || writeDisabled.value) return;
+  event.preventDefault();
+  event.stopPropagation();
+  dragTargetPath.value = "";
+  uploadState.value = {
+    active: true, completed: 0, total: 0, name: "正在扫描拖入内容", scanning: true,
+    directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
+  };
   try {
-    for (const file of files) {
-      uploadState.value.name = file.name;
-      const targetPath = joinPath(activeDirectory.value, file.name);
+    await uploadItems(await scanDroppedItems(event.dataTransfer), directory, true);
+  } catch (error) {
+    ElMessage.error(error.message || "拖入内容读取失败");
+    uploadState.value.active = false;
+  }
+}
+
+async function uploadItems(items, baseDirectory) {
+  if (!items.files.length && !items.directories.length) {
+    uploadState.value.active = false;
+    return;
+  }
+  const target = currentTarget.value;
+  uploadState.value = {
+    active: true, completed: 0, total: items.files.length, name: items.files[0]?.path || "创建目录",
+    scanning: false, directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
+  };
+  let overwriteAll = false;
+  try {
+    for (const directory of items.directories) {
+      const targetPath = joinPath(baseDirectory, directory);
       try {
-        await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, false);
+        await fileJSON(authorization("file.create", targetPath, [], {}, target), "POST", { type: "directory" });
+        uploadState.value.directories += 1;
       } catch (error) {
-        if (error.code !== "FILE_EXISTS") throw error;
-        try {
-          await ElMessageBox.confirm(`${file.name} 已存在，是否覆盖？`, "覆盖文件", {
-            type: "warning", confirmButtonText: "覆盖", cancelButtonText: "跳过",
-          });
-        } catch (action) {
-          if (isCancelled(action)) {
-            uploadState.value.completed += 1;
-            continue;
-          }
-          throw action;
-        }
-        await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, true);
+        uploadState.value.failed += 1;
       }
+    }
+    for (const item of items.files) {
+      uploadState.value.name = item.path;
+      const targetPath = joinPath(baseDirectory, item.path);
+      const result = await uploadOneFile(target, targetPath, item.file, overwriteAll);
+      if (result === "overwrite-all") overwriteAll = true;
+      if (result === "uploaded") uploadState.value.uploaded += 1;
+      if (result === "overwritten" || result === "overwrite-all") uploadState.value.overwritten += 1;
+      if (result === "skipped") uploadState.value.skipped += 1;
+      if (result === "failed") uploadState.value.failed += 1;
       uploadState.value.completed += 1;
     }
-    ElMessage.success("文件上传完成");
+    showUploadSummary(uploadState.value);
     refreshTree();
   } catch (error) {
     if (!isCancelled(error)) ElMessage.error(error.message || "文件上传失败");
@@ -413,10 +448,71 @@ async function uploadFiles(files) {
   }
 }
 
+async function uploadOneFile(target, targetPath, file, overwriteAll) {
+  try {
+    await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, overwriteAll);
+    return overwriteAll ? "overwritten" : "uploaded";
+  } catch (error) {
+    if (error.code !== "FILE_EXISTS") {
+      if (["RESULT_UNKNOWN", "UNAUTHENTICATED"].includes(error.code)) throw error;
+      return "failed";
+    }
+  }
+  const action = await conflictDialog.value.ask({
+    title: "目标文件已存在",
+    message: "目标位置已存在「" + targetPath + "」，请选择处理方式。",
+    detail: "“全部覆盖”仅对本次拖入或选择的后续重复文件生效。",
+    allowOverwriteAll: true,
+  });
+  if (action === "skip") return "skipped";
+  try {
+    await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, true);
+    return action === "overwrite-all" ? "overwrite-all" : "overwritten";
+  } catch (error) {
+    if (["RESULT_UNKNOWN", "UNAUTHENTICATED"].includes(error.code)) throw error;
+    return "failed";
+  }
+}
+
+function showUploadSummary(state) {
+  const parts = [];
+  if (state.directories) parts.push("目录 " + state.directories);
+  if (state.uploaded) parts.push("上传 " + state.uploaded);
+  if (state.overwritten) parts.push("覆盖 " + state.overwritten);
+  if (state.skipped) parts.push("跳过 " + state.skipped);
+  if (state.failed) parts.push("失败 " + state.failed);
+  const message = parts.length ? parts.join("，") : "未上传文件";
+  if (state.failed) ElMessage.warning(message);
+  else ElMessage.success(message);
+}
+
+function dropDirectory(entry) {
+  return entry.type === "directory" ? entry.path : parentPath(entry.path);
+}
+
+function handleEntryDragStart(event, entry) {
+  if (event.target.closest?.("button")) {
+    event.preventDefault();
+    return;
+  }
+  const target = currentTarget.value;
+  if (!target || !entry.path || !event.dataTransfer) return;
+  const name = entry.type === "directory" ? entry.name + ".zip" : entry.name;
+  const safeName = name.replaceAll(":", "_").replaceAll("\r", "").replaceAll("\n", "");
+  const mime = entry.type === "directory" ? "application/zip" : "application/octet-stream";
+  const url = fileExportURL(authorization("file.download", entry.path, [], {}, target));
+  event.dataTransfer.effectAllowed = "copy";
+  event.dataTransfer.setData("DownloadURL", mime + ":" + safeName + ":" + url);
+  event.dataTransfer.setData("text/uri-list", url);
+  event.dataTransfer.setData("text/plain", safeName);
+  event.dataTransfer.setData("application/x-prism-file-entry", entry.path);
+}
+
 async function downloadEntry(entry = preview.value) {
   if (!entry.path) return;
   try {
-    await downloadFile(authorization("file.download", entry.path), entry.name || entry.path.split("/").pop());
+    const name = entry.name || entry.path.split("/").pop();
+    await downloadFile(authorization("file.download", entry.path), entry.type === "directory" ? name + ".zip" : name);
   } catch (error) {
     if (error?.name !== "AbortError") ElMessage.error(error.message || "文件下载失败");
   }
@@ -476,7 +572,13 @@ function fileIconClass(entry) {
 </script>
 
 <template>
-  <div class="file-manager" @dragover.prevent @drop.prevent="handleDrop">
+  <div
+    class="file-manager"
+    :class="{ 'drop-active': dragTargetPath }"
+    @dragover="handleDragOver"
+    @dragleave="handleDragLeave"
+    @drop="handleDrop"
+  >
     <aside class="explorer-pane">
       <div class="explorer-target">
         <el-select :model-value="selectedTargetKey" :disabled="explorerBusy" placeholder="选择文件目标" @change="changeTarget">
@@ -521,17 +623,26 @@ function fileIconClass(entry) {
         @node-collapse="handleNodeCollapse"
       >
         <template #default="{ node, data }">
-          <div class="explorer-node" :title="data.path">
+          <div
+            class="explorer-node"
+            :class="{ 'drop-target': dragTargetPath === dropDirectory(data) }"
+            :title="data.path"
+            draggable="true"
+            @dragstart.stop="handleEntryDragStart($event, data)"
+            @dragover.stop="handleDragOver($event, dropDirectory(data))"
+            @dragleave.stop="handleDragLeave"
+            @drop.stop="handleDrop($event, dropDirectory(data))"
+          >
             <FolderOpen v-if="data.type === 'directory' && node.expanded" class="folder-icon" :size="14" />
             <Folder v-else-if="data.type === 'directory'" class="folder-icon" :size="14" />
             <component :is="fileIcon(data)" v-else :class="fileIconClass(data)" :size="14" />
             <span>{{ data.name }}</span>
-            <el-dropdown v-if="data.type === 'file' || canWrite || canDelete" trigger="click" class="node-menu" @click.stop>
+            <el-dropdown v-if="data.path" trigger="click" class="node-menu" @click.stop>
               <button type="button" aria-label="文件操作" @click.stop><MoreHorizontal :size="15" /></button>
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item v-if="data.type === 'file'" @click="openFile(data)"><Edit3 :size="14" />打开</el-dropdown-item>
-                  <el-dropdown-item v-if="data.type === 'file'" @click="downloadEntry(data)"><Download :size="14" />下载</el-dropdown-item>
+                  <el-dropdown-item @click="downloadEntry(data)"><Download :size="14" />下载</el-dropdown-item>
                   <el-dropdown-item v-if="canWrite" :disabled="writeLocked" @click="renameEntry(data)"><Edit3 :size="14" />重命名</el-dropdown-item>
                   <el-dropdown-item v-if="canWrite" :disabled="writeLocked" @click="promptMove(data)"><MoveRight :size="14" />移动</el-dropdown-item>
                   <el-dropdown-item v-if="canDelete" :disabled="writeLocked" divided @click="removeEntry(data)"><Trash2 :size="14" /><span class="danger">删除</span></el-dropdown-item>
@@ -543,8 +654,17 @@ function fileIconClass(entry) {
       </el-tree>
 
       <div v-if="uploadState.active" class="upload-status">
-        <div><span>{{ uploadState.name }}</span><strong>{{ uploadState.completed }}/{{ uploadState.total }}</strong></div>
-        <el-progress :percentage="Math.round(uploadState.completed / uploadState.total * 100)" :stroke-width="3" :show-text="false" />
+        <div>
+          <span>{{ uploadState.name }}</span>
+          <strong>{{ uploadState.scanning ? "扫描中" : uploadState.completed + "/" + uploadState.total }}</strong>
+        </div>
+        <el-progress
+          :percentage="uploadState.total ? Math.round(uploadState.completed / uploadState.total * 100) : 0"
+          :indeterminate="uploadState.scanning"
+          :duration="1.2"
+          :stroke-width="3"
+          :show-text="false"
+        />
       </div>
       <input ref="uploadInput" type="file" multiple hidden @change="handleFileInput" />
       <input ref="archiveInput" type="file" accept=".zip,application/zip" hidden @change="handleArchiveInput" />
@@ -597,6 +717,7 @@ function fileIconClass(entry) {
         <strong>未打开文件</strong>
       </div>
     </section>
+    <UploadConflictDialog ref="conflictDialog" />
   </div>
 </template>
 
@@ -610,6 +731,7 @@ function fileIconClass(entry) {
   border: 1px solid #cfd7d1;
   background: #fff;
 }
+.file-manager.drop-active { border-color: #5e8c70; }
 .explorer-pane { display: flex; min-width: 0; flex-direction: column; overflow: hidden; border-right: 1px solid #cfd7d1; background: #f6f8f6; }
 .explorer-target { display: flex; min-height: 44px; align-items: center; gap: 6px; border-bottom: 1px solid #dce2dd; padding: 6px 8px; }
 .explorer-target .el-select { min-width: 0; flex: 1; }
@@ -629,6 +751,7 @@ function fileIconClass(entry) {
 .vscode-tree :deep(.el-tree-node.is-current > .el-tree-node__content) { background: #d9e5de; }
 .vscode-tree :deep(.el-tree-node__expand-icon) { padding: 4px 2px; font-size: 10px; }
 .explorer-node { display: flex; min-width: 0; height: 24px; flex: 1; align-items: center; gap: 5px; }
+.explorer-node.drop-target { outline: 1px solid #5e8c70; outline-offset: -1px; background: #dce9e1; }
 .explorer-node > svg { flex: 0 0 auto; }
 .explorer-node > .folder-icon { color: #b78930; }
 .explorer-node > .archive-icon { color: #9a6b32; }

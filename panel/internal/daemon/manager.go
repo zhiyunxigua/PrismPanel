@@ -35,9 +35,9 @@ type managedConnection struct {
 }
 
 type Manager struct {
-	logger   *slog.Logger
-	onStatus func(string, RuntimeStatus)
-	onEvent  func(string, string, json.RawMessage)
+	logger          *slog.Logger
+	statusCallbacks []func(string, RuntimeStatus)
+	onEvent         func(string, string, json.RawMessage)
 
 	mu          sync.RWMutex
 	ctx         context.Context
@@ -51,12 +51,23 @@ func (m *Manager) SetEventCallback(callback func(string, string, json.RawMessage
 	m.mu.Unlock()
 }
 
+func (m *Manager) AddStatusCallback(callback func(string, RuntimeStatus)) {
+	if callback == nil {
+		return
+	}
+	m.mu.Lock()
+	m.statusCallbacks = append(m.statusCallbacks, callback)
+	m.mu.Unlock()
+}
+
 func NewManager(logger *slog.Logger, onStatus func(string, RuntimeStatus)) *Manager {
-	return &Manager{
-		logger: logger, onStatus: onStatus,
+	manager := &Manager{
+		logger:      logger,
 		connections: make(map[string]managedConnection),
 		statuses:    make(map[string]RuntimeStatus),
 	}
+	manager.AddStatusCallback(onStatus)
+	return manager
 }
 
 func (m *Manager) Start(ctx context.Context, definitions []ConnectionDefinition) {
@@ -86,9 +97,10 @@ func (m *Manager) Upsert(definition ConnectionDefinition) {
 	client.SetStatusCallback(func(status RuntimeStatus) {
 		m.mu.Lock()
 		m.statuses[definition.PanelNodeID] = status
+		callbacks := append([]func(string, RuntimeStatus){}, m.statusCallbacks...)
 		m.mu.Unlock()
-		if m.onStatus != nil {
-			m.onStatus(definition.PanelNodeID, status)
+		for _, callback := range callbacks {
+			callback(definition.PanelNodeID, status)
 		}
 	})
 	client.SetEventCallback(func(eventType string, data json.RawMessage) {
@@ -156,6 +168,28 @@ func (m *Manager) UploadPlugin(ctx context.Context, panelNodeID, ticket, serverI
 		return ErrDisconnected
 	}
 	return connection.client.UploadPlugin(ctx, ticket, serverID, path, output)
+}
+
+func (m *Manager) UploadInstancePlugin(
+	ctx context.Context,
+	panelNodeID string,
+	ticket string,
+	instanceID string,
+	filename string,
+	overwrite bool,
+	body io.Reader,
+	contentLength int64,
+	output any,
+) error {
+	m.mu.RLock()
+	connection, exists := m.connections[panelNodeID]
+	m.mu.RUnlock()
+	if !exists {
+		return ErrDisconnected
+	}
+	return connection.client.UploadInstancePlugin(
+		ctx, ticket, instanceID, filename, overwrite, body, contentLength, output,
+	)
 }
 
 func (m *Manager) FileRequest(ctx context.Context, panelNodeID, operation, method string, headers http.Header, body io.Reader, contentLength int64) (*http.Response, error) {

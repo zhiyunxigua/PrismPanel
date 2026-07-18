@@ -15,12 +15,14 @@ import (
 )
 
 type pendingOperation struct {
-	Type            string    `json:"type"`
-	PluginName      string    `json:"plugin_name,omitempty"`
-	ConfigDirectory string    `json:"config_directory,omitempty"`
-	DeleteConfig    bool      `json:"delete_config,omitempty"`
-	BundleFile      string    `json:"bundle_file,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
+	Type             string    `json:"type"`
+	PluginType       string    `json:"plugin_type,omitempty"`
+	PluginName       string    `json:"plugin_name,omitempty"`
+	OriginalFilename string    `json:"original_filename,omitempty"`
+	ConfigDirectory  string    `json:"config_directory,omitempty"`
+	DeleteConfig     bool      `json:"delete_config,omitempty"`
+	BundleFile       string    `json:"bundle_file,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type pendingStore struct {
@@ -47,7 +49,11 @@ func (s *pendingStore) enqueue(instanceID string, operation pendingOperation, bu
 		return err
 	}
 	if bundlePath != "" {
-		name := fmt.Sprintf("bundle-%d.zip", time.Now().UnixNano())
+		extension := ".zip"
+		if operation.Type == "upload" {
+			extension = ".jar"
+		}
+		name := fmt.Sprintf("bundle-%d%s", time.Now().UnixNano(), extension)
 		if err := copyFile(bundlePath, filepath.Join(directory, name)); err != nil {
 			return err
 		}

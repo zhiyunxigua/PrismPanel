@@ -82,6 +82,18 @@ export async function downloadFile(authorization, suggestedName) {
   }
 }
 
+export function fileExportURL(authorization) {
+  const url = new URL(apiURL("/api/v1/files/export"));
+  url.searchParams.set("node_id", authorization.node_id);
+  url.searchParams.set("resource_type", authorization.resource_type);
+  url.searchParams.set("resource_id", authorization.resource_id);
+  url.searchParams.set("path", authorization.path);
+  if (runtimeConfig.proxySession) {
+    url.searchParams.set("proxy_session", runtimeConfig.proxySession);
+  }
+  return url.toString();
+}
+
 async function withAuthorization(input, operation) {
   let grant = await authorize(input, proxyNodes.has(input.node_id));
   try {

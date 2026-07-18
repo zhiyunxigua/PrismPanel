@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Activity, Boxes, Cpu, MemoryStick, Plus, RefreshCw, Search, Server, Users } from "lucide-vue-next";
+import { Activity, Boxes, Cpu, MemoryStick, Network, Plus, RefreshCw, Search, Server, Users } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { request } from "../api";
 import { importArchive } from "../fileApi";
@@ -36,7 +36,7 @@ const filteredRows = computed(() => {
     const ports = row.type === "standalone" ? [row.port] : row.ports || [];
     return (!nodeFilter.value || row.node.id === nodeFilter.value)
       && (!stateFilter.value || state === stateFilter.value)
-      && (!typeFilter.value || row.type === typeFilter.value)
+      && (!typeFilter.value || serverKind(row) === typeFilter.value)
       && (!keyword || [row.name, row.server_id, ...ports].join(" ").toLowerCase().includes(keyword));
   });
 });
@@ -66,6 +66,15 @@ function aggregateState(instances) {
   return states[0] || "stopped";
 }
 
+function serverKind(row) {
+  if (["velocity", "bungee"].includes(row.platform)) return "proxy";
+  return row.type === "mirror" ? "mirror" : "ordinary";
+}
+
+function serverKindLabel(row) {
+  return { ordinary: "普通服务器", mirror: "镜像服", proxy: "代理服" }[serverKind(row)];
+}
+
 async function load(silent = false) {
   if (!silent) loading.value = true;
   try {
@@ -78,7 +87,7 @@ async function load(silent = false) {
   }
 }
 
-async function createServer({ nodeId, config, archive }) {
+async function createServer({ nodeId, config, archive, proxyRules, proxyTargets }) {
   submitting.value = true;
   let created = false;
   try {
@@ -87,8 +96,33 @@ async function createServer({ nodeId, config, archive }) {
       body: JSON.stringify(config),
     });
     created = true;
+    if (["velocity", "bungee"].includes(config.platform) && Array.isArray(proxyRules)) {
+      const query = "?node_id=" + encodeURIComponent(nodeId)
+        + "&server_id=" + encodeURIComponent(config.server_id);
+      await request("/api/v1/proxy-sync-rules" + query, {
+        method: "PUT",
+        body: JSON.stringify({ rules: proxyRules || [] }),
+      });
+    } else if (proxyTargets?.length) {
+      const query = "?target_node_id=" + encodeURIComponent(nodeId)
+        + "&target_server_id=" + encodeURIComponent(config.server_id);
+      await request("/api/v1/proxy-sync-rules" + query, {
+        method: "PUT",
+        body: JSON.stringify({
+          proxies: proxyTargets.map((item) => ({
+            node_id: item.node_id,
+            server_id: item.server_id,
+            enabled: item.enabled,
+          })),
+        }),
+      });
+    }
     dialogOpen.value = false;
-    if (result?.warnings?.length) ElMessage.warning(result.warnings.join("；"));
+    if (result?.server?.warnings?.length) ElMessage.warning(result.server.warnings.join("；"));
+    const failed = (result?.auto_install || []).filter((item) => !item.success);
+    if (failed.length) {
+      ElMessage.warning("服务器已创建，但有 " + failed.length + " 个自动安装插件失败，自动启动已阻止");
+    }
     if (archive) {
       try {
         const imported = await importArchive({
@@ -198,8 +232,9 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
         <el-option v-for="(label, value) in stateLabels" :key="value" :label="label" :value="value" />
       </el-select>
       <el-select v-model="typeFilter" class="status-filter" clearable placeholder="全部类型">
-        <el-option label="固定实例" value="standalone" />
-        <el-option label="镜像组" value="mirror" />
+        <el-option label="普通服务器" value="ordinary" />
+        <el-option label="镜像服" value="mirror" />
+        <el-option label="代理服" value="proxy" />
       </el-select>
     </div>
 
@@ -214,6 +249,7 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
         <div class="server-card-head">
           <span class="server-card-symbol">
             <Boxes v-if="row.type === 'mirror'" :size="20" />
+            <Network v-else-if="serverKind(row) === 'proxy'" :size="20" />
             <Server v-else :size="20" />
           </span>
           <span class="server-card-state" :class="aggregateState(row.instances)">
@@ -225,7 +261,7 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
           <strong>{{ row.name }}</strong>
           <div class="server-card-meta">
             <code>{{ row.server_id }}</code>
-            <span>{{ row.type === "mirror" ? "镜像组" : "固定实例" }}</span>
+            <span>{{ serverKindLabel(row) }} · {{ row.platform || "paper" }}</span>
           </div>
         </div>
         <div class="server-card-facts">
@@ -251,6 +287,7 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
   <ServerEditorDialog
     v-model="dialogOpen"
     :nodes="nodeOptions"
+    :node-contents="nodeContents"
     :submitting="submitting"
     @submit="createServer"
   />

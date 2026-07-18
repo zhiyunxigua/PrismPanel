@@ -28,7 +28,7 @@ type rawDescriptor struct {
 	Dependencies any    `yaml:"dependencies"`
 }
 
-func parseJAR(path string) (map[string]Descriptor, Descriptor, error) {
+func parseSpigotJAR(path string) (map[string]Descriptor, Descriptor, error) {
 	reader, err := zip.OpenReader(path)
 	if err != nil {
 		return nil, Descriptor{}, fmt.Errorf("open plugin jar: %w", err)
@@ -85,8 +85,8 @@ func decodeDescriptor(filename string, data []byte) (Descriptor, error) {
 	if strings.TrimSpace(raw.Name) == "" || strings.TrimSpace(raw.Version) == "" {
 		return Descriptor{}, fmt.Errorf("%s requires name and version", filename)
 	}
-	if filename == "plugin.yml" && strings.TrimSpace(raw.Main) == "" {
-		return Descriptor{}, errors.New("plugin.yml requires main")
+	if (filename == "plugin.yml" || filename == "bungee.yml") && strings.TrimSpace(raw.Main) == "" {
+		return Descriptor{}, fmt.Errorf("%s requires main", filename)
 	}
 	return Descriptor{
 		File: filename, Name: strings.TrimSpace(raw.Name), Version: strings.TrimSpace(raw.Version),

@@ -867,6 +867,26 @@ code {
 .plugin-restart-alert .el-alert__content { min-width: 0; }
 .plugin-restart-alert .el-alert__description { margin-top: 7px; }
 .plugin-source-file { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-drop-frame { position: relative; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.plugin-drop-frame.drop-active { border-color: #5e8c70; box-shadow: inset 0 0 0 1px #5e8c70; }
+.plugin-upload-progress {
+  display: grid;
+  gap: 5px;
+  border-bottom: 1px solid #dfe5e0;
+  padding: 8px 10px;
+  background: #f7f9f7;
+}
+
+.proxy-selection-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.plugin-upload-progress > div { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: #67736b; }
+.plugin-upload-progress span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-conflict-content { display: grid; gap: 10px; }
+.plugin-conflict-content p { margin: 0; color: #354139; line-height: 1.65; }
+.plugin-conflict-content small { color: #727e76; line-height: 1.55; }
 .uninstall-plugin-summary {
   display: flex;
   align-items: center;
@@ -921,6 +941,29 @@ code {
 }
 .login-submit { width: 100%; margin-top: 4px; }
 .login-submit span { gap: 8px; }
+.remember-account { margin: -4px 0 16px; color: #536058; }
+.saved-login { display: grid; gap: 16px; }
+.saved-login-label { color: #465149; font-size: 12px; font-weight: 700; }
+.saved-account-row { display: grid; grid-template-columns: minmax(0, 1fr) 40px; gap: 8px; }
+.saved-account-row .el-select { min-width: 0; }
+.saved-account-delete {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid #d7ddd9;
+  border-radius: 5px;
+  background: #fff;
+  color: #8c4741;
+  cursor: pointer;
+}
+.saved-account-delete:hover { border-color: #c88c86; background: #f9eeec; }
+.saved-account-delete:disabled { cursor: not-allowed; opacity: 0.45; }
+.saved-account-option { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 18px; }
+.saved-account-option strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-account-option small { flex: 0 0 auto; color: #7b8580; font-size: 10px; }
+.saved-login-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); gap: 8px; }
+.saved-login-actions .el-button { width: 100%; margin: 0; }
 .login-panel-settings { width: 100%; margin-top: 12px; color: #67716b; }
 .login-panel-settings span { gap: 7px; }
 .login-panel-settings:hover { color: #2f6650; background: #edf3ef; }
@@ -935,6 +978,10 @@ code {
   font-size: 11px;
 }
 .navigation-scrim { display: none; }
+
+@media (max-width: 440px) {
+  .saved-login-actions { grid-template-columns: 1fr; }
+}
 
 @media (max-width: 900px) {
   .app-shell { grid-template-columns: 1fr; }

@@ -11,7 +11,10 @@ globalThis.window = {
   location: { href: "wails://wails.localhost/" },
 };
 
-const { apiURL, isProxyURL, isWinApp, websocketURL } = await import("../src/runtime.js");
+const {
+  apiURL, deleteSavedAccountWinApp, isProxyURL, isWinApp, loginSavedAccountWinApp,
+  loginWinApp, savedAccounts, updateSavedPasswordWinApp, websocketURL,
+} = await import("../src/runtime.js");
 
 test("runtime exposes the WinApp marker", () => {
   assert.equal(isWinApp(), true);
@@ -35,4 +38,27 @@ test("direct daemon WebSocket never receives the local session", () => {
     "wss://node.example.com/api/v1/ws/console",
   );
   assert.equal(isProxyURL("https://node.example.com/api/v1/files/download"), false);
+});
+
+test("WinApp account operations use the Wails bridge", async () => {
+  const calls = [];
+  window.go = { main: { App: {
+    SavedAccounts: async () => [{ id: "account-a", username: "admin" }],
+    Login: async (...args) => { calls.push(["login", ...args]); return { user: { username: "admin" } }; },
+    LoginSavedAccount: async (...args) => { calls.push(["saved", ...args]); return { user: { username: "admin" } }; },
+    DeleteSavedAccount: async (...args) => { calls.push(["delete", ...args]); return []; },
+    UpdateSavedPassword: async (...args) => { calls.push(["password", ...args]); return true; },
+  } } };
+
+  assert.equal((await savedAccounts())[0].username, "admin");
+  await loginWinApp("admin", "secret", true);
+  await loginSavedAccountWinApp("account-a");
+  await deleteSavedAccountWinApp("account-a");
+  await updateSavedPasswordWinApp("admin", "new-secret");
+  assert.deepEqual(calls, [
+    ["login", "admin", "secret", true],
+    ["saved", "account-a"],
+    ["delete", "account-a"],
+    ["password", "admin", "new-secret"],
+  ]);
 });

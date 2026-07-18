@@ -12,7 +12,7 @@ import (
 
 func TestPluginConnectionIsBoundToRunningInstance(t *testing.T) {
 	server := model.ServerConfig{
-		SchemaVersion: 1, Type: "standalone", ServerID: "test", Name: "Test",
+		SchemaVersion: model.SchemaVersion, Type: "standalone", ServerID: "test", Name: "Test",
 		Workspace: t.TempDir(), Port: 25565,
 		Process: model.ProcessConfig{StartCommand: "server", StopCommand: "stop", StopTimeoutSeconds: 30},
 		Console: model.ConsoleConfig{Encoding: "utf-8"},
@@ -34,10 +34,10 @@ func TestPluginConnectionIsBoundToRunningInstance(t *testing.T) {
 	current.pluginTokenSet = true
 	current.mu.Unlock()
 
-	if _, err := manager.RegisterPlugin("test", "session", "wrong", os.Getpid()); err == nil {
+	if _, err := manager.RegisterPlugin("test", "session", "wrong", os.Getpid(), "spigot", nil); err == nil {
 		t.Fatal("expected invalid plugin token to be rejected")
 	}
-	connection, err := manager.RegisterPlugin("test", "session", token, os.Getpid())
+	connection, err := manager.RegisterPlugin("test", "session", token, os.Getpid(), "spigot", []string{"telemetry"})
 	if err != nil {
 		t.Fatal(err)
 	}

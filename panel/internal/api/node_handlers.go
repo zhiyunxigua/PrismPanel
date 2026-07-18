@@ -146,6 +146,10 @@ func (s *Server) handleNode(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 		s.metrics.RemoveNode(path)
+		if cleanupErr := s.store.DeleteSelectionNode(request.Context(), path); cleanupErr != nil {
+			s.logger.Error("delete node selection rules", "node_id", path, "error", cleanupErr)
+		}
+		go s.reconcileAllProxies(context.Background())
 		writeSuccess(writer, map[string]any{})
 	default:
 		methodNotAllowed(writer, "GET, PUT, DELETE")

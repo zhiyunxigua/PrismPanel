@@ -17,7 +17,8 @@ func inspectArtifact(pluginID string, artifactID int64, artifactDir string, prev
 	if err != nil {
 		return Manifest{}, err
 	}
-	descriptors, primary, err := ParseJAR(contents)
+	pluginType := normalizePluginType([]string{previous.PluginType})
+	descriptors, primary, err := ParseJAR(contents, pluginType)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -54,7 +55,7 @@ func inspectArtifact(pluginID string, artifactID int64, artifactDir string, prev
 	}
 	return Manifest{
 		SchemaVersion: manifestSchemaVersion, ArtifactID: artifactID, PluginID: pluginID,
-		Name: primary.Name, Version: primary.Version, Main: mainClass,
+		PluginType: pluginType, Name: primary.Name, Version: primary.Version, Main: mainClass,
 		Authors: append([]string(nil), primary.Authors...), Description: primary.Description,
 		Website: primary.Website, Descriptors: descriptors,
 		Artifact: ArtifactFile{File: "plugin.jar", OriginalFilename: originalFilename,
@@ -65,7 +66,8 @@ func inspectArtifact(pluginID string, artifactID int64, artifactDir string, prev
 
 func artifactMatches(stored, observed Manifest) bool {
 	return stored.SchemaVersion == manifestSchemaVersion && stored.ArtifactID == observed.ArtifactID &&
-		stored.PluginID == observed.PluginID && stored.Name == observed.Name && stored.Version == observed.Version &&
+		stored.PluginID == observed.PluginID && stored.PluginType == observed.PluginType &&
+		stored.Name == observed.Name && stored.Version == observed.Version &&
 		stored.Main == observed.Main && stored.Artifact.SHA256 == observed.Artifact.SHA256 &&
 		stored.Artifact.Size == observed.Artifact.Size && stored.Config.SHA256 == observed.Config.SHA256 &&
 		stored.Config.Directory == observed.Config.Directory && stored.Config.Present == observed.Config.Present

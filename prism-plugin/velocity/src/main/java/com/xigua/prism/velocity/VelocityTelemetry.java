@@ -8,6 +8,7 @@ import com.xigua.prism.core.FileFingerprintCache;
 import com.xigua.prism.core.TelemetryProvider;
 
 import java.lang.management.ManagementFactory;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -66,12 +67,16 @@ final class VelocityTelemetry implements TelemetryProvider {
         List<Map<String, Object>> result = new ArrayList<>(plugins.size());
         for (PluginContainer plugin : plugins) {
             PluginDescription description = plugin.getDescription();
+            Path source = description.getSource().orElse(null);
+            if (source == null) {
+                continue;
+            }
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("name", description.getName().orElse(description.getId()));
             item.put("version", description.getVersion().orElse(""));
             item.put("authors", description.getAuthors());
             item.put("enabled", true);
-            description.getSource().ifPresent(source -> fingerprints.add(source, item));
+            fingerprints.add(source, item);
             result.add(item);
         }
         return result;

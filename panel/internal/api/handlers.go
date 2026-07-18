@@ -51,7 +51,21 @@ func (s *Server) handleServers(writer http.ResponseWriter, request *http.Request
 			return
 		}
 		var result json.RawMessage
+		var created struct {
+			ServerID string `json:"server_id"`
+			Platform string `json:"platform"`
+		}
 		body, err := readBody(request)
+		if err == nil {
+			err = json.Unmarshal(body, &created)
+		}
+		if err == nil {
+			var required bool
+			required, err = s.hasAutoInstallPlugins(created.Platform)
+			if err == nil && required && !s.allow(request, "plugin.deploy") {
+				err = apiError("FORBIDDEN", "创建该服务器需要插件部署权限，原因是存在自动安装插件")
+			}
+		}
 		if err == nil {
 			err = s.callNode(request, "server.create", body, &result)
 		}
@@ -60,7 +74,29 @@ func (s *Server) handleServers(writer http.ResponseWriter, request *http.Request
 			writeError(writer, err)
 			return
 		}
-		writeSuccess(writer, result)
+		nodeID := strings.TrimSpace(request.URL.Query().Get("node_id"))
+		autoInstall := s.autoInstallPlugins(request, nodeID, created.ServerID, created.Platform)
+		autoStartBlocked := hasAutoInstallFailure(autoInstall)
+		if autoStartBlocked {
+			var blockedConfig map[string]any
+			if json.Unmarshal(body, &blockedConfig) == nil {
+				if process, ok := blockedConfig["process"].(map[string]any); ok {
+					process["auto_start"] = false
+					if encoded, encodeErr := json.Marshal(blockedConfig); encodeErr == nil {
+						var ignored json.RawMessage
+						if updateErr := s.callNode(request, "server.update", json.RawMessage(encoded), &ignored); updateErr != nil {
+							s.logger.Error("disable auto start after plugin install failure", "error", updateErr)
+						}
+					}
+				}
+			}
+		}
+		go s.reconcileAllProxies(context.Background())
+		writeSuccess(writer, map[string]any{
+			"server":             result,
+			"auto_install":       autoInstall,
+			"auto_start_blocked": autoStartBlocked,
+		})
 	default:
 		writer.Header().Set("Allow", "GET, POST")
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
@@ -230,6 +266,7 @@ func (s *Server) handleServer(writer http.ResponseWriter, request *http.Request)
 			writeError(writer, err)
 			return
 		}
+		go s.reconcileAllProxies(context.Background())
 		writeSuccess(writer, result)
 	case http.MethodDelete:
 		if !s.authorizeServerRequest(writer, request, "server.delete") {
@@ -241,6 +278,14 @@ func (s *Server) handleServer(writer http.ResponseWriter, request *http.Request)
 			writeError(writer, err)
 			return
 		}
+		nodeID := strings.TrimSpace(request.URL.Query().Get("node_id"))
+		if cleanupErr := s.store.DeleteProxySyncOwner(request.Context(), nodeID, serverID); cleanupErr != nil {
+			s.logger.Error("delete proxy sync owner", "node_id", nodeID, "server_id", serverID, "error", cleanupErr)
+		}
+		if cleanupErr := s.store.DeleteProxySyncTarget(request.Context(), nodeID, serverID); cleanupErr != nil {
+			s.logger.Error("delete proxy sync target", "node_id", nodeID, "server_id", serverID, "error", cleanupErr)
+		}
+		go s.reconcileAllProxies(context.Background())
 		writeSuccess(writer, map[string]any{})
 	default:
 		writer.Header().Set("Allow", "GET, PUT, DELETE")
@@ -459,18 +504,27 @@ func (s *Server) handleInstance(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	instanceID, action := parts[0], parts[1]
-	if request.Method == http.MethodGet && action == "plugins" {
-		if !s.authorizeServerRequest(writer, request, "plugin.view") {
+	if action == "plugins" {
+		if request.Method == http.MethodPost {
+			if !s.authorizeServerRequest(writer, request, "plugin.deploy") {
+				return
+			}
+			s.handleInstancePluginUpload(writer, request, instanceID)
 			return
 		}
-		var result json.RawMessage
-		err := s.callNode(request, "plugin.list", map[string]any{"instance_id": instanceID}, &result)
-		if err != nil {
-			writeError(writer, err)
+		if request.Method == http.MethodGet {
+			if !s.authorizeServerRequest(writer, request, "plugin.view") {
+				return
+			}
+			var result json.RawMessage
+			err := s.callNode(request, "plugin.list", map[string]any{"instance_id": instanceID}, &result)
+			if err != nil {
+				writeError(writer, err)
+				return
+			}
+			writeSuccess(writer, result)
 			return
 		}
-		writeSuccess(writer, result)
-		return
 	}
 	if request.Method != http.MethodPost {
 		methodNotAllowed(writer, "GET, POST")

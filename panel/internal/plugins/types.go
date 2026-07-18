@@ -9,6 +9,7 @@ type Uploader struct {
 }
 
 type Descriptor struct {
+	PluginType   string   `yaml:"plugin_type" json:"plugin_type"`
 	File         string   `yaml:"file" json:"file"`
 	Name         string   `yaml:"name" json:"name"`
 	Version      string   `yaml:"version" json:"version"`
@@ -42,6 +43,7 @@ type Manifest struct {
 	SchemaVersion int                   `yaml:"schema_version" json:"schema_version"`
 	ArtifactID    int64                 `yaml:"artifact_id" json:"artifact_id"`
 	PluginID      string                `yaml:"plugin_id" json:"plugin_id"`
+	PluginType    string                `yaml:"plugin_type" json:"plugin_type"`
 	Name          string                `yaml:"name" json:"name"`
 	Version       string                `yaml:"version" json:"version"`
 	Main          string                `yaml:"main,omitempty" json:"main,omitempty"`
@@ -58,19 +60,25 @@ type Manifest struct {
 type Index struct {
 	SchemaVersion     int    `yaml:"schema_version" json:"schema_version"`
 	PluginID          string `yaml:"plugin_id" json:"plugin_id"`
+	PluginType        string `yaml:"plugin_type" json:"plugin_type"`
 	Name              string `yaml:"name" json:"name"`
+	AutoInstall       bool   `yaml:"auto_install" json:"auto_install"`
 	CurrentArtifactID int64  `yaml:"current_artifact_id" json:"current_artifact_id"`
 	NextArtifactID    int64  `yaml:"next_artifact_id" json:"next_artifact_id"`
 }
 
 type Plugin struct {
 	PluginID          string     `json:"plugin_id"`
+	PluginType        string     `json:"plugin_type"`
 	Name              string     `json:"name"`
+	AutoInstall       bool       `json:"auto_install"`
 	CurrentArtifactID int64      `json:"current_artifact_id"`
 	Artifacts         []Manifest `json:"artifacts"`
 }
 
 type UploadInput struct {
+	PluginType      string
+	AutoInstall     bool
 	JARFilename     string
 	JAR             []byte
 	ConfigZIP       []byte

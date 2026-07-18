@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"PrismPanel/internal/auth"
@@ -34,6 +35,7 @@ type Server struct {
 	fileProxies *fileProxyStore
 	http        *http.Server
 	logger      *slog.Logger
+	proxySyncMu sync.Mutex
 }
 
 type response struct {
@@ -58,6 +60,12 @@ func NewServer(
 		nodes: nodeService, metrics: metricStore, plugins: pluginRepository,
 		fileProxies: newFileProxyStore(), logger: logger,
 	}
+	connectionManager.AddStatusCallback(func(_ string, status daemon.RuntimeStatus) {
+		if status.State == "ONLINE" {
+			go server.reconcileAllProxies(context.Background())
+		}
+	})
+	go server.reconcileAllProxies(context.Background())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/status", server.handleAuthStatus)
 	mux.HandleFunc("/api/v1/auth/login", server.handleLogin)
@@ -81,7 +89,11 @@ func NewServer(
 	mux.HandleFunc("/api/v1/plugins", server.requireAuth(server.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", server.requireAuth(server.handlePluginArtifact))
 	mux.HandleFunc("/api/v1/plugins/rescan", server.requireAuth(server.handlePluginRescan))
+	mux.HandleFunc("/api/v1/proxy-sync-rules", server.requireAuth(server.handleProxySyncRules))
+	mux.HandleFunc("/api/v1/plugin-deploy-preferences", server.requireAuth(server.handlePluginDeployPreferences))
+	mux.HandleFunc("/api/v1/players/transfer", server.requireAuth(server.handlePlayerTransfer))
 	mux.HandleFunc("/api/v1/files/authorize", server.requireAuth(server.handleFileAuthorize))
+	mux.HandleFunc("/api/v1/files/export", server.requireAuth(server.handleFileExport))
 	mux.HandleFunc("/api/v1/files/proxy/", server.requireAuth(server.handleFileProxy))
 	mux.HandleFunc("/api/v1/ws/console", server.requirePermission("console.read", server.handleConsoleProxy))
 	mux.Handle("/", frontendHandler(cfg.Frontend.Directory))
