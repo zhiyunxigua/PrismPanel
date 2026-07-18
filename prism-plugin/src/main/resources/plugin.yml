@@ -1,5 +1,0 @@
-name: PrismMC
-version: '${project.version}'
-main: com.xigua.prismMC.PrismMC
-api-version: '1.18'
-authors: [xigua]
