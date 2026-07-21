@@ -1,4 +1,4 @@
-import { createRouter, createWebHashHistory } from "vue-router";
+﻿import { createRouter, createWebHashHistory } from "vue-router";
 import { ensureSession, sessionState } from "./session";
 import { isWinApp, runtimeConfig } from "./runtime";
 
@@ -12,6 +12,7 @@ const NodeDetailView = () => import("./views/NodeDetailView.vue");
 const ServersView = () => import("./views/ServersView.vue");
 const ServerDetailView = () => import("./views/ServerDetailView.vue");
 const PluginsView = () => import("./views/PluginsView.vue");
+const NetGamesView = () => import("./views/NetGamesView.vue");
 const PlaceholderView = () => import("./views/PlaceholderView.vue");
 
 const routes = [
@@ -20,7 +21,8 @@ const routes = [
     name: "panel-setup",
     component: PanelSetupView,
     meta: { guest: true, desktopSetup: true, title: "面板连接" },
-  },  {
+  },
+  {
     path: "/login",
     name: "login",
     component: LoginView,
@@ -49,6 +51,12 @@ const routes = [
         name: "plugins",
         component: PluginsView,
         meta: { title: "插件", permission: "plugin.view" },
+      },
+      {
+        path: "net-games",
+        name: "net-games",
+        component: NetGamesView,
+        meta: { title: "网络游戏", permission: "dashboard.view" },
       },
       {
         path: "users",
@@ -91,7 +99,8 @@ router.beforeEach(async (to) => {
   if (to.name === "panel-setup") {
     if (!isWinApp()) return { name: sessionState.user ? "overview" : "login" };
     return true;
-  }  await ensureSession();
+  }
+  await ensureSession();
   if (to.meta.guest && sessionState.user) return { name: "overview" };
   if (!to.meta.guest && !sessionState.user) {
     return { name: "login", query: { redirect: to.fullPath } };

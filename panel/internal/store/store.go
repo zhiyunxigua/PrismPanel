@@ -36,7 +36,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Store, error) {
 }
 
 var logicalTablePattern = regexp.MustCompile(
-	`\b(user_permission_overrides|group_permissions|user_groups|sessions|users|nodes|audit_logs|file_operations|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences)\b`,
+	`\b(user_permission_overrides|group_permissions|user_preferences|user_groups|sessions|users|nodes|audit_logs|file_operations|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences|net_game_observations|net_game_collection_runs|net_games)\b`,
 )
 
 type database struct {
@@ -281,6 +281,66 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			updated_at DATETIME(6) NOT NULL,
 			PRIMARY KEY (plugin_type, plugin_id, target_node_id, target_server_id),
 			KEY idx_plugin_deploy_target (target_node_id, target_server_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS user_preferences (
+			user_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			namespace VARCHAR(32) CHARACTER SET ascii NOT NULL,
+			schema_version SMALLINT UNSIGNED NOT NULL,
+			settings JSON NOT NULL,
+			created_at DATETIME(6) NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (user_id, namespace),
+			KEY idx_user_preferences_updated (updated_at),
+			CONSTRAINT fk_user_preferences_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS net_games (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			game_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+			name VARCHAR(255) NOT NULL DEFAULT '',
+			summary TEXT NOT NULL,
+			author VARCHAR(255) NOT NULL DEFAULT '',
+			versions JSON NULL,
+			ip VARCHAR(255) CHARACTER SET ascii NOT NULL DEFAULT '',
+			port SMALLINT UNSIGNED NULL,
+			address VARCHAR(512) NOT NULL DEFAULT '',
+			publish_time BIGINT NULL,
+			images JSON NULL,
+			description MEDIUMTEXT NOT NULL,
+			first_seen_at DATETIME(6) NOT NULL,
+			last_seen_at DATETIME(6) NOT NULL,
+			details_status VARCHAR(16) CHARACTER SET ascii NOT NULL DEFAULT 'pending',
+			details_attempted_at DATETIME(6) NULL,
+			details_updated_at DATETIME(6) NULL,
+			details_error_code VARCHAR(64) CHARACTER SET ascii NOT NULL DEFAULT '',
+			details_error_message VARCHAR(500) NOT NULL DEFAULT '',
+			created_at DATETIME(6) NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			UNIQUE KEY uq_net_games_game_id (game_id),
+			KEY idx_net_games_last_seen (last_seen_at),
+			KEY idx_net_games_details (details_status, details_updated_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS net_game_collection_runs (
+			id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+			trigger_type VARCHAR(24) CHARACTER SET ascii NOT NULL,
+			status VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			started_at DATETIME(6) NOT NULL,
+			finished_at DATETIME(6) NULL,
+			pages_fetched INT UNSIGNED NOT NULL DEFAULT 0,
+			total_games INT UNSIGNED NOT NULL DEFAULT 0,
+			error_code VARCHAR(64) CHARACTER SET ascii NOT NULL DEFAULT '',
+			error_message VARCHAR(500) NOT NULL DEFAULT '',
+			remote_request_id VARCHAR(128) CHARACTER SET ascii NOT NULL DEFAULT '',
+			KEY idx_net_game_runs_status_started (status, started_at),
+			KEY idx_net_game_runs_started (started_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS net_game_observations (
+			run_id BIGINT UNSIGNED NOT NULL,
+			game_key BIGINT UNSIGNED NOT NULL,
+			online_count INT UNSIGNED NOT NULL,
+			PRIMARY KEY (run_id, game_key),
+			KEY idx_net_game_observations_history (game_key, run_id, online_count),
+			CONSTRAINT fk_net_game_observations_run FOREIGN KEY (run_id) REFERENCES net_game_collection_runs(id) ON DELETE CASCADE,
+			CONSTRAINT fk_net_game_observations_game FOREIGN KEY (game_key) REFERENCES net_games(id) ON DELETE RESTRICT
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	}
 	for _, statement := range statements {

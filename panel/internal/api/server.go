@@ -19,6 +19,7 @@ import (
 	"PrismPanel/internal/config"
 	"PrismPanel/internal/daemon"
 	panelmetrics "PrismPanel/internal/metrics"
+	"PrismPanel/internal/netgames"
 	panelnodes "PrismPanel/internal/nodes"
 	panelplugins "PrismPanel/internal/plugins"
 	"PrismPanel/internal/store"
@@ -32,6 +33,7 @@ type Server struct {
 	nodes       *panelnodes.Service
 	metrics     *panelmetrics.Store
 	plugins     *panelplugins.Repository
+	netGames    *netgames.Service
 	fileProxies *fileProxyStore
 	http        *http.Server
 	logger      *slog.Logger
@@ -53,11 +55,12 @@ func NewServer(
 	connectionManager *daemon.Manager,
 	metricStore *panelmetrics.Store,
 	pluginRepository *panelplugins.Repository,
+	netGameService *netgames.Service,
 	logger *slog.Logger,
 ) *Server {
 	server := &Server{
 		config: cfg, auth: authService, store: repository, connections: connectionManager,
-		nodes: nodeService, metrics: metricStore, plugins: pluginRepository,
+		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, netGames: netGameService,
 		fileProxies: newFileProxyStore(), logger: logger,
 	}
 	connectionManager.AddStatusCallback(func(_ string, status daemon.RuntimeStatus) {
@@ -91,6 +94,14 @@ func NewServer(
 	mux.HandleFunc("/api/v1/plugins/rescan", server.requireAuth(server.handlePluginRescan))
 	mux.HandleFunc("/api/v1/proxy-sync-rules", server.requireAuth(server.handleProxySyncRules))
 	mux.HandleFunc("/api/v1/plugin-deploy-preferences", server.requireAuth(server.handlePluginDeployPreferences))
+	mux.HandleFunc("/api/v1/net-games/settings", server.requireSuperAdmin(server.handleNetGameSettings))
+	mux.HandleFunc("/api/v1/net-games/account", server.requireSuperAdmin(server.handleNetGameAccount))
+	mux.HandleFunc("/api/v1/net-games/account/verify", server.requireSuperAdmin(server.handleNetGameAccountVerify))
+	mux.HandleFunc("/api/v1/net-games/collect", server.requireSuperAdmin(server.handleNetGameCollect))
+	mux.HandleFunc("/api/v1/net-games/collector-status", server.requireSuperAdmin(server.handleNetGameCollectorStatus))
+	mux.HandleFunc("/api/v1/net-games/series", server.requirePermission("dashboard.view", server.handleNetGameSeries))
+	mux.HandleFunc("/api/v1/net-games/", server.requirePermission("dashboard.view", server.handleNetGame))
+	mux.HandleFunc("/api/v1/user/preferences/net-games", server.requirePermission("dashboard.view", server.handleNetGamePreference))
 	mux.HandleFunc("/api/v1/players/transfer", server.requireAuth(server.handlePlayerTransfer))
 	mux.HandleFunc("/api/v1/files/authorize", server.requireAuth(server.handleFileAuthorize))
 	mux.HandleFunc("/api/v1/files/export", server.requireAuth(server.handleFileExport))

@@ -118,6 +118,7 @@ run/
 .cache/
 daemon/data/
 panel/data/
+panel/panel.yaml
 frontend/node_modules/
 frontend/dist/
 /prism-plugin/*/build/

@@ -19,6 +19,7 @@ import (
 	"PrismPanel/internal/config"
 	"PrismPanel/internal/daemon"
 	panelmetrics "PrismPanel/internal/metrics"
+	"PrismPanel/internal/netgames"
 	"PrismPanel/internal/nodes"
 	panelplugins "PrismPanel/internal/plugins"
 	"PrismPanel/internal/secret"
@@ -33,7 +34,7 @@ func main() {
 }
 
 func run() error {
-	configPath := flag.String("config", "data/panel.yaml", "path to panel YAML configuration")
+	configPath := flag.String("config", "panel.yaml", "path to panel YAML configuration")
 	flag.Parse()
 	cfg, created, err := config.LoadOrCreate(*configPath)
 	if err != nil {
@@ -84,6 +85,12 @@ func run() error {
 	}
 	if keyCreated {
 		slog.Info("generated panel master key", "path", cfg.Security.MasterKeyFile)
+	}
+	netGameService, err := netgames.NewService(
+		repository, masterKey, filepath.Join(filepath.Dir(cfg.Security.MasterKeyFile), "net-games"), slog.Default(),
+	)
+	if err != nil {
+		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -143,9 +150,10 @@ func run() error {
 	defer connectionManager.Close()
 	metricStore := panelmetrics.NewStore()
 	panelmetrics.NewCollector(connectionManager, metricStore, slog.Default()).Start(ctx)
+	netGameService.Start(ctx)
 	httpServer := api.NewServer(
 		cfg, authService, repository, nodeService, connectionManager, metricStore,
-		pluginRepository, slog.Default(),
+		pluginRepository, netGameService, slog.Default(),
 	)
 	serverError := make(chan error, 1)
 	go func() {

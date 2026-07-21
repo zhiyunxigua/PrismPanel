@@ -10,8 +10,9 @@ import (
 )
 
 type APIError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	VerifyURL string `json:"verify_url,omitempty"`
 }
 
 func (e *APIError) Error() string {
@@ -39,9 +40,13 @@ func writeRequestError(writer http.ResponseWriter, err error) {
 			status = http.StatusConflict
 		case "RATE_LIMITED":
 			status = http.StatusTooManyRequests
+		case "NEEDS_VERIFICATION":
+			status = http.StatusPreconditionRequired
 		case "INTERNAL":
 			status = http.StatusInternalServerError
 		}
+		writeJSON(writer, status, response{Success: false, Error: panelError})
+		return
 	case errors.Is(err, daemon.ErrDisconnected):
 		status = http.StatusServiceUnavailable
 		panelError = apiError("DAEMON_UNAVAILABLE", "守护进程当前不可用")

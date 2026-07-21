@@ -1,7 +1,8 @@
-<script setup>
+﻿<script setup>
 import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
+  Activity,
   Bell,
   Boxes,
   ChevronDown,
@@ -39,6 +40,7 @@ const passwordForm = ref({
 
 const navigation = computed(() => [
   { label: "总览", route: "overview", icon: Gauge },
+  { label: "网络游戏", route: "net-games", icon: Activity, permission: "dashboard.view" },
   { label: "服务器", route: "servers", icon: Server, permission: "server.view" },
   { label: "插件", route: "plugins", icon: Package, permission: "plugin.view" },
   { label: "用户", route: "users", icon: Users, permission: "user.view" },
@@ -50,13 +52,13 @@ const passwordRules = {
   currentPassword: [{ required: true, message: "请输入当前密码", trigger: "blur" }],
   newPassword: [
     { required: true, message: "请输入新密码", trigger: "blur" },
-	{
-	  validator: (_rule, value, callback) => {
-		if (Array.from(value || "").length < 6) callback(new Error("密码至少需要 6 个字符"));
-		else callback();
-	  },
-	  trigger: "blur",
-	},
+    {
+      validator: (_rule, value, callback) => {
+        if (Array.from(value || "").length < 6) callback(new Error("密码至少需要 6 个字符"));
+        else callback();
+      },
+      trigger: "blur",
+    },
   ],
   confirmPassword: [
     {
