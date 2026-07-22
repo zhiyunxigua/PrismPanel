@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -6,6 +6,7 @@ import {
   Bell,
   Boxes,
   ChevronDown,
+  Gamepad2,
   Gauge,
   Inbox,
   ListTodo,
@@ -40,6 +41,7 @@ const passwordForm = ref({
 
 const navigation = computed(() => [
   { label: "总览", route: "overview", icon: Gauge },
+  { label: "加入游戏", route: "join-game", icon: Gamepad2 },
   { label: "网络游戏", route: "net-games", icon: Activity, permission: "dashboard.view" },
   { label: "服务器", route: "servers", icon: Server, permission: "server.view" },
   { label: "插件", route: "plugins", icon: Package, permission: "plugin.view" },

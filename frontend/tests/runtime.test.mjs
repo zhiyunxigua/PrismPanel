@@ -12,8 +12,26 @@ globalThis.window = {
 };
 
 const {
-  apiURL, deleteSavedAccountWinApp, isProxyURL, isWinApp, loginSavedAccountWinApp,
-  loginWinApp, savedAccounts, updateSavedPasswordWinApp, websocketURL,
+  apiURL,
+  createGameServer,
+  deleteGameServer,
+  deleteNetEaseAccount,
+  deleteSavedAccountWinApp,
+  gameJoinProgress,
+  gameServerRunning,
+  gameServers,
+  gameVersions,
+  isProxyURL,
+  isWinApp,
+  joinGameServer,
+  loginNetEaseAccount,
+  loginSavedAccountWinApp,
+  loginWinApp,
+  netEaseAccount,
+  savedAccounts,
+  selectGameModDirectory,
+  updateSavedPasswordWinApp,
+  websocketURL,
 } = await import("../src/runtime.js");
 
 test("runtime exposes the WinApp marker", () => {
@@ -60,5 +78,44 @@ test("WinApp account operations use the Wails bridge", async () => {
     ["saved", "account-a"],
     ["delete", "account-a"],
     ["password", "admin", "new-secret"],
+  ]);
+});
+
+test("WinApp game operations use the Wails bridge", async () => {
+  const calls = [];
+  window.go = { main: { App: {
+    NetEaseAccount: async () => ({ email: "test@example.com" }),
+    LoginNetEaseAccount: async (...args) => { calls.push(["netease-login", ...args]); return { email: args[0] }; },
+    DeleteNetEaseAccount: async (...args) => { calls.push(["netease-delete", ...args]); },
+    GameVersions: async () => [{ label: "1.20.6", version: 1020006, java: "jdk21" }],
+    GameServers: async () => [{ id: "server-a", name: "local" }],
+    CreateGameServer: async (...args) => { calls.push(["create-server", ...args]); return { id: "server-b" }; },
+    DeleteGameServer: async (...args) => { calls.push(["delete-server", ...args]); return []; },
+    SelectGameModDirectory: async (...args) => { calls.push(["select-dir", ...args]); return "F:/mods"; },
+    GameServerRunning: async (...args) => { calls.push(["running", ...args]); return false; },
+    JoinGameServer: async (...args) => { calls.push(["join", ...args]); return { status: "running" }; },
+    GameJoinProgress: async (...args) => { calls.push(["progress", ...args]); return { status: "done" }; },
+  } } };
+
+  assert.equal((await netEaseAccount()).email, "test@example.com");
+  assert.equal((await gameVersions())[0].label, "1.20.6");
+  assert.equal((await gameServers())[0].id, "server-a");
+  await loginNetEaseAccount("test@example.com", "secret");
+  await createGameServer({ name: "local" });
+  await selectGameModDirectory();
+  await gameServerRunning("server-a");
+  await joinGameServer("server-a");
+  await gameJoinProgress("server-a");
+  await deleteGameServer("server-a");
+  await deleteNetEaseAccount();
+  assert.deepEqual(calls, [
+    ["netease-login", "test@example.com", "secret"],
+    ["create-server", { name: "local" }],
+    ["select-dir"],
+    ["running", "server-a"],
+    ["join", "server-a"],
+    ["progress", "server-a"],
+    ["delete-server", "server-a"],
+    ["netease-delete"],
   ]);
 });

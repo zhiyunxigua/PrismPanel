@@ -1,4 +1,4 @@
-﻿import { createRouter, createWebHashHistory } from "vue-router";
+import { createRouter, createWebHashHistory } from "vue-router";
 import { ensureSession, sessionState } from "./session";
 import { isWinApp, runtimeConfig } from "./runtime";
 
@@ -6,6 +6,7 @@ const AppLayout = () => import("./layouts/AppLayout.vue");
 const LoginView = () => import("./views/LoginView.vue");
 const PanelSetupView = () => import("./views/PanelSetupView.vue");
 const OverviewView = () => import("./views/OverviewView.vue");
+const JoinGameView = () => import("./views/JoinGameView.vue");
 const UsersView = () => import("./views/UsersView.vue");
 const NodesView = () => import("./views/NodesView.vue");
 const NodeDetailView = () => import("./views/NodeDetailView.vue");
@@ -34,6 +35,12 @@ const routes = [
     meta: { auth: true },
     children: [
       { path: "", name: "overview", component: OverviewView, meta: { title: "总览" } },
+      {
+        path: "join-game",
+        name: "join-game",
+        component: JoinGameView,
+        meta: { title: "加入游戏" },
+      },
       {
         path: "servers",
         name: "servers",

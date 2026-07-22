@@ -16,29 +16,31 @@ export async function configurePanelURL(panelURL) {
   return replaceRuntime(await app.ConfigurePanelURL(panelURL));
 }
 
-export async function savedAccounts() {
-  return callWinApp("SavedAccounts");
-}
+export async function savedAccounts() { return callWinApp("SavedAccounts"); }
+export async function loginWinApp(username, password, remember) { return callWinApp("Login", username, password, Boolean(remember)); }
+export async function loginSavedAccountWinApp(accountID) { return callWinApp("LoginSavedAccount", accountID); }
+export async function deleteSavedAccountWinApp(accountID) { return callWinApp("DeleteSavedAccount", accountID); }
+export async function updateSavedPasswordWinApp(username, password) { return callWinApp("UpdateSavedPassword", username, password); }
 
-export async function loginWinApp(username, password, remember) {
-  return callWinApp("Login", username, password, Boolean(remember));
-}
+export async function netEaseAccount() { return callWinApp("NetEaseAccount"); }
+export async function loginNetEaseAccount(email, password) { return callWinApp("LoginNetEaseAccount", email, password); }
+export async function deleteNetEaseAccount() { return callWinApp("DeleteNetEaseAccount"); }
+export async function gameVersions() { return callWinApp("GameVersions"); }
+export async function gameServers() { return callWinApp("GameServers"); }
+export async function createGameServer(input) { return callWinApp("CreateGameServer", input); }
+export async function deleteGameServer(id) { return callWinApp("DeleteGameServer", id); }
+export async function selectGameModDirectory() { return callWinApp("SelectGameModDirectory"); }
+export async function joinGameServer(id) { return callWinApp("JoinGameServer", id); }
+export async function gameJoinProgress(id) { return callWinApp("GameJoinProgress", id); }
+export async function gameServerRunning(id) { return callWinApp("GameServerRunning", id); }
 
-export async function loginSavedAccountWinApp(accountID) {
-  return callWinApp("LoginSavedAccount", accountID);
-}
+export async function prepareGameInstance(instanceDir) { return callWinApp("PrepareGameInstance", instanceDir); }
+export async function checkNetEaseGameVersion(email, password, version) { return callWinApp("CheckNetEaseGameVersion", email, password, version); }
+export async function downloadNetEaseGameVersion(email, password, version) { return callWinApp("DownloadNetEaseGameVersion", email, password, version); }
+export async function checkSavedNetEaseGameVersion(version) { return callWinApp("CheckSavedNetEaseGameVersion", version); }
+export async function downloadSavedNetEaseGameVersion(version) { return callWinApp("DownloadSavedNetEaseGameVersion", version); }
 
-export async function deleteSavedAccountWinApp(accountID) {
-  return callWinApp("DeleteSavedAccount", accountID);
-}
-
-export async function updateSavedPasswordWinApp(username, password) {
-  return callWinApp("UpdateSavedPassword", username, password);
-}
-
-export function isWinApp() {
-  return runtime.mode === "winapp";
-}
+export function isWinApp() { return runtime.mode === "winapp"; }
 
 export function apiURL(path) {
   const base = runtime.apiBaseUrl || window.location.href;
@@ -80,7 +82,7 @@ function replaceRuntime(value) {
 function callWinApp(method, ...args) {
   const operation = window.go?.main?.App?.[method];
   if (typeof operation !== "function") {
-    throw new Error("Windows 客户端登录服务不可用");
+    throw new Error("Windows 客户端服务不可用");
   }
   return operation(...args);
 }

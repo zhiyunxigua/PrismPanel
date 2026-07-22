@@ -70,7 +70,7 @@ func (s *Service) Start(ctx context.Context) {
 		s.logger.Warn("mark interrupted net game runs", "error", err)
 	}
 	if _, err := s.state.Account(); err == nil {
-		go s.collectOnce(context.Background(), "startup")
+		go s.collectFullOnce(context.Background(), "startup")
 	}
 	go s.collectionLoop(ctx)
 	go s.detailLoop(ctx)
@@ -128,7 +128,7 @@ func (s *Service) SaveAccount(ctx context.Context, email, password string) (Acco
 	if err := s.state.SaveAccount(state); err != nil {
 		return AccountView{}, err
 	}
-	go s.collectOnce(context.Background(), "account_saved")
+	go s.collectFullOnce(context.Background(), "account_saved")
 	return AccountView{Email: state.Email, HasAccount: true, VerifiedAt: state.VerifiedAt, CreatedAt: &state.CreatedAt, UpdatedAt: &state.UpdatedAt}, nil
 }
 
@@ -163,7 +163,7 @@ func (s *Service) CollectorStatus(ctx context.Context) (CollectorStatus, error) 
 }
 
 func (s *Service) CollectNow(ctx context.Context, trigger string) (store.NetGameCollectionRun, error) {
-	return s.collectOnce(ctx, trigger)
+	return s.collectOnce(ctx, trigger, true)
 }
 
 func (s *Service) RefreshDetails(ctx context.Context, gameID string) (store.NetGame, error) {
@@ -266,7 +266,7 @@ func (s *Service) collectionLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := s.collectOnce(ctx, "scheduled"); err != nil && !errors.Is(err, ErrCollectorBusy) {
+			if _, err := s.collectOnce(ctx, "scheduled", true); err != nil && !errors.Is(err, ErrCollectorBusy) {
 				s.logger.Warn("scheduled net game collection", "error", err)
 			}
 		}
@@ -282,7 +282,7 @@ func (s *Service) detailLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.refreshDetailsBatch(ctx, settings.MaxDetailBatchSize); err != nil && !errors.Is(err, ErrCollectorBusy) {
+			if _, _, err := s.refreshDetailsBatch(ctx, settings.MaxDetailBatchSize); err != nil && !errors.Is(err, ErrCollectorBusy) {
 				s.logger.Warn("scheduled net game detail refresh", "error", err)
 			}
 		}
@@ -291,7 +291,23 @@ func (s *Service) detailLoop(ctx context.Context) {
 
 var ErrCollectorBusy = errors.New("net game collector is already running")
 
-func (s *Service) collectOnce(ctx context.Context, trigger string) (store.NetGameCollectionRun, error) {
+func (s *Service) collectFullOnce(ctx context.Context, trigger string) {
+	run, err := s.collectOnce(ctx, trigger, false)
+	if err != nil {
+		if !errors.Is(err, ErrCollectorBusy) {
+			s.logger.Warn("full net game collection", "trigger", trigger, "error", err)
+		}
+		return
+	}
+	if run.Status != store.NetGameRunSuccess {
+		return
+	}
+	if err := s.refreshAllDetails(ctx); err != nil && !errors.Is(err, ErrCollectorBusy) {
+		s.logger.Warn("full net game detail refresh", "trigger", trigger, "run_id", run.ID, "error", err)
+	}
+}
+
+func (s *Service) collectOnce(ctx context.Context, trigger string, refreshDetails bool) (store.NetGameCollectionRun, error) {
 	select {
 	case s.collectMutex <- struct{}{}:
 		defer func() { <-s.collectMutex }()
@@ -338,35 +354,51 @@ func (s *Service) collectOnce(ctx context.Context, trigger string) (store.NetGam
 	if err != nil {
 		return store.NetGameCollectionRun{}, err
 	}
-	go s.refreshDetailsBatch(context.Background(), s.Settings().MaxDetailBatchSize)
+	if refreshDetails {
+		go s.refreshDetailsBatch(context.Background(), s.Settings().MaxDetailBatchSize)
+	}
 	go s.purgeOldHistory(context.Background())
 	return run, nil
 }
 
-func (s *Service) refreshDetailsBatch(ctx context.Context, limit int) error {
+func (s *Service) refreshAllDetails(ctx context.Context) error {
+	batchSize := s.Settings().MaxDetailBatchSize
+	if batchSize < 1 {
+		batchSize = 50
+	}
+	for {
+		selected, updated, err := s.refreshDetailsBatch(ctx, batchSize)
+		if err != nil || selected < batchSize || updated == 0 {
+			return err
+		}
+	}
+}
+
+func (s *Service) refreshDetailsBatch(ctx context.Context, limit int) (int, int, error) {
 	select {
-	case s.collectMutex <- struct{}{}:
-		defer func() { <-s.collectMutex }()
+	case s.detailMutex <- struct{}{}:
+		defer func() { <-s.detailMutex }()
 	default:
-		return ErrCollectorBusy
+		return 0, 0, ErrCollectorBusy
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	account, err := s.state.Account()
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	client, err := NewClient(account)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
 	if _, err := client.Login(ctx); err != nil {
-		return err
+		return 0, 0, err
 	}
 	games, err := s.store.NetGamesNeedingDetails(ctx, limit)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
+	updated := 0
 	for _, game := range games {
 		details, detailErr := client.FetchDetails(ctx, game.GameID)
 		if detailErr != nil {
@@ -374,10 +406,11 @@ func (s *Service) refreshDetailsBatch(ctx context.Context, limit int) error {
 			continue
 		}
 		if _, detailErr = s.store.UpdateNetGameDetails(ctx, game.GameID, details); detailErr != nil {
-			return detailErr
+			return len(games), updated, detailErr
 		}
+		updated++
 	}
-	return nil
+	return len(games), updated, nil
 }
 
 func (s *Service) refreshOneDetail(ctx context.Context, gameID string) (store.NetGame, error) {

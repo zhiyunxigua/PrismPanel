@@ -214,8 +214,10 @@ func (s *Store) NetGamesNeedingDetails(ctx context.Context, limit int) ([]NetGam
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, netGameByIDQuery+` WHERE g.details_status <> ? OR g.details_updated_at IS NULL
-		ORDER BY CASE WHEN g.details_updated_at IS NULL THEN 0 ELSE 1 END, g.details_updated_at ASC, g.last_seen_at DESC
-		LIMIT ?`, NetGameDetailsOK, limit)
+		ORDER BY CASE g.details_status WHEN ? THEN 0 WHEN ? THEN 2 ELSE 1 END,
+		CASE WHEN g.details_updated_at IS NULL THEN 0 ELSE 1 END,
+		g.details_updated_at ASC, g.details_attempted_at ASC, g.last_seen_at DESC
+		LIMIT ?`, NetGameDetailsOK, NetGameDetailsPending, NetGameDetailsFailed, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +255,7 @@ func (s *Store) UpdateNetGameDetails(ctx context.Context, gameID string, details
 		details_error_message = '', updated_at = ?`,
 		strings.TrimSpace(gameID), details.Author, versions, details.IP, details.Port,
 		details.Address, details.PublishTime, images, details.Description, now, now,
-		NetGameDetailsOK, now, now, now)
+		NetGameDetailsOK, now, now, now, now)
 	if err != nil {
 		return NetGame{}, err
 	}
