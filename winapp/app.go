@@ -178,8 +178,20 @@ func (a *App) JoinGameServer(id string) (game.JoinProgress, error) {
 	if err != nil {
 		return game.JoinProgress{}, err
 	}
-	if running := a.GameServerRunning(id); running {
-		return game.JoinProgress{ServerID: id, Status: game.JoinStatusDone, Message: "游戏已经在运行中", Percent: 100, Running: true}, nil
+	return a.startGameJoin(server), nil
+}
+
+func (a *App) JoinGameServerConfig(input game.ServerConfigInput) (game.JoinProgress, error) {
+	server, err := game.NewTransientServer(input)
+	if err != nil {
+		return game.JoinProgress{}, err
+	}
+	return a.startGameJoin(server), nil
+}
+
+func (a *App) startGameJoin(server game.ServerConfig) game.JoinProgress {
+	if running := a.GameServerRunning(server.ID); running {
+		return game.JoinProgress{ServerID: server.ID, Status: game.JoinStatusDone, Message: "游戏已经在运行中", Percent: 100, Running: true}
 	}
 	ctx, _ := a.operationContext(30 * time.Minute)
 	return a.joins.Start(ctx, server, func(taskCtx context.Context, server game.ServerConfig, report func(string, string, float64)) (game.LaunchResult, error) {
@@ -197,9 +209,8 @@ func (a *App) JoinGameServer(id string) (game.JoinProgress, error) {
 		}
 		_ = game.NewLocalAccountStore().Save(fresh)
 		return game.PrepareJoinWithProgress(taskCtx, server, client, fresh, a.processes, report)
-	}), nil
+	})
 }
-
 func (a *App) GameJoinProgress(id string) game.JoinProgress { return a.joins.Status(id) }
 func (a *App) GameServerRunning(id string) bool             { return a.processes.Running(id) }
 

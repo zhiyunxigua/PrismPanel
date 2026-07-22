@@ -137,6 +137,8 @@ func (c *Client) Login(ctx context.Context) (AccountState, error) {
 	}, nil
 }
 
+func (c *Client) LauncherVersion() string { return c.launcherVersion }
+
 func (c *Client) FetchMinecraftClientLibs(ctx context.Context, version Version) (MinecraftClientLibs, error) {
 	if err := version.Validate(); err != nil {
 		return MinecraftClientLibs{}, err

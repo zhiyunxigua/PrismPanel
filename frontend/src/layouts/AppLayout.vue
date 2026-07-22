@@ -41,14 +41,14 @@ const passwordForm = ref({
 
 const navigation = computed(() => [
   { label: "总览", route: "overview", icon: Gauge },
-  { label: "加入游戏", route: "join-game", icon: Gamepad2 },
+  { label: "加入游戏", route: "join-game", icon: Gamepad2, winAppOnly: true },
   { label: "网络游戏", route: "net-games", icon: Activity, permission: "dashboard.view" },
   { label: "服务器", route: "servers", icon: Server, permission: "server.view" },
   { label: "插件", route: "plugins", icon: Package, permission: "plugin.view" },
   { label: "用户", route: "users", icon: Users, permission: "user.view" },
   { label: "网络白名单", route: "firewall", icon: ShieldCheck, permission: "firewall.view" },
   { label: "节点", route: "nodes", icon: Network, permission: "node.view" },
-].filter((item) => !item.permission || hasPermission(item.permission)));
+].filter((item) => (!item.winAppOnly || isWinApp()) && (!item.permission || hasPermission(item.permission))));
 
 const passwordRules = {
   currentPassword: [{ required: true, message: "请输入当前密码", trigger: "blur" }],

@@ -24,6 +24,7 @@ const {
   isProxyURL,
   isWinApp,
   joinGameServer,
+  joinGameServerConfig,
   loginNetEaseAccount,
   loginSavedAccountWinApp,
   loginWinApp,
@@ -94,6 +95,7 @@ test("WinApp game operations use the Wails bridge", async () => {
     SelectGameModDirectory: async (...args) => { calls.push(["select-dir", ...args]); return "F:/mods"; },
     GameServerRunning: async (...args) => { calls.push(["running", ...args]); return false; },
     JoinGameServer: async (...args) => { calls.push(["join", ...args]); return { status: "running" }; },
+    JoinGameServerConfig: async (...args) => { calls.push(["join-config", ...args]); return { status: "running" }; },
     GameJoinProgress: async (...args) => { calls.push(["progress", ...args]); return { status: "done" }; },
   } } };
 
@@ -105,6 +107,7 @@ test("WinApp game operations use the Wails bridge", async () => {
   await selectGameModDirectory();
   await gameServerRunning("server-a");
   await joinGameServer("server-a");
+  await joinGameServerConfig({ game_id: "1001" });
   await gameJoinProgress("server-a");
   await deleteGameServer("server-a");
   await deleteNetEaseAccount();
@@ -114,6 +117,7 @@ test("WinApp game operations use the Wails bridge", async () => {
     ["select-dir"],
     ["running", "server-a"],
     ["join", "server-a"],
+    ["join-config", { game_id: "1001" }],
     ["progress", "server-a"],
     ["delete-server", "server-a"],
     ["netease-delete"],

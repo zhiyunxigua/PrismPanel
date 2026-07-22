@@ -39,7 +39,7 @@ const routes = [
         path: "join-game",
         name: "join-game",
         component: JoinGameView,
-        meta: { title: "加入游戏" },
+        meta: { title: "加入游戏", winAppOnly: true },
       },
       {
         path: "servers",
@@ -112,6 +112,7 @@ router.beforeEach(async (to) => {
   if (!to.meta.guest && !sessionState.user) {
     return { name: "login", query: { redirect: to.fullPath } };
   }
+  if (to.meta.winAppOnly && !isWinApp()) return { name: "overview" };
   if (to.meta.permission) {
     const permissions = sessionState.user?.permissions || [];
     if (!permissions.includes("*") && !permissions.includes(to.meta.permission)) {

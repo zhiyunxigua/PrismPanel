@@ -143,7 +143,7 @@ func PrepareJoinWithProgress(ctx context.Context, server ServerConfig, client *C
 	}
 	prepared.Downloads = downloads
 	report("runtime", "运行目录已准备", 95)
-	return LaunchPreparedGame(ctx, LaunchRequest{Server: server, Preparation: prepared, Account: account}, processes, report)
+	return LaunchPreparedGame(ctx, LaunchRequest{Server: server, Preparation: prepared, Account: account, ProtocolVersion: client.LauncherVersion()}, processes, report)
 }
 
 func clampPercent(value float64) float64 {

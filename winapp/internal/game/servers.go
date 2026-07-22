@@ -19,6 +19,7 @@ import (
 type ServerConfig struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
+	GameID       string    `json:"game_id,omitempty"`
 	IP           string    `json:"ip"`
 	Port         int       `json:"port"`
 	Username     string    `json:"username"`
@@ -30,6 +31,7 @@ type ServerConfig struct {
 
 type ServerConfigInput struct {
 	Name     string  `json:"name"`
+	GameID   string  `json:"game_id"`
 	IP       string  `json:"ip"`
 	Port     int     `json:"port"`
 	Username string  `json:"username"`
@@ -84,6 +86,15 @@ func (s ServerStore) Create(input ServerConfigInput) (ServerConfig, error) {
 	return server, nil
 }
 
+func NewTransientServer(input ServerConfigInput) (ServerConfig, error) {
+	server, err := normalizeServerInput(input)
+	if err != nil {
+		return ServerConfig{}, err
+	}
+	server.ID = stableServerID(server)
+	server.CreatedAt = time.Now().UTC()
+	return server, nil
+}
 func (s ServerStore) Delete(id string) ([]ServerConfig, error) {
 	id = strings.TrimSpace(id)
 	if id == "" {
@@ -160,6 +171,7 @@ func normalizeServerInput(input ServerConfigInput) (ServerConfig, error) {
 	ip := strings.TrimSpace(input.IP)
 	username := strings.TrimSpace(input.Username)
 	modDir := strings.TrimSpace(input.ModDir)
+	gameID := strings.TrimSpace(input.GameID)
 	if name == "" {
 		return ServerConfig{}, errors.New("server name is required")
 	}
@@ -186,14 +198,22 @@ func normalizeServerInput(input ServerConfigInput) (ServerConfig, error) {
 		return ServerConfig{}, err
 	}
 	return ServerConfig{
-		Name: name, IP: ip, Port: input.Port, Username: username,
+		Name: name, GameID: gameID, IP: ip, Port: input.Port, Username: username,
 		Version: input.Version, VersionLabel: label, ModDir: filepath.Clean(modDir),
 	}, nil
 }
 
+func stableServerID(server ServerConfig) string {
+	source := strings.Join([]string{
+		server.Name, server.GameID, server.IP, strconv.Itoa(server.Port), server.Username,
+		fmt.Sprintf("%d", server.Version), server.ModDir,
+	}, "\x00")
+	hash := sha256.Sum256([]byte(source))
+	return hex.EncodeToString(hash[:12])
+}
 func serverID(server ServerConfig) string {
 	source := strings.Join([]string{
-		server.Name, server.IP, strconv.Itoa(server.Port), server.Username,
+		server.Name, server.GameID, server.IP, strconv.Itoa(server.Port), server.Username,
 		fmt.Sprintf("%d", server.Version), server.ModDir, time.Now().UTC().Format(time.RFC3339Nano),
 	}, "\x00")
 	hash := sha256.Sum256([]byte(source))
@@ -218,12 +238,77 @@ func PrepareServerRuntime(server ServerConfig) (JoinPreparation, error) {
 	if err := copyDirectory(paths.BaseMC, runtimeDir); err != nil {
 		return JoinPreparation{}, fmt.Errorf("copy base minecraft files: %w", err)
 	}
+	if err := ensureNetEaseNativeRuntime(paths, runtimeDir, server.VersionLabel); err != nil {
+		return JoinPreparation{}, err
+	}
 	if err := mergeModDirectory(server.ModDir, runtimeDir); err != nil {
 		return JoinPreparation{}, err
 	}
 	return JoinPreparation{Server: server, VersionDir: paths.Version, RuntimeDir: runtimeDir, GameDir: runtimeDir}, nil
 }
 
+const netEaseRuntimeDLL = "api-ms-win-crt-utility-l1-1-1.dll"
+
+func ensureNetEaseNativeRuntime(paths CachePaths, runtimeDir, versionLabel string) error {
+	nativesPath := filepath.Join(runtimeDir, "versions", versionLabel, "natives-windows-x86_64")
+	if !directoryExists(nativesPath) {
+		return nil
+	}
+	runtimePath := filepath.Join(nativesPath, "runtime")
+	target := filepath.Join(runtimePath, netEaseRuntimeDLL)
+	if fileExists(target) {
+		return nil
+	}
+	source, err := findNetEaseRuntimeDLL(paths, runtimeDir, versionLabel)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(runtimePath, 0o755); err != nil {
+		return fmt.Errorf("create NetEase native runtime directory: %w", err)
+	}
+	if err := copyFile(source, target); err != nil {
+		return fmt.Errorf("install NetEase native runtime DLL: %w", err)
+	}
+	return nil
+}
+
+func findNetEaseRuntimeDLL(paths CachePaths, runtimeDir, versionLabel string) (string, error) {
+	for _, candidate := range netEaseRuntimeDLLCandidates(paths, runtimeDir, versionLabel) {
+		if fileExists(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("missing NetEase native runtime DLL %s; place it at %s or set PRISMPANEL_NETEASE_RUNTIME_DLL", netEaseRuntimeDLL, filepath.Join(paths.Root, "native-runtime", netEaseRuntimeDLL))
+}
+
+func netEaseRuntimeDLLCandidates(paths CachePaths, runtimeDir, versionLabel string) []string {
+	var candidates []string
+	if value := strings.TrimSpace(os.Getenv("PRISMPANEL_NETEASE_RUNTIME_DLL")); value != "" {
+		candidates = append(candidates, value)
+	}
+	if value := strings.TrimSpace(os.Getenv("PRISMPANEL_NETEASE_RUNTIME_DIR")); value != "" {
+		candidates = append(candidates, filepath.Join(value, netEaseRuntimeDLL))
+	}
+	candidates = append(candidates,
+		filepath.Join(paths.Root, "native-runtime", netEaseRuntimeDLL),
+		filepath.Join(paths.BaseMC, "versions", versionLabel, "natives-windows-x86_64", "runtime", netEaseRuntimeDLL),
+		filepath.Join(runtimeDir, "versions", versionLabel, "natives-windows-x86_64", "runtime", netEaseRuntimeDLL),
+	)
+	if executable, err := os.Executable(); err == nil {
+		executableDir := filepath.Dir(executable)
+		candidates = append(candidates,
+			filepath.Join(executableDir, "resources", netEaseRuntimeDLL),
+			filepath.Join(executableDir, "assets", netEaseRuntimeDLL),
+			filepath.Join(executableDir, netEaseRuntimeDLL),
+		)
+	}
+	return candidates
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
 func EnsureModDirectories(modDir string) error {
 	modDir = strings.TrimSpace(modDir)
 	if modDir == "" {

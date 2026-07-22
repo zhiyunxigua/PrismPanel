@@ -255,7 +255,8 @@ func (s *Store) UpdateNetGameDetails(ctx context.Context, gameID string, details
 		details_error_message = '', updated_at = ?`,
 		strings.TrimSpace(gameID), details.Author, versions, details.IP, details.Port,
 		details.Address, details.PublishTime, images, details.Description, now, now,
-		NetGameDetailsOK, now, now, now, now)
+		NetGameDetailsOK, now, now, now, now,
+		NetGameDetailsOK, now, now, now)
 	if err != nil {
 		return NetGame{}, err
 	}

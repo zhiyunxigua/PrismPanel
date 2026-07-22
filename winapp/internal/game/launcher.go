@@ -14,9 +14,10 @@ import (
 )
 
 type LaunchRequest struct {
-	Server      ServerConfig
-	Preparation JoinPreparation
-	Account     AccountState
+	Server          ServerConfig
+	Preparation     JoinPreparation
+	Account         AccountState
+	ProtocolVersion string
 }
 
 type LaunchResult struct {
@@ -63,9 +64,22 @@ func LaunchPreparedGame(ctx context.Context, request LaunchRequest, processes *P
 		cfg.ID = server.VersionLabel
 	}
 
+	report("launch", "\u6b63\u5728\u542f\u52a8\u672c\u5730\u8ba4\u8bc1\u670d\u52a1", 96.5)
+	localServices, err := StartLocalLauncherServices(ctx, LocalLauncherServicesConfig{Server: server, Account: request.Account})
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	servicesAttached := false
+	defer func() {
+		if !servicesAttached {
+			localServices.Close()
+		}
+	}()
+
 	report("launch", "\u6b63\u5728\u751f\u6210\u542f\u52a8\u53c2\u6570", 97)
 	args, err := BuildLaunchArguments(LaunchArgumentInput{
 		Config: cfg, Server: server, Account: request.Account, GameDir: request.Preparation.GameDir,
+		LauncherControlPort: localServices.AuthPort(), LauncherPort: localServices.RPCPort(), ProtocolVersion: request.ProtocolVersion,
 	})
 	if err != nil {
 		return LaunchResult{}, err
@@ -88,10 +102,12 @@ func LaunchPreparedGame(ctx context.Context, request LaunchRequest, processes *P
 		Args:     args,
 		WorkDir:  request.Preparation.GameDir,
 		LogPath:  logPath,
+		Cleanup:  localServices.Close,
 	})
 	if err != nil {
 		return LaunchResult{}, err
 	}
+	servicesAttached = true
 	return LaunchResult{Preparation: request.Preparation, JavaPath: javaPath, PID: process.PID, LogPath: logPath}, nil
 }
 
@@ -109,10 +125,13 @@ func readVersionConfig(gameDir, versionLabel string) (versionConfig, error) {
 }
 
 type LaunchArgumentInput struct {
-	Config  versionConfig
-	Server  ServerConfig
-	Account AccountState
-	GameDir string
+	Config              versionConfig
+	Server              ServerConfig
+	Account             AccountState
+	GameDir             string
+	LauncherControlPort int
+	LauncherPort        int
+	ProtocolVersion     string
 }
 
 func BuildLaunchArguments(input LaunchArgumentInput) ([]string, error) {
@@ -132,10 +151,17 @@ func BuildLaunchArguments(input LaunchArgumentInput) ([]string, error) {
 		return nil, fmt.Errorf("parse minecraft arguments: %w", err)
 	}
 
+	mainClass := strings.TrimSpace(input.Config.MainClass)
+	if mainClass == "" {
+		mainClass = detectMainClass(jvmArgs)
+	}
+	if mainClass != "" {
+		jvmArgs = removeExactArg(jvmArgs, mainClass)
+	}
 	jvmArgs = removeFlagWithValue(jvmArgs, "-Xmx")
 	jvmArgs = append([]string{"-Xmx2048M"}, jvmArgs...)
-	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "launcherControlPort", "0")
-	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "launcherGameId", "0")
+	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "launcherControlPort", strconv.Itoa(input.LauncherControlPort))
+	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "launcherGameId", localLauncherGameID(input.Server))
 	if input.Account.UserID != "" {
 		jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "userId", input.Account.UserID)
 	}
@@ -143,11 +169,14 @@ func BuildLaunchArguments(input LaunchArgumentInput) ([]string, error) {
 		jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "Token", generateEncryptedToken(input.Account.UserToken))
 	}
 	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "Server", "RELEASE")
-	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "java.library.path", filepath.Join("versions", input.Server.VersionLabel, "natives-windows-x86_64"))
-	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "runtime_path", filepath.Join("versions", input.Server.VersionLabel, "natives-windows-x86_64", "runtime"))
-
-	if input.Config.MainClass != "" && !containsArg(jvmArgs, input.Config.MainClass) {
-		jvmArgs = append(jvmArgs, input.Config.MainClass)
+	nativesPath, runtimePath, err := nativePaths(input.GameDir, input.Server.VersionLabel)
+	if err != nil {
+		return nil, err
+	}
+	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "java.library.path", nativesPath)
+	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "runtime_path", runtimePath)
+	if mainClass != "" {
+		jvmArgs = append(jvmArgs, mainClass)
 	}
 
 	uuid := generateRoleUUID(input.Server.Username, input.Account.UserID)
@@ -169,11 +198,25 @@ func BuildLaunchArguments(input LaunchArgumentInput) ([]string, error) {
 	gameArgs = upsertFlagValue(gameArgs, "--assetsDir", "assets")
 	gameArgs = upsertFlagValue(gameArgs, "--server", input.Server.IP)
 	gameArgs = upsertFlagValue(gameArgs, "--port", strconv.Itoa(input.Server.Port))
+	gameArgs = upsertFlagValue(gameArgs, "--userProperties", buildUserProperties(input))
+	gameArgs = upsertFlagValue(gameArgs, "--userPropertiesEx", buildUserPropertiesEx(input.ProtocolVersion))
 	gameArgs = dropUnresolvedPlaceholderArgs(gameArgs)
 
 	return append(jvmArgs, gameArgs...), nil
 }
 
+func nativePaths(gameDir, versionLabel string) (string, string, error) {
+	gameDir = strings.TrimSpace(gameDir)
+	if gameDir == "" {
+		gameDir = "."
+	}
+	absGameDir, err := filepath.Abs(gameDir)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve game directory: %w", err)
+	}
+	nativesPath := filepath.Join(absGameDir, "versions", versionLabel, "natives-windows-x86_64")
+	return nativesPath, filepath.Join(nativesPath, "runtime"), nil
+}
 func FindJava(version Version) (string, error) {
 	candidates := javaCandidates(version)
 	for _, candidate := range candidates {
@@ -324,6 +367,85 @@ func containsArg(args []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func detectMainClass(args []string) string {
+	for _, arg := range args {
+		if strings.Contains(arg, "/") || strings.Contains(arg, "\\") || strings.Contains(arg, string(os.PathSeparator)) {
+			continue
+		}
+		if strings.Contains(arg, ".") && !strings.HasPrefix(arg, "-") && !strings.Contains(arg, "=") {
+			return arg
+		}
+	}
+	return ""
+}
+
+func removeExactArg(args []string, value string) []string {
+	out := args[:0]
+	for _, arg := range args {
+		if arg == value {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+func localLauncherGameID(server ServerConfig) string {
+	if value := strings.TrimSpace(server.GameID); value != "" {
+		return value
+	}
+	return "0"
+}
+
+func buildUserProperties(input LaunchArgumentInput) string {
+	protocolVersion := strings.TrimSpace(input.ProtocolVersion)
+	if protocolVersion == "" {
+		protocolVersion = "0"
+	}
+	uid := numericJSONValue(input.Account.UserID)
+	gameID := numericJSONValue(localLauncherGameID(input.Server))
+	encoded, _ := json.Marshal(map[string]any{
+		"uid":           []any{uid, 0},
+		"gameid":        []any{gameID, 0},
+		"launcherport":  []any{input.LauncherPort, 0},
+		"filterkey":     []any{randomLowerAlpha(32), "0"},
+		"filterpath":    []any{"", "0"},
+		"timedelta":     []any{0, 0},
+		"launchversion": []any{protocolVersion, "0"},
+	})
+	return string(encoded)
+}
+
+func buildUserPropertiesEx(protocolVersion string) string {
+	protocolVersion = strings.TrimSpace(protocolVersion)
+	if protocolVersion == "" {
+		protocolVersion = "0"
+	}
+	encoded, _ := json.Marshal(map[string]any{
+		"GameType":        2,
+		"channel":         "netease",
+		"isFilter":        true,
+		"launcherVersion": protocolVersion,
+		"timedelta":       0,
+	})
+	return string(encoded)
+}
+
+func numericJSONValue(value string) any {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return json.Number("0")
+	}
+	if _, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return json.Number(value)
+	}
+	return value
+}
+
+func randomLowerAlpha(length int) string {
+	return strings.ToLower(randomUpperAlnum(length))
 }
 
 func replacePlaceholders(args []string, replacements map[string]string) []string {

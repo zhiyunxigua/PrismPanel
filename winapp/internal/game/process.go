@@ -17,6 +17,7 @@ type ProcessStartRequest struct {
 	Args     []string
 	WorkDir  string
 	LogPath  string
+	Cleanup  func()
 }
 
 type GameProcess struct {
@@ -78,6 +79,9 @@ func (m *ProcessManager) Start(serverID string, request ProcessStartRequest) (Ga
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
+		if request.Cleanup != nil {
+			request.Cleanup()
+		}
 		return GameProcess{}, err
 	}
 	process := &GameProcess{ServerID: serverID, PID: cmd.Process.Pid, StartedAt: time.Now().UTC(), LogPath: request.LogPath, cmd: cmd}
@@ -88,6 +92,9 @@ func (m *ProcessManager) Start(serverID string, request ProcessStartRequest) (Ga
 	go func() {
 		_ = cmd.Wait()
 		_ = logFile.Close()
+		if request.Cleanup != nil {
+			request.Cleanup()
+		}
 		m.mu.Lock()
 		if current := m.processes[serverID]; current == process {
 			delete(m.processes, serverID)

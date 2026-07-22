@@ -1,10 +1,11 @@
-﻿<script setup>
-import { computed, onMounted, ref } from "vue";
-import { Activity, RefreshCw, Server, Settings, ShieldAlert } from "lucide-vue-next";
+<script setup>
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { Activity, FolderOpen, Gamepad2, RefreshCw, Server, Settings, ShieldAlert } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import MetricLineChart from "../components/metrics/MetricLineChart.vue";
 import { request } from "../api";
 import { sessionState } from "../session";
+import { gameJoinProgress, gameServerRunning, gameVersions, isWinApp, joinGameServerConfig, netEaseAccount, selectGameModDirectory } from "../runtime";
 
 const loading = ref(false);
 const detailsLoading = ref(false);
@@ -20,12 +21,32 @@ const settingsDialogOpen = ref(false);
 const accountForm = ref({ email: "", password: "" });
 const preferenceForm = ref({ display_game_count: 10, forced_game_ids_text: "" });
 const windowHours = ref(24);
+const localNetEaseAccount = ref(null);
+const gameVersionOptions = ref([]);
+const joinDialogOpen = ref(false);
+const joinSubmitting = ref(false);
+const joinTarget = ref(null);
+const joinProgressDialogOpen = ref(false);
+const joinProgress = ref(null);
+const joinForm = reactive(defaultJoinForm());
+let joinProgressTimer = 0;
 
 const isSuperAdmin = computed(() => sessionState.user?.group?.code === "super_admin");
 const games = computed(() => series.value.games || []);
 const recentRun = computed(() => collector.value?.last_run || null);
 const nextRunAt = computed(() => collector.value?.next_run_at || null);
 const chartPalette = ["#c64c4c", "#d88a2d", "#3f8f64", "#397eaf", "#8a63d2", "#c64f8e"];
+const joinVersionOptions = computed(() => gameVersionOptions.value.map((item) => ({
+  label: `${item.label} · ${String(item.java || "").toUpperCase()}`,
+  value: item.version,
+})));
+const joinProgressPercent = computed(() => Math.round(Number(joinProgress.value?.percent || 0)));
+const joinProgressStatusText = computed(() => {
+  if (!joinProgress.value) return "尚未开始";
+  if (joinProgress.value.running) return "游戏已经在运行中";
+  if (joinProgress.value.status === "failed") return joinProgress.value.error || "加入失败";
+  return joinProgress.value.message || "处理中";
+});
 
 function defaultSettings() {
   return {
@@ -34,6 +55,10 @@ function defaultSettings() {
     detail_refresh_hours: 24,
     max_detail_batch_size: 24,
   };
+}
+
+function defaultJoinForm() {
+  return { username: "", version: "", mod_dir: "" };
 }
 
 function defaultPreference() {
@@ -238,8 +263,154 @@ async function deleteAccount() {
   }
 }
 
+async function loadWinAppJoinState() {
+  if (!isWinApp()) return;
+  try {
+    const [accountResult, versionsResult] = await Promise.all([netEaseAccount(), gameVersions()]);
+    localNetEaseAccount.value = accountResult || null;
+    gameVersionOptions.value = versionsResult || [];
+  } catch (error) {
+    ElMessage.warning(error.message || "加载本地加入游戏状态失败");
+  }
+}
+
+async function openNetGameJoin(game) {
+  if (!isWinApp()) return;
+  await loadWinAppJoinState();
+  if (!localNetEaseAccount.value?.email) {
+    ElMessage.warning("请先在加入游戏页面登录网易账号");
+    return;
+  }
+  try {
+    const detail = await fetchNetGameDetail(game.game_id);
+    const endpoint = netGameEndpoint(detail.game);
+    if (!endpoint.ip) {
+      ElMessage.warning("该网络游戏暂未采集到服务器地址，请先刷新详情");
+      return;
+    }
+    joinTarget.value = { ...detail.game, ip: endpoint.ip, port: endpoint.port };
+    Object.assign(joinForm, defaultJoinForm());
+    joinForm.version = defaultJoinVersion(detail.game);
+    joinDialogOpen.value = true;
+  } catch (error) {
+    ElMessage.error(error.message || "加载网络游戏详情失败");
+  }
+}
+
+async function fetchNetGameDetail(gameId) {
+  return request(`/api/v1/net-games/${encodeURIComponent(gameId)}?hours=${windowHours.value}`);
+}
+
+function netGameEndpoint(game) {
+  const directPort = Number(game?.port || 0) || 25565;
+  if (game?.ip) return { ip: game.ip, port: directPort };
+  const address = String(game?.address || "").trim();
+  if (!address) return { ip: "", port: 25565 };
+  const match = address.match(/^(.+):(\d+)$/);
+  if (!match) return { ip: address, port: 25565 };
+  return { ip: match[1], port: Number(match[2]) || 25565 };
+}
+
+function defaultJoinVersion(game) {
+  const versions = Array.isArray(game?.versions) ? game.versions : [];
+  for (const version of versions) {
+    const text = String(version);
+    const exact = gameVersionOptions.value.find((item) => item.label === text);
+    if (exact) return exact.version;
+    const compatible = [...gameVersionOptions.value]
+      .sort((left, right) => right.label.length - left.label.length)
+      .find((item) => text.startsWith(item.label));
+    if (compatible) return compatible.version;
+  }
+  return gameVersionOptions.value[gameVersionOptions.value.length - 1]?.version || "";
+}
+
+async function chooseJoinModDirectory() {
+  try {
+    const selected = await selectGameModDirectory();
+    if (selected) joinForm.mod_dir = selected;
+  } catch (error) {
+    ElMessage.error(error.message || "选择目录失败");
+  }
+}
+
+async function submitNetGameJoin() {
+  if (!joinTarget.value) return;
+  if (!joinForm.username.trim()) {
+    ElMessage.warning("请输入角色用户名");
+    return;
+  }
+  if (!joinForm.version) {
+    ElMessage.warning("请选择游戏版本");
+    return;
+  }
+  if (!joinForm.mod_dir.trim()) {
+    ElMessage.warning("请选择自定义资源目录");
+    return;
+  }
+  joinSubmitting.value = true;
+  try {
+    const input = {
+      name: joinTarget.value.name || joinTarget.value.game_id,
+      game_id: joinTarget.value.game_id,
+      ip: joinTarget.value.ip,
+      port: joinTarget.value.port || 25565,
+      username: joinForm.username,
+      version: joinForm.version,
+      mod_dir: joinForm.mod_dir,
+    };
+    const predicted = await joinGameServerConfig(input);
+    joinProgress.value = predicted;
+    joinDialogOpen.value = false;
+    joinProgressDialogOpen.value = true;
+    startJoinProgressPolling(predicted.server_id);
+  } catch (error) {
+    joinProgress.value = { status: "failed", message: "加入失败", percent: 0, error: error.message || "未知错误" };
+    joinProgressDialogOpen.value = true;
+    ElMessage.error(error.message || "加入失败");
+  } finally {
+    joinSubmitting.value = false;
+  }
+}
+
+function startJoinProgressPolling(serverID) {
+  stopJoinProgressPolling();
+  if (!serverID) return;
+  joinProgressTimer = window.setInterval(async () => {
+    try {
+      if (await gameServerRunning(serverID)) {
+        joinProgress.value = { ...(joinProgress.value || {}), server_id: serverID, status: "done", message: "游戏已经在运行中", percent: 100, running: true };
+        stopJoinProgressPolling();
+        window.setTimeout(() => { joinProgressDialogOpen.value = false; }, 600);
+        return;
+      }
+      joinProgress.value = await gameJoinProgress(serverID);
+      if (joinProgress.value?.status === "done") {
+        stopJoinProgressPolling();
+        window.setTimeout(() => { joinProgressDialogOpen.value = false; }, 600);
+      } else if (joinProgress.value?.status === "failed") {
+        stopJoinProgressPolling();
+      }
+    } catch (error) {
+      stopJoinProgressPolling();
+      joinProgress.value = { server_id: serverID, status: "failed", message: "读取进度失败", percent: 0, error: error.message || "未知错误" };
+    }
+  }, 600);
+}
+
+function stopJoinProgressPolling() {
+  if (joinProgressTimer) window.clearInterval(joinProgressTimer);
+  joinProgressTimer = 0;
+}
+
 onMounted(() => {
   loadAll();
+  loadWinAppJoinState();
+});
+onBeforeUnmount(stopJoinProgressPolling);
+
+watch(joinProgressDialogOpen, (open) => {
+  if (!open) stopJoinProgressPolling();
 });
 </script>
 
@@ -306,20 +477,28 @@ onMounted(() => {
         </div>
       </div>
       <div class="net-games-grid" v-loading="loading">
-        <button
+        <article
           v-for="(game, index) in games"
           :key="game.game_id"
-          type="button"
           class="net-game-card"
           :class="{ active: selectedGameId === game.game_id }"
+          role="button"
+          tabindex="0"
           @click="openGame(game.game_id)"
+          @keydown.enter.prevent="openGame(game.game_id)"
+          @keydown.space.prevent="openGame(game.game_id)"
         >
           <div class="net-game-card-head">
             <div>
               <strong>{{ game.rank }}. {{ game.name || game.game_id }}</strong>
               <small>{{ game.game_id }}</small>
             </div>
-            <span class="net-game-count" :style="{ color: gameColor(index) }">{{ formatCount(game.latest_online_count) }}</span>
+            <div class="net-game-card-actions">
+              <span class="net-game-count" :style="{ color: gameColor(index) }">{{ formatCount(game.latest_online_count) }}</span>
+              <el-button v-if="isWinApp()" size="small" type="primary" @click.stop="openNetGameJoin(game)">
+                <Gamepad2 :size="14" />加入
+              </el-button>
+            </div>
           </div>
           <MetricLineChart
             :title="game.name || game.game_id"
@@ -328,7 +507,7 @@ onMounted(() => {
             unit=""
             :decimals="0"
           />
-        </button>
+        </article>
         <div v-if="!loading && !games.length" class="empty-state">
           <Server :size="26" />
           <strong>暂无可展示的网络游戏数据</strong>
@@ -363,6 +542,9 @@ onMounted(() => {
           <p>{{ selectedGame?.game?.game_id || selectedGameId }}</p>
         </div>
         <div class="drawer-actions">
+          <el-button v-if="isWinApp() && selectedGame?.game" type="primary" @click="openNetGameJoin(selectedGame.game)">
+            <Gamepad2 :size="16" />加入
+          </el-button>
           <el-button v-if="isSuperAdmin" @click="refreshDetails(selectedGameId)">刷新详情</el-button>
         </div>
       </div>
@@ -382,11 +564,63 @@ onMounted(() => {
       </div>
       <div v-if="Array.isArray(selectedGame?.game?.images) && selectedGame.game.images.length" class="drawer-description">
         <h4>图片</h4>
-        <p>{{ selectedGame.game.images.join("\n") }}</p>
+        <div class="net-game-image-grid">
+          <a
+            v-for="(image, index) in selectedGame.game.images"
+            :key="image"
+            :href="image"
+            target="_blank"
+            rel="noreferrer"
+            class="net-game-image-link"
+          >
+            <img :src="image" :alt="`${selectedGame.game.name || selectedGame.game.game_id} 图片 ${index + 1}`" loading="lazy" referrerpolicy="no-referrer" />
+          </a>
+        </div>
       </div>
     </div>
   </el-drawer>
 
+  <el-dialog v-model="joinDialogOpen" :title="joinTarget ? `加入 - ${joinTarget.name || joinTarget.game_id}` : '加入网络游戏'" width="640px">
+    <el-form label-position="top" @submit.prevent="submitNetGameJoin">
+      <div class="dialog-form-grid">
+        <el-form-item label="服务器地址">
+          <el-input :model-value="joinTarget ? `${joinTarget.ip}:${joinTarget.port || 25565}` : ''" disabled />
+        </el-form-item>
+        <el-form-item label="角色用户名">
+          <el-input v-model="joinForm.username" placeholder="输入启动游戏使用的角色名" />
+        </el-form-item>
+        <el-form-item label="游戏版本">
+          <el-select v-model="joinForm.version" filterable>
+            <el-option v-for="item in joinVersionOptions" :key="item.value" :label="item.label" :value="item.value" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="自定义资源目录">
+          <div class="path-input-row">
+            <el-input v-model="joinForm.mod_dir" placeholder="包含 mods/config/resourcepacks/shaderpacks 的目录" />
+            <el-button @click="chooseJoinModDirectory"><FolderOpen :size="16" />预览</el-button>
+          </div>
+        </el-form-item>
+      </div>
+    </el-form>
+    <template #footer>
+      <el-button @click="joinDialogOpen = false">取消</el-button>
+      <el-button type="primary" :loading="joinSubmitting" @click="submitNetGameJoin">加入</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="joinProgressDialogOpen" :title="joinTarget ? `启动进度 - ${joinTarget.name || joinTarget.game_id}` : '启动进度'" width="520px" :close-on-click-modal="false">
+    <div class="launch-progress-body">
+      <el-progress :percentage="joinProgressPercent" :status="joinProgress?.status === 'failed' ? 'exception' : joinProgress?.status === 'done' ? 'success' : undefined" />
+      <div class="launch-progress-message">
+        <strong>{{ joinProgressStatusText }}</strong>
+        <span v-if="joinProgress?.stage">阶段：{{ joinProgress.stage }}</span>
+      </div>
+      <pre v-if="joinProgress?.error" class="launch-error">{{ joinProgress.error }}</pre>
+    </div>
+    <template #footer>
+      <el-button @click="joinProgressDialogOpen = false">关闭</el-button>
+    </template>
+  </el-dialog>
   <el-dialog v-model="settingsDialogOpen" title="网络游戏设置" width="640px">
     <el-form label-position="top">
       <div v-if="isSuperAdmin" class="dialog-form-grid">
@@ -455,6 +689,7 @@ onMounted(() => {
   border-radius: 6px;
   background: #fff;
   text-align: left;
+  cursor: pointer;
 }
 .net-game-card.active {
   border-color: #7bb07f;
@@ -475,6 +710,12 @@ onMounted(() => {
   display: block;
   color: #737d77;
   margin-top: 3px;
+}
+.net-game-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
 }
 .net-game-count {
   font-size: 18px;
@@ -530,5 +771,64 @@ onMounted(() => {
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
+}
+.net-game-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.net-game-image-link {
+  display: block;
+  overflow: hidden;
+  border: 1px solid #dce2dd;
+  border-radius: 6px;
+  background: #f6f8f7;
+}
+.net-game-image-link img {
+  display: block;
+  width: 100%;
+  height: 140px;
+  object-fit: cover;
+}
+.path-input-row {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+}
+.path-input-row .el-input {
+  flex: 1;
+}
+.launch-progress-body {
+  display: grid;
+  gap: 14px;
+}
+.launch-progress-message strong,
+.launch-progress-message span {
+  display: block;
+}
+.launch-progress-message span {
+  margin-top: 5px;
+  color: #6e7871;
+  font-size: 12px;
+}
+.launch-error {
+  overflow: auto;
+  margin: 0;
+  padding: 10px;
+  color: #8b2d24;
+  background: #fff4f2;
+  border: 1px solid #f2d0ca;
+  border-radius: 6px;
+  white-space: pre-wrap;
+}
+@media (max-width: 720px) {
+  .net-game-card-head,
+  .path-input-row {
+    flex-direction: column;
+  }
+  .net-game-card-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
 }
 </style>

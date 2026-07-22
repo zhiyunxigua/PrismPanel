@@ -282,6 +282,9 @@ func (s *Service) detailLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if !waitNetGameDetailRefreshDelay(ctx) {
+				return
+			}
 			if _, _, err := s.refreshDetailsBatch(ctx, settings.MaxDetailBatchSize); err != nil && !errors.Is(err, ErrCollectorBusy) {
 				s.logger.Warn("scheduled net game detail refresh", "error", err)
 			}
@@ -291,28 +294,38 @@ func (s *Service) detailLoop(ctx context.Context) {
 
 var ErrCollectorBusy = errors.New("net game collector is already running")
 
+const netGameDetailRefreshDelay = 10 * time.Second
+
 func (s *Service) collectFullOnce(ctx context.Context, trigger string) {
-	run, err := s.collectOnce(ctx, trigger, false)
+	run, client, err := s.collectOnceWithClient(ctx, trigger, false)
 	if err != nil {
 		if !errors.Is(err, ErrCollectorBusy) {
 			s.logger.Warn("full net game collection", "trigger", trigger, "error", err)
 		}
 		return
 	}
-	if run.Status != store.NetGameRunSuccess {
+	if run.Status != store.NetGameRunSuccess || client == nil {
 		return
 	}
-	if err := s.refreshAllDetails(ctx); err != nil && !errors.Is(err, ErrCollectorBusy) {
+	if !waitNetGameDetailRefreshDelay(ctx) {
+		return
+	}
+	if err := s.refreshAllDetailsWithClient(ctx, client); err != nil && !errors.Is(err, ErrCollectorBusy) {
 		s.logger.Warn("full net game detail refresh", "trigger", trigger, "run_id", run.ID, "error", err)
 	}
 }
 
 func (s *Service) collectOnce(ctx context.Context, trigger string, refreshDetails bool) (store.NetGameCollectionRun, error) {
+	run, _, err := s.collectOnceWithClient(ctx, trigger, refreshDetails)
+	return run, err
+}
+
+func (s *Service) collectOnceWithClient(ctx context.Context, trigger string, refreshDetails bool) (store.NetGameCollectionRun, *Client, error) {
 	select {
 	case s.collectMutex <- struct{}{}:
 		defer func() { <-s.collectMutex }()
 	default:
-		return store.NetGameCollectionRun{}, ErrCollectorBusy
+		return store.NetGameCollectionRun{}, nil, ErrCollectorBusy
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
@@ -320,23 +333,23 @@ func (s *Service) collectOnce(ctx context.Context, trigger string, refreshDetail
 	if err != nil {
 		run, runErr := s.store.CreateNetGameCollectionRun(ctx, trigger)
 		if runErr != nil {
-			return store.NetGameCollectionRun{}, runErr
+			return store.NetGameCollectionRun{}, nil, runErr
 		}
 		_ = s.store.FailNetGameCollectionRun(ctx, run.ID, "ACCOUNT_UNAVAILABLE", err.Error(), "")
-		return run, err
+		return run, nil, err
 	}
 	client, err := NewClient(account)
 	if err != nil {
-		return store.NetGameCollectionRun{}, err
+		return store.NetGameCollectionRun{}, nil, err
 	}
 	run, err := s.store.CreateNetGameCollectionRun(ctx, trigger)
 	if err != nil {
-		return store.NetGameCollectionRun{}, err
+		return store.NetGameCollectionRun{}, nil, err
 	}
 	device, err := client.Login(ctx)
 	if err != nil {
 		_ = s.store.FailNetGameCollectionRun(ctx, run.ID, errorCode(err), errorMessage(err), "")
-		return run, err
+		return run, nil, err
 	}
 	account.Device = device
 	account.UpdatedAt = time.Now().UTC()
@@ -348,26 +361,60 @@ func (s *Service) collectOnce(ctx context.Context, trigger string, refreshDetail
 	games, pagesFetched, err := client.FetchNetworkGames(ctx, 20, 1000)
 	if err != nil {
 		_ = s.store.FailNetGameCollectionRun(ctx, run.ID, errorCode(err), errorMessage(err), "")
-		return run, err
+		return run, nil, err
 	}
 	run, err = s.store.CompleteNetGameCollectionRun(ctx, run.ID, pagesFetched, uint32(len(games)), games, "")
 	if err != nil {
-		return store.NetGameCollectionRun{}, err
+		return store.NetGameCollectionRun{}, nil, err
 	}
 	if refreshDetails {
-		go s.refreshDetailsBatch(context.Background(), s.Settings().MaxDetailBatchSize)
+		go s.refreshDetailsBatchWithClientDelayed(context.Background(), client, s.Settings().MaxDetailBatchSize, trigger)
 	}
 	go s.purgeOldHistory(context.Background())
-	return run, nil
+	return run, client, nil
 }
 
+func (s *Service) refreshDetailsBatchWithClientDelayed(ctx context.Context, client *Client, limit int, trigger string) {
+	if !waitNetGameDetailRefreshDelay(ctx) {
+		return
+	}
+	if _, _, err := s.refreshDetailsBatchWithClient(ctx, client, limit); err != nil && !errors.Is(err, ErrCollectorBusy) {
+		s.logger.Warn("delayed net game detail refresh", "trigger", trigger, "error", err)
+	}
+}
+
+func waitNetGameDetailRefreshDelay(ctx context.Context) bool {
+	timer := time.NewTimer(netGameDetailRefreshDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
 func (s *Service) refreshAllDetails(ctx context.Context) error {
+	account, err := s.state.Account()
+	if err != nil {
+		return err
+	}
+	client, err := NewClient(account)
+	if err != nil {
+		return err
+	}
+	if _, err := client.Login(ctx); err != nil {
+		return err
+	}
+	return s.refreshAllDetailsWithClient(ctx, client)
+}
+
+func (s *Service) refreshAllDetailsWithClient(ctx context.Context, client *Client) error {
 	batchSize := s.Settings().MaxDetailBatchSize
 	if batchSize < 1 {
 		batchSize = 50
 	}
 	for {
-		selected, updated, err := s.refreshDetailsBatch(ctx, batchSize)
+		selected, updated, err := s.refreshDetailsBatchWithClient(ctx, client, batchSize)
 		if err != nil || selected < batchSize || updated == 0 {
 			return err
 		}
@@ -375,14 +422,6 @@ func (s *Service) refreshAllDetails(ctx context.Context) error {
 }
 
 func (s *Service) refreshDetailsBatch(ctx context.Context, limit int) (int, int, error) {
-	select {
-	case s.detailMutex <- struct{}{}:
-		defer func() { <-s.detailMutex }()
-	default:
-		return 0, 0, ErrCollectorBusy
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
 	account, err := s.state.Account()
 	if err != nil {
 		return 0, 0, err
@@ -394,6 +433,21 @@ func (s *Service) refreshDetailsBatch(ctx context.Context, limit int) (int, int,
 	if _, err := client.Login(ctx); err != nil {
 		return 0, 0, err
 	}
+	return s.refreshDetailsBatchWithClient(ctx, client, limit)
+}
+
+func (s *Service) refreshDetailsBatchWithClient(ctx context.Context, client *Client, limit int) (int, int, error) {
+	if client == nil {
+		return 0, 0, errors.New("net game client is not configured")
+	}
+	select {
+	case s.detailMutex <- struct{}{}:
+		defer func() { <-s.detailMutex }()
+	default:
+		return 0, 0, ErrCollectorBusy
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	games, err := s.store.NetGamesNeedingDetails(ctx, limit)
 	if err != nil {
 		return 0, 0, err
@@ -412,7 +466,6 @@ func (s *Service) refreshDetailsBatch(ctx context.Context, limit int) (int, int,
 	}
 	return len(games), updated, nil
 }
-
 func (s *Service) refreshOneDetail(ctx context.Context, gameID string) (store.NetGame, error) {
 	if gameID == "" {
 		return store.NetGame{}, store.ErrNotFound

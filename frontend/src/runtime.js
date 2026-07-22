@@ -31,6 +31,7 @@ export async function createGameServer(input) { return callWinApp("CreateGameSer
 export async function deleteGameServer(id) { return callWinApp("DeleteGameServer", id); }
 export async function selectGameModDirectory() { return callWinApp("SelectGameModDirectory"); }
 export async function joinGameServer(id) { return callWinApp("JoinGameServer", id); }
+export async function joinGameServerConfig(input) { return callWinApp("JoinGameServerConfig", input); }
 export async function gameJoinProgress(id) { return callWinApp("GameJoinProgress", id); }
 export async function gameServerRunning(id) { return callWinApp("GameServerRunning", id); }
 
