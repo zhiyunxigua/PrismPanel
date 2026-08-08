@@ -5,13 +5,21 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"sync"
 )
 
 type LocalLauncherServicesConfig struct {
-	Server  ServerConfig
-	Account AccountState
+	Server        ServerConfig
+	Account       AccountState
+	Profile       LaunchProfile
+	BaseMC        string
+	Authenticator JoinServerAuthenticator
+}
+
+type JoinServerAuthenticator interface {
+	Authenticate(ctx context.Context, gameID, userID, serverID string, profile LaunchProfile, account AccountState, baseMC string) (bool, error)
 }
 
 type LocalLauncherServices struct {
@@ -22,7 +30,8 @@ type LocalLauncherServices struct {
 }
 
 func StartLocalLauncherServices(ctx context.Context, config LocalLauncherServicesConfig) (*LocalLauncherServices, error) {
-	rpc, err := startLocalGameRPCService(config.Server)
+	profile := config.Profile.normalized(config.Server, "")
+	rpc, err := startLocalGameRPCService(profile)
 	if err != nil {
 		return nil, err
 	}
@@ -80,15 +89,15 @@ type localGameRPCService struct {
 	port     int
 	done     chan struct{}
 	once     sync.Once
-	server   ServerConfig
+	profile  LaunchProfile
 }
 
-func startLocalGameRPCService(server ServerConfig) (*localGameRPCService, error) {
+func startLocalGameRPCService(profile LaunchProfile) (*localGameRPCService, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
-	service := &localGameRPCService{listener: listener, port: listener.Addr().(*net.TCPAddr).Port, done: make(chan struct{}), server: server}
+	service := &localGameRPCService{listener: listener, port: listener.Addr().(*net.TCPAddr).Port, done: make(chan struct{}), profile: profile}
 	go service.acceptLoop()
 	return service, nil
 }
@@ -141,13 +150,13 @@ func (s *localGameRPCService) handleMessage(opcode uint16, payload []byte) ([]by
 	case 18:
 		return append(simplePack(uint16(18)), payload...), true
 	case 261:
-		if s.server.Version > Version1_18 {
-			return simplePack(uint16(1799), s.server.IP, int32(s.server.Port), s.server.Username), true
+		if s.profile.Version > Version1_18 {
+			return simplePack(uint16(1799), s.profile.ServerIP, int32(s.profile.ServerPort), s.profile.RoleName), true
 		}
 	case 512:
 		return simplePack(uint16(512), "i'am wpflauncher"), true
 	case 517:
-		return simplePack(uint16(1031), s.server.IP, int32(s.server.Port), s.server.Username, false), true
+		return simplePack(uint16(1031), s.profile.ServerIP, int32(s.profile.ServerPort), s.profile.RoleName, false), true
 	case 1298:
 		return simplePack(uint16(1298), false, int64(0), int64(0)), true
 	}
@@ -228,6 +237,9 @@ func startLocalAuthService(config LocalLauncherServicesConfig) (*localAuthServic
 	if err != nil {
 		return nil, err
 	}
+	if config.Authenticator == nil {
+		config.Authenticator = NewFantnelAuthenticator()
+	}
 	service := &localAuthService{listener: listener, port: listener.Addr().(*net.TCPAddr).Port, done: make(chan struct{}), config: config}
 	go service.acceptLoop()
 	return service, nil
@@ -257,10 +269,21 @@ func (s *localAuthService) acceptLoop() {
 
 func (s *localAuthService) handleConn(conn net.Conn) {
 	defer conn.Close()
-	_, _ = readAuthString(conn)
-	_, _ = readAuthString(conn)
-	_, _ = readAuthString(conn)
-	_ = binary.Write(conn, binary.LittleEndian, uint32(0))
+	gameID, gameIDErr := readAuthString(conn)
+	userID, userIDErr := readAuthString(conn)
+	serverID, serverIDErr := readAuthString(conn)
+	var responseCode uint32 = 1
+	if gameIDErr == nil && userIDErr == nil && serverIDErr == nil && s.config.Authenticator != nil {
+		profile := s.config.Profile
+		profile.GameID = gameID
+		authenticated, err := s.config.Authenticator.Authenticate(context.Background(), gameID, userID, serverID, profile, s.config.Account, s.config.BaseMC)
+		if err != nil {
+			log.Printf("[AuthSock] join-server authentication failed: %v", err)
+		} else if authenticated {
+			responseCode = 0
+		}
+	}
+	_ = binary.Write(conn, binary.LittleEndian, responseCode)
 }
 
 func readAuthString(reader io.Reader) (string, error) {

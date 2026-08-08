@@ -1,6 +1,9 @@
 package game
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type Version uint32
 
@@ -45,6 +48,16 @@ func VersionLabel(version Version) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unsupported game version: %d", version)
+}
+
+func VersionFromLabel(label string) (Version, error) {
+	label = strings.TrimSpace(label)
+	for _, option := range SupportedVersions() {
+		if option.Label == label {
+			return option.Version, nil
+		}
+	}
+	return VersionBase, fmt.Errorf("unsupported game version: %s", label)
 }
 
 func (v Version) Validate() error {

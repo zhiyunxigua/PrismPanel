@@ -65,6 +65,20 @@ func TestProcessLifecycleAndConsole(t *testing.T) {
 	if snapshot.State != StateStopped || snapshot.PID != 0 || snapshot.RuntimePort != nil {
 		t.Fatalf("unexpected stopped snapshot: %#v", snapshot)
 	}
+	if err := manager.Start("test"); err != nil {
+		t.Fatal(err)
+	}
+	waitForConsoleType(t, lines, "console.reset")
+	secondHistory, _, secondCancel, err := manager.Subscribe("test", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondCancel()
+	for _, line := range secondHistory {
+		if strings.Contains(line.Content, "command: say hello") {
+			t.Fatalf("old session output leaked into new history: %#v", secondHistory)
+		}
+	}
 }
 
 func TestManagerRegistersMirrorInstances(t *testing.T) {
@@ -105,6 +119,22 @@ func waitForConsole(t *testing.T, lines <-chan ConsoleLine, expected string) {
 			}
 		case <-timeout.C:
 			t.Fatalf("timed out waiting for console line %q", expected)
+		}
+	}
+}
+
+func waitForConsoleType(t *testing.T, lines <-chan ConsoleLine, expected string) {
+	t.Helper()
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case line := <-lines:
+			if line.Type == expected {
+				return
+			}
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for console event %q", expected)
 		}
 	}
 }

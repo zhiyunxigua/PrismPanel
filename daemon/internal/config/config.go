@@ -3,20 +3,23 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"PrismPanel-daemon/internal/atomicfile"
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Server  ServerConfig  `yaml:"server"`
-	SSL     SSLConfig     `yaml:"ssl"`
-	Storage StorageConfig `yaml:"storage"`
-	Files   FilesConfig   `yaml:"files"`
-	Process ProcessConfig `yaml:"process"`
+	Server   ServerConfig   `yaml:"server"`
+	SSL      SSLConfig      `yaml:"ssl"`
+	Security SecurityConfig `yaml:"security"`
+	Storage  StorageConfig  `yaml:"storage"`
+	Files    FilesConfig    `yaml:"files"`
+	Process  ProcessConfig  `yaml:"process"`
 }
 
 type ServerConfig struct {
@@ -29,6 +32,10 @@ type SSLConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
+}
+
+type SecurityConfig struct {
+	TrustedProxyCIDRs []string `yaml:"trusted_proxy_cidrs"`
 }
 
 type StorageConfig struct {
@@ -50,8 +57,9 @@ type ProcessConfig struct {
 
 func Default() Config {
 	return Config{
-		Server:  ServerConfig{Listen: "0.0.0.0", Port: 24444},
-		Storage: StorageConfig{DataDir: "data"},
+		Server:   ServerConfig{Listen: "0.0.0.0", Port: 24444},
+		Security: SecurityConfig{TrustedProxyCIDRs: []string{}},
+		Storage:  StorageConfig{DataDir: "data"},
 		Files: FilesConfig{
 			MaxEditFileSize:        5 * 1024 * 1024,
 			MaxUploadFileSize:      2 * 1024 * 1024 * 1024,
@@ -111,12 +119,12 @@ func (c Config) Validate() error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return errors.New("server.public_url must be an http or https URL")
 		}
-		if c.SSL.Enabled != (u.Scheme == "https") {
-			return errors.New("server.public_url scheme does not match ssl.enabled")
-		}
 	}
 	if c.SSL.Enabled && (c.SSL.CertFile == "" || c.SSL.KeyFile == "") {
 		return errors.New("ssl.cert_file and ssl.key_file are required when SSL is enabled")
+	}
+	if err := c.Security.Validate(); err != nil {
+		return err
 	}
 	if c.Storage.DataDir == "" {
 		return errors.New("storage.data_dir cannot be empty")
@@ -143,6 +151,49 @@ func (c Config) Validate() error {
 		return errors.New("process.shutdown_timeout_seconds must be positive")
 	}
 	return nil
+}
+
+func (c SecurityConfig) Validate() error {
+	seen := make(map[string]struct{}, len(c.TrustedProxyCIDRs))
+	for _, raw := range c.TrustedProxyCIDRs {
+		prefix, err := normalizeTrustedProxyCIDR(raw)
+		if err != nil {
+			return fmt.Errorf("security.trusted_proxy_cidrs: %w", err)
+		}
+		value := prefix.String()
+		if _, exists := seen[value]; exists {
+			return fmt.Errorf("security.trusted_proxy_cidrs contains duplicate CIDR %q", value)
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
+}
+
+func (c SecurityConfig) IsTrustedProxy(address netip.Addr) bool {
+	address = address.Unmap()
+	for _, raw := range c.TrustedProxyCIDRs {
+		prefix, err := normalizeTrustedProxyCIDR(raw)
+		if err == nil && prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeTrustedProxyCIDR(raw string) (netip.Prefix, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || value != raw {
+		return netip.Prefix{}, errors.New("CIDR must not be empty or padded")
+	}
+	if address, err := netip.ParseAddr(value); err == nil {
+		address = address.Unmap()
+		return netip.PrefixFrom(address, address.BitLen()), nil
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil || prefix.Addr().Is4In6() {
+		return netip.Prefix{}, fmt.Errorf("invalid CIDR %q", raw)
+	}
+	return prefix.Masked(), nil
 }
 
 func (c Config) DataDir() string {

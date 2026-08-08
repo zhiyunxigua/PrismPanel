@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"PrismPanel/internal/consolecommand"
 	"PrismPanel/internal/daemon"
 	"PrismPanel/internal/store"
 )
@@ -75,27 +77,30 @@ func (s *Server) handleServers(writer http.ResponseWriter, request *http.Request
 			return
 		}
 		nodeID := strings.TrimSpace(request.URL.Query().Get("node_id"))
-		autoInstall := s.autoInstallPlugins(request, nodeID, created.ServerID, created.Platform)
-		autoStartBlocked := hasAutoInstallFailure(autoInstall)
-		if autoStartBlocked {
-			var blockedConfig map[string]any
-			if json.Unmarshal(body, &blockedConfig) == nil {
-				if process, ok := blockedConfig["process"].(map[string]any); ok {
-					process["auto_start"] = false
-					if encoded, encodeErr := json.Marshal(blockedConfig); encodeErr == nil {
-						var ignored json.RawMessage
-						if updateErr := s.callNode(request, "server.update", json.RawMessage(encoded), &ignored); updateErr != nil {
-							s.logger.Error("disable auto start after plugin install failure", "error", updateErr)
-						}
-					}
-				}
+		deferAutoInstall, _ := strconv.ParseBool(request.URL.Query().Get("defer_auto_install"))
+		autoInstall := make([]autoInstallResult, 0)
+		if !deferAutoInstall {
+			autoInstall = s.autoInstallPlugins(request, nodeID, created.ServerID, created.Platform)
+		}
+		autoStartBlocked := false
+		var autoStartBlockError string
+		if hasAutoInstallFailure(autoInstall) {
+			var server map[string]any
+			if decodeErr := json.Unmarshal(body, &server); decodeErr != nil {
+				autoStartBlockError = decodeErr.Error()
+			} else if blockErr := s.blockServerAutoStart(request, created.ServerID, server); blockErr != nil {
+				autoStartBlockError = blockErr.Error()
+			} else {
+				autoStartBlocked = true
 			}
 		}
 		go s.reconcileAllProxies(context.Background())
 		writeSuccess(writer, map[string]any{
-			"server":             result,
-			"auto_install":       autoInstall,
-			"auto_start_blocked": autoStartBlocked,
+			"server":                 result,
+			"auto_install":           autoInstall,
+			"auto_start_blocked":     autoStartBlocked,
+			"auto_start_block_error": autoStartBlockError,
+			"auto_install_deferred":  deferAutoInstall,
 		})
 	default:
 		writer.Header().Set("Allow", "GET, POST")
@@ -211,6 +216,10 @@ func (s *Server) authorizeServerRequest(writer http.ResponseWriter, request *htt
 func (s *Server) handleServer(writer http.ResponseWriter, request *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/v1/servers/"), "/")
 	parts := strings.Split(path, "/")
+	if len(parts) == 3 && parts[1] == "plugins" && parts[2] == "auto-install" {
+		s.handleServerAutoInstall(writer, request, parts[0])
+		return
+	}
 	if len(parts) == 3 && parts[1] == "plugins" {
 		s.handleServerPluginOperation(writer, request, parts[0], parts[2])
 		return
@@ -461,6 +470,8 @@ func resourceType(action string) string {
 		return "session"
 	case "instance", "console":
 		return "instance"
+	case "operator":
+		return "operator"
 	case "permission":
 		return "permission_grant"
 	default:
@@ -470,6 +481,12 @@ func resourceType(action string) string {
 
 func riskLevel(action string) string {
 	switch {
+	case strings.HasPrefix(action, "firewall.system"):
+		return "critical"
+	case strings.HasPrefix(action, "firewall."):
+		return "high"
+	case strings.HasPrefix(action, "operator.") && !strings.Contains(action, "delete"):
+		return "high"
 	case strings.Contains(action, "delete"), strings.Contains(action, "permission"),
 		strings.Contains(action, "kill"), strings.Contains(action, "password.reset"):
 		return "critical"
@@ -558,7 +575,7 @@ func (s *Server) handleInstance(writer http.ResponseWriter, request *http.Reques
 			}
 		}
 		if err == nil {
-			err = validateConsoleCommand(input.Command)
+			err = s.validateConsoleCommand(input.Command)
 		}
 		if err == nil {
 			err = s.callNode(request, "console.command", map[string]any{
@@ -581,16 +598,8 @@ func (s *Server) handleInstance(writer http.ResponseWriter, request *http.Reques
 	}
 }
 
-func validateConsoleCommand(command string) error {
-	parts := strings.Fields(strings.TrimSpace(command))
-	if len(parts) == 0 {
-		return nil
-	}
-	root := strings.ToLower(strings.TrimPrefix(parts[0], "/"))
-	if separator := strings.LastIndexByte(root, ':'); separator >= 0 {
-		root = root[separator+1:]
-	}
-	if root == "op" || root == "deop" {
+func (s *Server) validateConsoleCommand(command string) error {
+	if errors.Is(consolecommand.Validate(command, s.config.Minecraft.ManageOperators), consolecommand.ErrOperatorManagement) {
 		return apiError("COMMAND_FORBIDDEN", "OP 只能通过面板的玩家权限功能管理")
 	}
 	return nil
@@ -603,18 +612,35 @@ func (s *Server) handleConsoleTicket(writer http.ResponseWriter, request *http.R
 		ExpiresAt string `json:"expires_at"`
 		PublicURL string `json:"public_url"`
 	}
-	err := s.callNode(request, "ticket.create", map[string]any{
+	nodeID := strings.TrimSpace(request.URL.Query().Get("node_id"))
+	sourceIP, sourceKnown := s.directAccessSourceIP(request)
+	direct := sourceKnown && strings.TrimSpace(s.connections.Status(nodeID).PublicURL) != ""
+	input := map[string]any{
 		"scope": "console.read", "instance_id": instanceID, "ttl_seconds": 120,
-	}, &created)
+	}
+	if direct {
+		input["source_ip"] = sourceIP
+		input["session_id"] = hex.EncodeToString(currentSession(request).TokenHash)
+	}
+	err := s.callNode(request, "ticket.create", input, &created)
+	if err != nil && direct {
+		delete(input, "source_ip")
+		delete(input, "session_id")
+		direct = false
+		err = s.callNode(request, "ticket.create", input, &created)
+	}
 	if err != nil {
 		s.record(request, "console.subscribe", instanceID, nil, err)
 		writeError(writer, err)
 		return
 	}
-	endpoint := "/api/v1/ws/console?node_id=" + request.URL.Query().Get("node_id")
-	publicURL := created.PublicURL
-	if publicURL == "" {
-		publicURL = s.connections.Status(request.URL.Query().Get("node_id")).PublicURL
+	endpoint := "/api/v1/ws/console?node_id=" + nodeID
+	publicURL := ""
+	if direct {
+		publicURL = created.PublicURL
+		if publicURL == "" {
+			publicURL = s.connections.Status(nodeID).PublicURL
+		}
 	}
 	if publicURL != "" {
 		endpoint, err = daemon.PublicConsoleURL(publicURL)

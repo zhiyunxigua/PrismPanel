@@ -1,6 +1,8 @@
 package plugins
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"PrismPanel-daemon/internal/supervisor"
@@ -27,5 +29,80 @@ func TestMergeMissingExternalPluginRequiresRestart(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Status != "uninstall_pending_restart" || !items[0].PendingRestart {
 		t.Fatalf("unexpected missing external plugin result: %#v", items)
+	}
+}
+
+func TestScanEnabledPluginHashesOnlyIncludesTopLevelEnabledJARs(t *testing.T) {
+	workspace := t.TempDir()
+	pluginDir := filepath.Join(workspace, "plugins")
+	if err := os.MkdirAll(filepath.Join(pluginDir, "nested"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"Example.jar":           "enabled",
+		"Upper.JAR":             "upper",
+		"Disabled.jar.disabled": "disabled",
+		"notes.txt":             "ignored",
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(filepath.Join(pluginDir, name), []byte(contents), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(pluginDir, "nested", "Nested.jar"), []byte("nested"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	hashes, err := scanEnabledPluginHashes(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hashes) != 2 || hashes["example.jar"] == "" || hashes["upper.jar"] == "" {
+		t.Fatalf("unexpected enabled plugin hashes: %#v", hashes)
+	}
+}
+
+func TestChangedPluginFilesDetectsAddedModifiedAndRemovedFiles(t *testing.T) {
+	baseline := map[string]string{"same.jar": "same", "modified.jar": "old", "removed.jar": "removed"}
+	current := map[string]string{"same.jar": "same", "modified.jar": "new", "added.jar": "added"}
+
+	changes := changedPluginFiles(baseline, current)
+	if len(changes) != 3 {
+		t.Fatalf("unexpected changes: %#v", changes)
+	}
+	for _, name := range []string{"modified.jar", "removed.jar", "added.jar"} {
+		if _, exists := changes[name]; !exists {
+			t.Fatalf("expected %s to be reported as changed: %#v", name, changes)
+		}
+	}
+}
+
+func TestMergeMarksChangedPluginFilesPendingRestart(t *testing.T) {
+	files := []FilePlugin{
+		{Name: "Loaded", Version: "2.0", Main: "example.Loaded", SourceFile: "Loaded.jar", Enabled: true},
+		{Name: "Added", Version: "1.0", Main: "example.Added", SourceFile: "Added.jar", Enabled: true},
+	}
+	runtime := []supervisor.LoadedPlugin{
+		{Name: "Loaded", Version: "2.0", Main: "example.Loaded", SourceFile: "Loaded.jar", Enabled: true},
+		{Name: "Removed", Version: "1.0", Main: "example.Removed", SourceFile: "Removed.jar", Enabled: true},
+	}
+	changes := map[string]struct{}{"loaded.jar": {}, "added.jar": {}, "removed.jar": {}}
+
+	items, pending := merge(files, runtime, true, changes)
+	if !pending {
+		t.Fatal("changed plugin files should require restart")
+	}
+	statuses := make(map[string]string, len(items))
+	for _, item := range items {
+		statuses[item.Name] = item.Status
+	}
+	if statuses["Loaded"] != "update_pending_restart" {
+		t.Fatalf("unexpected loaded status: %#v", statuses)
+	}
+	if statuses["Added"] != "install_pending_restart" {
+		t.Fatalf("unexpected added status: %#v", statuses)
+	}
+	if statuses["Removed"] != "uninstall_pending_restart" {
+		t.Fatalf("unexpected removed status: %#v", statuses)
 	}
 }

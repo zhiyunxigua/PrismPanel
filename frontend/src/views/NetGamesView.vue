@@ -1,11 +1,11 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { Activity, FolderOpen, Gamepad2, RefreshCw, Server, Settings, ShieldAlert } from "lucide-vue-next";
-import { ElMessage } from "element-plus";
-import MetricLineChart from "../components/metrics/MetricLineChart.vue";
+import { Activity, Check, Eye, FolderOpen, Gamepad2, ImageOff, RefreshCw, RotateCcw, Save, Search, Settings, Trash2 } from "lucide-vue-next";
+import { ElMessage, ElMessageBox } from "element-plus";
+import NetGameSeriesChart from "../components/NetGameSeriesChart.vue";
 import { request } from "../api";
 import { sessionState } from "../session";
-import { gameJoinProgress, gameServerRunning, gameVersions, isWinApp, joinGameServerConfig, netEaseAccount, selectGameModDirectory } from "../runtime";
+import { deleteNetGameCharacter, gameJoinProgress, gameServerRunning, isWinApp, joinGameServerConfig, netEaseAccount, netGameLaunchOptions, selectGameModDirectory } from "../runtime";
 
 const loading = ref(false);
 const detailsLoading = ref(false);
@@ -14,15 +14,22 @@ const settings = ref(defaultSettings());
 const account = ref(null);
 const preference = ref(defaultPreference());
 const series = ref(defaultSeries());
+const catalog = ref(defaultCatalog());
+const selectedGameIDs = ref([]);
+const savedSelectedGameIDs = ref([]);
+const selectionSearch = ref("");
+const preferenceSaving = ref(false);
+const failedGameImages = reactive(new Set());
 const selectedGame = ref(null);
 const selectedGameId = ref("");
 const gameDrawerOpen = ref(false);
 const settingsDialogOpen = ref(false);
 const accountForm = ref({ email: "", password: "" });
-const preferenceForm = ref({ display_game_count: 10, forced_game_ids_text: "" });
 const windowHours = ref(24);
 const localNetEaseAccount = ref(null);
-const gameVersionOptions = ref([]);
+const characters = ref([]);
+const characterLoading = ref(false);
+const deletingCharacter = ref("");
 const joinDialogOpen = ref(false);
 const joinSubmitting = ref(false);
 const joinTarget = ref(null);
@@ -33,13 +40,27 @@ let joinProgressTimer = 0;
 
 const isSuperAdmin = computed(() => sessionState.user?.group?.code === "super_admin");
 const games = computed(() => series.value.games || []);
-const recentRun = computed(() => collector.value?.last_run || null);
+const catalogGames = computed(() => catalog.value.games || []);
+const selectedGameIDSet = computed(() => new Set(selectedGameIDs.value));
+const filteredCatalogGames = computed(() => {
+  const query = selectionSearch.value.trim().toLocaleLowerCase("zh-CN");
+  if (!query) return catalogGames.value;
+  return catalogGames.value.filter((game) => [
+    game.name,
+    game.game_id,
+    game.author,
+    game.summary,
+  ].some((value) => String(value || "").toLocaleLowerCase("zh-CN").includes(query)));
+});
+const hasSelectionChanges = computed(() => {
+  if (selectedGameIDs.value.length !== savedSelectedGameIDs.value.length) return true;
+  const saved = new Set(savedSelectedGameIDs.value);
+  return selectedGameIDs.value.some((gameID) => !saved.has(gameID));
+});
 const nextRunAt = computed(() => collector.value?.next_run_at || null);
-const chartPalette = ["#c64c4c", "#d88a2d", "#3f8f64", "#397eaf", "#8a63d2", "#c64f8e"];
-const joinVersionOptions = computed(() => gameVersionOptions.value.map((item) => ({
-  label: `${item.label} · ${String(item.java || "").toUpperCase()}`,
-  value: item.version,
-})));
+const joinVersionText = computed(() => joinTarget.value?.version_label || "未识别");
+const characterOptions = computed(() => characters.value.map((item) => item.name).filter(Boolean));
+const canCreateCharacter = computed(() => characters.value.length < 3);
 const joinProgressPercent = computed(() => Math.round(Number(joinProgress.value?.percent || 0)));
 const joinProgressStatusText = computed(() => {
   if (!joinProgress.value) return "尚未开始";
@@ -58,15 +79,59 @@ function defaultSettings() {
 }
 
 function defaultJoinForm() {
-  return { username: "", version: "", mod_dir: "" };
+  return { username: "", mod_dir: "" };
 }
 
 function defaultPreference() {
-  return { display_game_count: 10, forced_game_ids: [] };
+  return { selected_game_ids: [] };
 }
 
 function defaultSeries() {
   return { window_start: null, window_end: null, runs: [], games: [] };
+}
+
+function defaultCatalog() {
+  return { sampled_at: null, games: [] };
+}
+
+function netGameNicknameKey(gameId) {
+  return `prismpanel.net_game.nickname.${gameId}`;
+}
+
+function savedNetGameNickname(gameId) {
+  try {
+    return window.localStorage?.getItem(netGameNicknameKey(gameId)) || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveNetGameNickname(gameId, username) {
+  try {
+    window.localStorage?.setItem(netGameNicknameKey(gameId), username);
+  } catch {
+    // localStorage 不可用时忽略；启动流程不依赖该缓存。
+  }
+}
+
+function netGameResourceDirectoryKey(gameId) {
+  return `prismpanel.net_game.resource_dir.${gameId}`;
+}
+
+function savedNetGameResourceDirectory(gameId) {
+  try {
+    return window.localStorage?.getItem(netGameResourceDirectoryKey(gameId)) || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveNetGameResourceDirectory(gameId, directory) {
+  try {
+    window.localStorage?.setItem(netGameResourceDirectoryKey(gameId), directory);
+  } catch {
+    // localStorage 不可用时忽略；启动参数仍会使用本次选择。
+  }
 }
 
 function formatTime(value) {
@@ -94,28 +159,18 @@ function formatList(value) {
   return "";
 }
 
-function gameColor(index) {
-  return chartPalette[index % chartPalette.length];
-}
-
 function stripHtml(value) {
   if (!value) return "";
   const doc = new DOMParser().parseFromString(String(value), "text/html");
   return doc.body.textContent || "";
 }
 
-function applyPreferenceForm(data) {
-  preferenceForm.value = {
-    display_game_count: data.display_game_count || 10,
-    forced_game_ids_text: (data.forced_game_ids || []).join(", "),
-  };
-}
-
 async function loadAll(silent = false) {
   if (!silent) loading.value = true;
   try {
-    const seriesPromise = request(`/api/v1/net-games/series?hours=${windowHours.value}`);
-    const preferencePromise = request("/api/v1/user/preferences/net-games").catch(() => ({ preference: defaultPreference() }));
+    const seriesPromise = request("/api/v1/net-games/series?hours=" + windowHours.value);
+    const catalogPromise = request("/api/v1/net-games/catalog");
+    const preferencePromise = request("/api/v1/user/preferences/net-games");
     const collectorPromise = isSuperAdmin.value
       ? request("/api/v1/net-games/collector-status").catch(() => ({ collector: null }))
       : Promise.resolve({ collector: null });
@@ -126,8 +181,9 @@ async function loadAll(silent = false) {
       ? request("/api/v1/net-games/account").catch(() => ({ account: null }))
       : Promise.resolve({ account: null });
 
-    const [seriesResult, preferenceResult, collectorResult, settingsResult, accountResult] = await Promise.all([
+    const [seriesResult, catalogResult, preferenceResult, collectorResult, settingsResult, accountResult] = await Promise.all([
       seriesPromise,
+      catalogPromise,
       preferencePromise,
       collectorPromise,
       settingsPromise,
@@ -135,8 +191,10 @@ async function loadAll(silent = false) {
     ]);
 
     series.value = seriesResult || defaultSeries();
+    catalog.value = catalogResult || defaultCatalog();
     preference.value = preferenceResult?.preference || defaultPreference();
-    applyPreferenceForm(preference.value);
+    selectedGameIDs.value = [...(preference.value.selected_game_ids || [])];
+    savedSelectedGameIDs.value = [...selectedGameIDs.value];
     collector.value = collectorResult?.collector || null;
     settings.value = settingsResult?.settings || defaultSettings();
     account.value = accountResult?.account || null;
@@ -145,6 +203,18 @@ async function loadAll(silent = false) {
     if (selectedGameId.value) {
       await loadGame(selectedGameId.value, true);
     }
+  } catch (error) {
+    if (!silent) ElMessage.error(error.message);
+  } finally {
+    if (!silent) loading.value = false;
+  }
+}
+
+async function loadSeries(silent = false) {
+  if (!silent) loading.value = true;
+  try {
+    series.value = await request("/api/v1/net-games/series?hours=" + windowHours.value);
+    if (selectedGameId.value) await loadGame(selectedGameId.value, true);
   } catch (error) {
     if (!silent) ElMessage.error(error.message);
   } finally {
@@ -177,25 +247,58 @@ function closeGameDrawer() {
 }
 
 async function savePreference() {
-  const forced = preferenceForm.value.forced_game_ids_text
-    .split(/[\s,，]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
+  preferenceSaving.value = true;
   try {
     const data = await request("/api/v1/user/preferences/net-games", {
       method: "PUT",
-      body: JSON.stringify({
-        display_game_count: Number(preferenceForm.value.display_game_count) || 10,
-        forced_game_ids: forced,
-      }),
+      body: JSON.stringify({ selected_game_ids: selectedGameIDs.value }),
     });
     preference.value = data.preference;
-    settingsDialogOpen.value = false;
-    ElMessage.success("个人显示设置已保存");
-    await loadAll(true);
+    selectedGameIDs.value = [...(data.preference?.selected_game_ids || [])];
+    savedSelectedGameIDs.value = [...selectedGameIDs.value];
+    ElMessage.success("显示游戏已保存");
+    await loadSeries(true);
   } catch (error) {
     ElMessage.error(error.message);
+  } finally {
+    preferenceSaving.value = false;
   }
+}
+
+function toggleGameSelection(gameID) {
+  const index = selectedGameIDs.value.indexOf(gameID);
+  if (index >= 0) {
+    selectedGameIDs.value = selectedGameIDs.value.filter((value) => value !== gameID);
+    return;
+  }
+  if (selectedGameIDs.value.length >= 20) {
+    ElMessage.warning("最多选择 20 个游戏");
+    return;
+  }
+  selectedGameIDs.value = [...selectedGameIDs.value, gameID];
+}
+
+function selectFilteredGames() {
+  const selected = new Set(selectedGameIDs.value);
+  const candidates = filteredCatalogGames.value.filter((game) => !selected.has(game.game_id));
+  const available = 20 - selectedGameIDs.value.length;
+  selectedGameIDs.value = [
+    ...selectedGameIDs.value,
+    ...candidates.slice(0, Math.max(0, available)).map((game) => game.game_id),
+  ];
+  if (candidates.length > available) ElMessage.warning("已选择当前结果中的前 20 个游戏");
+}
+
+function clearGameSelection() {
+  selectedGameIDs.value = [];
+}
+
+function restoreGameSelection() {
+  selectedGameIDs.value = [...savedSelectedGameIDs.value];
+}
+
+function markGameImageFailed(gameID) {
+  failedGameImages.add(gameID);
 }
 
 async function saveSettings() {
@@ -266,9 +369,8 @@ async function deleteAccount() {
 async function loadWinAppJoinState() {
   if (!isWinApp()) return;
   try {
-    const [accountResult, versionsResult] = await Promise.all([netEaseAccount(), gameVersions()]);
+    const [accountResult] = await Promise.all([netEaseAccount()]);
     localNetEaseAccount.value = accountResult || null;
-    gameVersionOptions.value = versionsResult || [];
   } catch (error) {
     ElMessage.warning(error.message || "加载本地加入游戏状态失败");
   }
@@ -282,55 +384,55 @@ async function openNetGameJoin(game) {
     return;
   }
   try {
-    const detail = await fetchNetGameDetail(game.game_id);
-    const endpoint = netGameEndpoint(detail.game);
+    characterLoading.value = true;
+    const options = await netGameLaunchOptions(game.game_id);
+    const endpoint = options.address || {};
     if (!endpoint.ip) {
-      ElMessage.warning("该网络游戏暂未采集到服务器地址，请先刷新详情");
+      ElMessage.warning("该网络游戏暂未返回服务器地址");
       return;
     }
-    joinTarget.value = { ...detail.game, ip: endpoint.ip, port: endpoint.port };
+    joinTarget.value = {
+      ...game,
+      game_id: options.detail.game_id,
+      ip: endpoint.ip,
+      port: endpoint.port || 25565,
+      version_label: options.detail.version_label,
+    };
+    characters.value = options.characters || [];
     Object.assign(joinForm, defaultJoinForm());
-    joinForm.version = defaultJoinVersion(detail.game);
+    joinForm.username = savedNetGameNickname(options.detail.game_id) || characterOptions.value[0] || "";
+    joinForm.mod_dir = savedNetGameResourceDirectory(options.detail.game_id);
     joinDialogOpen.value = true;
   } catch (error) {
     ElMessage.error(error.message || "加载网络游戏详情失败");
+  } finally {
+    characterLoading.value = false;
   }
 }
 
-async function fetchNetGameDetail(gameId) {
-  return request(`/api/v1/net-games/${encodeURIComponent(gameId)}?hours=${windowHours.value}`);
-}
-
-function netGameEndpoint(game) {
-  const directPort = Number(game?.port || 0) || 25565;
-  if (game?.ip) return { ip: game.ip, port: directPort };
-  const address = String(game?.address || "").trim();
-  if (!address) return { ip: "", port: 25565 };
-  const match = address.match(/^(.+):(\d+)$/);
-  if (!match) return { ip: address, port: 25565 };
-  return { ip: match[1], port: Number(match[2]) || 25565 };
-}
-
-function defaultJoinVersion(game) {
-  const versions = Array.isArray(game?.versions) ? game.versions : [];
-  for (const version of versions) {
-    const text = String(version);
-    const exact = gameVersionOptions.value.find((item) => item.label === text);
-    if (exact) return exact.version;
-    const compatible = [...gameVersionOptions.value]
-      .sort((left, right) => right.label.length - left.label.length)
-      .find((item) => text.startsWith(item.label));
-    if (compatible) return compatible.version;
-  }
-  return gameVersionOptions.value[gameVersionOptions.value.length - 1]?.version || "";
-}
-
-async function chooseJoinModDirectory() {
+async function chooseNetGameResourceDirectory() {
   try {
     const selected = await selectGameModDirectory();
     if (selected) joinForm.mod_dir = selected;
   } catch (error) {
-    ElMessage.error(error.message || "选择目录失败");
+    ElMessage.error(error.message || "选择资源目录失败");
+  }
+}
+
+async function removeNetGameCharacter(roleName) {
+  if (!joinTarget.value?.game_id || !roleName || deletingCharacter.value) return;
+  try {
+    await ElMessageBox.confirm(`删除网易角色：${roleName}？`, "删除角色", {
+      type: "warning", confirmButtonText: "删除", cancelButtonText: "取消",
+    });
+    deletingCharacter.value = roleName;
+    characters.value = await deleteNetGameCharacter(joinTarget.value.game_id, roleName);
+    if (joinForm.username === roleName) joinForm.username = characterOptions.value[0] || "";
+    ElMessage.success("角色已删除");
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") ElMessage.error(error.message || "删除角色失败");
+  } finally {
+    deletingCharacter.value = "";
   }
 }
 
@@ -338,10 +440,6 @@ async function submitNetGameJoin() {
   if (!joinTarget.value) return;
   if (!joinForm.username.trim()) {
     ElMessage.warning("请输入角色用户名");
-    return;
-  }
-  if (!joinForm.version) {
-    ElMessage.warning("请选择游戏版本");
     return;
   }
   if (!joinForm.mod_dir.trim()) {
@@ -356,10 +454,11 @@ async function submitNetGameJoin() {
       ip: joinTarget.value.ip,
       port: joinTarget.value.port || 25565,
       username: joinForm.username,
-      version: joinForm.version,
       mod_dir: joinForm.mod_dir,
     };
     const predicted = await joinGameServerConfig(input);
+    saveNetGameNickname(joinTarget.value.game_id, joinForm.username.trim());
+    saveNetGameResourceDirectory(joinTarget.value.game_id, joinForm.mod_dir.trim());
     joinProgress.value = predicted;
     joinDialogOpen.value = false;
     joinProgressDialogOpen.value = true;
@@ -422,7 +521,7 @@ watch(joinProgressDialogOpen, (open) => {
         <p>{{ series.window_start ? formatTime(series.window_start) : "--" }} - {{ series.window_end ? formatTime(series.window_end) : "--" }}</p>
       </div>
       <div class="toolbar-actions">
-        <el-select v-model="windowHours" class="status-filter" @change="loadAll">
+        <el-select v-model="windowHours" class="status-filter" @change="loadSeries">
           <el-option label="24 小时" :value="24" />
           <el-option label="12 小时" :value="12" />
           <el-option label="6 小时" :value="6" />
@@ -438,98 +537,120 @@ watch(joinProgressDialogOpen, (open) => {
       </div>
     </div>
 
-    <section class="summary-grid">
-      <article class="summary-item">
-        <div class="summary-icon players"><Server :size="19" /></div>
-        <div>
-          <span>展示游戏</span>
-          <strong>{{ games.length }}</strong>
-        </div>
-      </article>
-      <article class="summary-item">
-        <div class="summary-icon nodes"><Activity :size="19" /></div>
-        <div>
-          <span>采集中</span>
-          <strong>{{ collector?.running ? "是" : "否" }}</strong>
-        </div>
-      </article>
-      <article class="summary-item">
-        <div class="summary-icon instances"><ShieldAlert :size="19" /></div>
-        <div>
-          <span>下次采集</span>
-          <strong>{{ nextRunAt ? formatTime(nextRunAt) : "--" }}</strong>
-        </div>
-      </article>
-      <article class="summary-item">
-        <div class="summary-icon alerts"><Settings :size="19" /></div>
-        <div>
-          <span>账号状态</span>
-          <strong>{{ account?.email || "未配置" }}</strong>
-        </div>
-      </article>
-    </section>
+    <div class="net-games-status">
+      <span>目录 <strong>{{ catalogGames.length }}</strong></span>
+      <span>已选 <strong>{{ games.length }}/20</strong></span>
+      <span>最后采样 <strong>{{ catalog.sampled_at ? formatTime(catalog.sampled_at) : "--" }}</strong></span>
+      <template v-if="isSuperAdmin">
+        <span>采集状态 <strong>{{ collector?.running ? "进行中" : "空闲" }}</strong></span>
+        <span>下次采集 <strong>{{ nextRunAt ? formatTime(nextRunAt) : "--" }}</strong></span>
+        <span>账号 <strong>{{ account?.email || "未配置" }}</strong></span>
+      </template>
+    </div>
 
     <section class="net-games-panel">
+      <NetGameSeriesChart
+        :games="games"
+        :window-start="series.window_start"
+        :window-end="series.window_end"
+        :loading="loading"
+        @open-game="openGame"
+      />
+    </section>
+
+    <section class="net-games-panel game-selection-panel">
       <div class="panel-section-head">
         <div>
-          <h3>总览</h3>
-          <p>按最近成功采集结果排序，点击卡片查看详情</p>
+          <h3>选择显示游戏</h3>
+          <p>选择结果按当前用户保存，最多同时显示 20 个游戏</p>
+        </div>
+        <div class="selection-save">
+          <span>{{ selectedGameIDs.length }}/20</span>
+          <el-tooltip content="恢复已保存选择">
+            <el-button
+              class="square-button"
+              :disabled="!hasSelectionChanges"
+              aria-label="恢复已保存选择"
+              @click="restoreGameSelection"
+            >
+              <RotateCcw :size="16" />
+            </el-button>
+          </el-tooltip>
+          <el-button
+            type="primary"
+            :loading="preferenceSaving"
+            :disabled="!hasSelectionChanges"
+            @click="savePreference"
+          >
+            <Save :size="16" />保存
+          </el-button>
         </div>
       </div>
+
+      <div class="game-selection-toolbar">
+        <el-input v-model="selectionSearch" clearable placeholder="搜索游戏名称、作者或 ID">
+          <template #prefix><Search :size="15" /></template>
+        </el-input>
+        <div class="game-selection-actions">
+          <el-button @click="selectFilteredGames">全选当前结果</el-button>
+          <el-button :disabled="!selectedGameIDs.length" @click="clearGameSelection">清空选择</el-button>
+        </div>
+      </div>
+
+      <div class="game-selection-result">
+        <span>显示 {{ filteredCatalogGames.length }} 个游戏</span>
+      </div>
+
       <div class="net-games-grid" v-loading="loading">
         <article
-          v-for="(game, index) in games"
+          v-for="game in filteredCatalogGames"
           :key="game.game_id"
           class="net-game-card"
-          :class="{ active: selectedGameId === game.game_id }"
-          role="button"
+          :class="{ selected: selectedGameIDSet.has(game.game_id) }"
+          role="checkbox"
+          :aria-checked="selectedGameIDSet.has(game.game_id)"
           tabindex="0"
-          @click="openGame(game.game_id)"
-          @keydown.enter.prevent="openGame(game.game_id)"
-          @keydown.space.prevent="openGame(game.game_id)"
+          @click="toggleGameSelection(game.game_id)"
+          @keydown.enter.prevent="toggleGameSelection(game.game_id)"
+          @keydown.space.prevent="toggleGameSelection(game.game_id)"
         >
-          <div class="net-game-card-head">
-            <div>
-              <strong>{{ game.rank }}. {{ game.name || game.game_id }}</strong>
-              <small>{{ game.game_id }}</small>
+          <div class="net-game-cover">
+            <img
+              v-if="game.image && !failedGameImages.has(game.game_id)"
+              :src="game.image"
+              :alt="game.name || game.game_id"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+              @error="markGameImageFailed(game.game_id)"
+            />
+            <div v-else class="net-game-cover-placeholder">
+              <ImageOff :size="30" />
             </div>
-            <div class="net-game-card-actions">
-              <span class="net-game-count" :style="{ color: gameColor(index) }">{{ formatCount(game.latest_online_count) }}</span>
+            <div class="net-game-cover-actions">
+              <el-button size="small" @click.stop="openGame(game.game_id)">
+                <Eye :size="14" />详细信息
+              </el-button>
               <el-button v-if="isWinApp()" size="small" type="primary" @click.stop="openNetGameJoin(game)">
                 <Gamepad2 :size="14" />加入
               </el-button>
             </div>
           </div>
-          <MetricLineChart
-            :title="game.name || game.game_id"
-            :points="(game.points || []).map((point) => ({ sampled_at: point.sampled_at, value: point.value }))"
-            :color="gameColor(index)"
-            unit=""
-            :decimals="0"
-          />
+          <div class="net-game-card-info">
+            <div class="net-game-title-row">
+              <strong :title="game.name || game.game_id">{{ game.name || game.game_id }}</strong>
+              <span>{{ formatCount(game.latest_online_count) }}</span>
+            </div>
+            <p>{{ game.author || game.summary || "作者信息待采集" }}</p>
+            <small>#{{ game.rank }} · {{ game.game_id }}</small>
+          </div>
+          <div v-if="selectedGameIDSet.has(game.game_id)" class="net-game-check" aria-hidden="true">
+            <Check :size="17" />
+          </div>
         </article>
-        <div v-if="!loading && !games.length" class="empty-state">
-          <Server :size="26" />
-          <strong>暂无可展示的网络游戏数据</strong>
+        <div v-if="!loading && !filteredCatalogGames.length" class="empty-state">
+          <Search :size="25" />
+          <strong>{{ catalogGames.length ? "没有匹配的游戏" : "暂无网络游戏数据" }}</strong>
         </div>
-      </div>
-    </section>
-
-    <section class="net-games-panel">
-      <div class="panel-section-head">
-        <div>
-          <h3>个人显示设置</h3>
-          <p>保存到数据库，作用于当前登录用户</p>
-        </div>
-        <el-button @click="savePreference">保存设置</el-button>
-      </div>
-      <div class="net-games-settings-grid">
-        <el-form-item label="显示数量">
-          <el-input-number v-model="preferenceForm.display_game_count" :min="1" :max="20" />
-        </el-form-item>
-        <el-form-item label="强制显示 ID">
-          <el-input v-model="preferenceForm.forced_game_ids_text" placeholder="用逗号分隔多个游戏 ID" />
-        </el-form-item>
       </div>
     </section>
   </div>
@@ -587,17 +708,37 @@ watch(joinProgressDialogOpen, (open) => {
           <el-input :model-value="joinTarget ? `${joinTarget.ip}:${joinTarget.port || 25565}` : ''" disabled />
         </el-form-item>
         <el-form-item label="角色用户名">
-          <el-input v-model="joinForm.username" placeholder="输入启动游戏使用的角色名" />
-        </el-form-item>
-        <el-form-item label="游戏版本">
-          <el-select v-model="joinForm.version" filterable>
-            <el-option v-for="item in joinVersionOptions" :key="item.value" :label="item.label" :value="item.value" />
+          <el-select
+            v-model="joinForm.username"
+            filterable
+            :allow-create="canCreateCharacter"
+            default-first-option
+            :loading="characterLoading"
+            :placeholder="canCreateCharacter ? '输入或选择网易已有角色' : '角色已达 3 个，请先删除一个角色'"
+          >
+            <el-option v-for="character in characters" :key="character.name" :label="character.name" :value="character.name">
+              <div class="character-option">
+                <span>{{ character.name }}</span>
+                <el-button
+                  link
+                  type="danger"
+                  :loading="deletingCharacter === character.name"
+                  @mousedown.stop
+                  @click.stop.prevent="removeNetGameCharacter(character.name)"
+                >
+                  <Trash2 v-if="deletingCharacter !== character.name" :size="14" />
+                </el-button>
+              </div>
+            </el-option>
           </el-select>
         </el-form-item>
-        <el-form-item label="自定义资源目录">
+        <el-form-item label="游戏版本">
+          <el-input :model-value="joinVersionText" disabled />
+        </el-form-item>
+        <el-form-item label="自定义资源目录" class="full-width-form-item">
           <div class="path-input-row">
             <el-input v-model="joinForm.mod_dir" placeholder="包含 mods/config/resourcepacks/shaderpacks 的目录" />
-            <el-button @click="chooseJoinModDirectory"><FolderOpen :size="16" />预览</el-button>
+            <el-button @click="chooseNetGameResourceDirectory"><FolderOpen :size="16" />浏览</el-button>
           </div>
         </el-form-item>
       </div>
@@ -658,9 +799,27 @@ watch(joinProgressDialogOpen, (open) => {
 .net-games-page {
   min-width: 0;
 }
+.net-games-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px 18px;
+  min-height: 32px;
+  padding: 4px 0 10px;
+  color: #737d76;
+  font-size: 11px;
+}
+.net-games-status strong {
+  margin-left: 4px;
+  color: #334039;
+  font-weight: 600;
+}
 .net-games-panel {
   padding: 14px 0 4px;
   border-top: 1px solid #dde4de;
+}
+.game-selection-panel {
+  padding-top: 18px;
 }
 .panel-section-head {
   display: flex;
@@ -678,53 +837,173 @@ watch(joinProgressDialogOpen, (open) => {
   color: #6d756f;
   font-size: 12px;
 }
+.selection-save {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.selection-save > span {
+  min-width: 42px;
+  color: #5f6b63;
+  font-size: 12px;
+  text-align: right;
+}
+.game-selection-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.game-selection-toolbar > .el-input {
+  width: min(420px, 100%);
+}
+.game-selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.game-selection-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 24px;
+  margin-bottom: 8px;
+  color: #778179;
+  font-size: 11px;
+}
 .net-games-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 12px;
 }
 .net-game-card {
-  padding: 12px;
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
   border: 1px solid #dce2dd;
   border-radius: 6px;
   background: #fff;
   text-align: left;
   cursor: pointer;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
 }
-.net-game-card.active {
+.net-game-card:hover,
+.net-game-card:focus-visible {
+  transform: translateY(-2px);
+  border-color: #b9c5bd;
+  box-shadow: 0 5px 14px rgba(47, 64, 53, 0.09);
+  outline: none;
+}
+.net-game-card.selected {
   border-color: #7bb07f;
   box-shadow: 0 0 0 1px rgba(123, 176, 127, 0.22);
 }
-.net-game-card-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
+.net-game-cover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 400 / 225;
+  overflow: hidden;
+  background: #edf1ee;
 }
-.net-game-card-head strong {
+.net-game-cover img {
   display: block;
-  font-size: 14px;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.18s ease;
 }
-.net-game-card-head small {
-  display: block;
-  color: #737d77;
-  margin-top: 3px;
+.net-game-card:hover .net-game-cover img {
+  transform: scale(1.025);
 }
-.net-game-card-actions {
+.net-game-cover-placeholder {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  color: #929d95;
+}
+.net-game-cover-actions {
+  position: absolute;
+  inset: 0;
   display: flex;
-  flex: 0 0 auto;
   align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 10px;
+  background: rgba(24, 32, 27, 0.58);
+  opacity: 0;
+  transition: opacity 0.16s ease;
+  pointer-events: none;
+}
+.net-game-card:hover .net-game-cover-actions,
+.net-game-card:focus-within .net-game-cover-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.net-game-cover-actions .el-button {
+  margin: 0;
+}
+.net-game-card-info {
+  min-height: 86px;
+  padding: 10px 11px 12px;
+}
+.net-game-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
-.net-game-count {
-  font-size: 18px;
+.net-game-title-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #26322b;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.net-game-title-row span {
+  flex: 0 0 auto;
+  color: #397eaf;
+  font-size: 13px;
   font-weight: 700;
 }
-.net-games-settings-grid {
+.net-game-card-info p {
+  min-height: 17px;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: #6d7870;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.net-game-card-info small {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: #929b95;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.net-game-check {
+  position: absolute;
+  right: 0;
+  bottom: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 12px;
+  width: 29px;
+  height: 29px;
+  place-items: center;
+  color: #fff;
+  background: #4f9960;
+  border-radius: 6px 0 0;
+}
+.net-games-grid > .empty-state {
+  grid-column: 1 / -1;
+  min-height: 180px;
 }
 .drawer-detail {
   min-height: 100%;
@@ -798,6 +1077,19 @@ watch(joinProgressDialogOpen, (open) => {
 .path-input-row .el-input {
   flex: 1;
 }
+.full-width-form-item {
+  grid-column: 1 / -1;
+}
+.character-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+.character-option .el-button {
+  margin: 0;
+}
 .launch-progress-body {
   display: grid;
   gap: 14px;
@@ -822,13 +1114,38 @@ watch(joinProgressDialogOpen, (open) => {
   white-space: pre-wrap;
 }
 @media (max-width: 720px) {
-  .net-game-card-head,
+  .panel-section-head,
+  .game-selection-toolbar,
   .path-input-row {
+    align-items: stretch;
     flex-direction: column;
   }
-  .net-game-card-actions {
+  .selection-save,
+  .game-selection-actions,
+  .game-selection-toolbar > .el-input {
     width: 100%;
-    justify-content: space-between;
+  }
+  .selection-save > span {
+    margin-right: auto;
+  }
+  .game-selection-actions .el-button {
+    flex: 1;
+  }
+  .net-games-grid {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 10px;
+  }
+  .net-game-card-info {
+    min-height: 82px;
+    padding: 9px;
+  }
+  .net-game-cover-actions {
+    align-content: center;
+    opacity: 1;
+    background: linear-gradient(to top, rgba(24, 32, 27, 0.68), transparent 70%);
+  }
+  .net-game-cover-actions .el-button {
+    align-self: flex-end;
   }
 }
 </style>

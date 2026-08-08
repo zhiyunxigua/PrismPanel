@@ -10,18 +10,13 @@ import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.Plugin;
 
-import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Method;
 import java.net.URISyntaxException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,7 +25,6 @@ import java.util.concurrent.ConcurrentHashMap;
 
 final class SpigotTelemetry implements TelemetryProvider, Listener {
     private final Map<UUID, Instant> joinedAt = new ConcurrentHashMap<>();
-    private final Map<Path, DigestEntry> pluginDigests = new ConcurrentHashMap<>();
 
     SpigotTelemetry() {
         Instant now = Instant.now();
@@ -112,37 +106,10 @@ final class SpigotTelemetry implements TelemetryProvider, Listener {
         try {
             Path source = Path.of(plugin.getClass().getProtectionDomain().getCodeSource().getLocation().toURI())
                     .toAbsolutePath().normalize();
-            if (!Files.isRegularFile(source)) {
-                return;
+            if (source.getFileName() != null) {
+                item.put("source_file", source.getFileName().toString());
             }
-            long size = Files.size(source);
-            long modified = Files.getLastModifiedTime(source).toMillis();
-            DigestEntry cached = pluginDigests.get(source);
-            if (cached == null || cached.size() != size || cached.modified() != modified) {
-                cached = new DigestEntry(size, modified, sha256(source));
-                pluginDigests.put(source, cached);
-            }
-            item.put("source_file", source.getFileName().toString());
-            item.put("sha256", cached.sha256());
-        } catch (IOException | URISyntaxException | RuntimeException ignored) {
-        }
-    }
-
-    private String sha256(Path path) throws IOException {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            try (var input = Files.newInputStream(path)) {
-                byte[] buffer = new byte[64 * 1024];
-                int count;
-                while ((count = input.read(buffer)) >= 0) {
-                    if (count > 0) {
-                        digest.update(buffer, 0, count);
-                    }
-                }
-            }
-            return HexFormat.of().formatHex(digest.digest());
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException("SHA-256 is unavailable", error);
+        } catch (URISyntaxException | RuntimeException ignored) {
         }
     }
 
@@ -168,8 +135,5 @@ final class SpigotTelemetry implements TelemetryProvider, Listener {
         } catch (ReflectiveOperationException ignored) {
         }
         return null;
-    }
-
-    private record DigestEntry(long size, long modified, String sha256) {
     }
 }

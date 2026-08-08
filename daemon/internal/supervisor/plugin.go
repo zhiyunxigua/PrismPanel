@@ -133,6 +133,11 @@ func (c *PluginConnection) Close() {
 		current.pluginConnected = false
 		current.pluginCapabilities = nil
 		current.pluginConnection = nil
+		if current.operatorSync.State != "" {
+			current.operatorSync.State = "pending"
+			current.operatorSync.Error = ""
+			current.operatorSync.UpdatedAt = time.Now().UTC()
+		}
 	}
 	current.mu.Unlock()
 	c.manager.publishState(current)
@@ -234,6 +239,8 @@ func capabilityForCommand(messageType string) string {
 		return "proxy.backends"
 	case "player.transfer":
 		return "player.transfer"
+	case "operators.replace":
+		return "operators.sync"
 	default:
 		return ""
 	}
@@ -247,6 +254,34 @@ func (m *Manager) SetPluginPendingRestart(instanceID string, pending bool) {
 	current.mu.Lock()
 	changed := current.pluginPendingRestart != pending
 	current.pluginPendingRestart = pending
+	current.mu.Unlock()
+	if changed {
+		m.publishState(current)
+	}
+}
+
+func (m *Manager) SetPluginFilesChanged(instanceID string, changed bool) {
+	current, err := m.lookup(instanceID)
+	if err != nil {
+		return
+	}
+	current.mu.Lock()
+	stateChanged := current.pluginFilesChanged != changed
+	current.pluginFilesChanged = changed
+	current.mu.Unlock()
+	if stateChanged {
+		m.publishState(current)
+	}
+}
+
+func (m *Manager) SetPluginRuntimeMismatch(instanceID string, mismatch bool) {
+	current, err := m.lookup(instanceID)
+	if err != nil {
+		return
+	}
+	current.mu.Lock()
+	changed := current.pluginRuntimeMismatch != mismatch
+	current.pluginRuntimeMismatch = mismatch
 	current.mu.Unlock()
 	if changed {
 		m.publishState(current)

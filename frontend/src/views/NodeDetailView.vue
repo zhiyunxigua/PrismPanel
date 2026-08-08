@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ArrowLeft, Cpu, Edit3, MemoryStick, RefreshCw, Server, ShieldAlert, Trash2 } from "lucide-vue-next";
+import { ArrowLeft, Cpu, Edit3, MemoryStick, RefreshCw, Server, ShieldAlert, ShieldCheck, Trash2 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { request } from "../api";
 import { hasPermission } from "../session";
@@ -200,7 +200,13 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
           </el-button>
         </div>
       </el-tab-pane>
-      <el-tab-pane label="网络白名单" name="firewall"><div class="empty-state"><strong>网络白名单模块尚未接入</strong></div></el-tab-pane>
+      <el-tab-pane label="网络白名单" name="firewall">
+        <div class="settings-action">
+          <el-button @click="router.push({ name: 'firewall', query: { node_id: route.params.id } })">
+            <ShieldCheck :size="16" />管理本节点网络白名单
+          </el-button>
+        </div>
+      </el-tab-pane>
       <el-tab-pane label="终端" name="terminal"><div class="empty-state"><strong>节点终端模块尚未接入</strong></div></el-tab-pane>
       <el-tab-pane label="连接与设置" name="settings"><div class="settings-action"><el-button v-if="canUpdate" @click="openEdit"><Edit3 :size="16" />编辑节点设置</el-button></div></el-tab-pane>
       <el-tab-pane label="操作记录" name="audit"><div class="empty-state"><strong>请在用户页的操作日志中按节点筛选</strong></div></el-tab-pane>

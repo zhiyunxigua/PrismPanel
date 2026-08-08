@@ -6,14 +6,6 @@ import (
 	"time"
 )
 
-func TestValidateConsoleCommandRejectsOPChanges(t *testing.T) {
-	for _, command := range []string{"op Steve", "/deop Steve", "minecraft:op Steve", "/minecraft:deop Steve"} {
-		if err := validateConsoleCommand(command); err == nil {
-			t.Fatalf("expected %q to be rejected", command)
-		}
-	}
-}
-
 func TestFileProxyGrantIsBoundAndSingleUse(t *testing.T) {
 	store := newFileProxyStore()
 	token, err := store.Add(fileProxyGrant{
@@ -45,13 +37,11 @@ func TestProxyFileScopeRequiresExpectedMethod(t *testing.T) {
 	if got := proxyFileScope("import", "POST"); got != "file.import" {
 		t.Fatalf("import POST scope = %q", got)
 	}
-}
-
-func TestValidateConsoleCommandAllowsRegularCommands(t *testing.T) {
-	for _, command := range []string{"say hello", "list", "", "whitelist on"} {
-		if err := validateConsoleCommand(command); err != nil {
-			t.Fatalf("expected %q to be allowed: %v", command, err)
-		}
+	if got := proxyFileScope("archive", "POST"); got != "file.archive" {
+		t.Fatalf("archive POST scope = %q", got)
+	}
+	if got := proxyFileScope("archive", "GET"); got != "" {
+		t.Fatalf("archive GET unexpectedly mapped to %q", got)
 	}
 }
 

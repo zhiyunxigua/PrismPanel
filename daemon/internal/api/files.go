@@ -42,6 +42,8 @@ func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) 
 		s.handleFileCreate(writer, request)
 	case "move":
 		s.handleFileMove(writer, request)
+	case "archive":
+		s.handleFileArchive(writer, request)
 	case "delete":
 		s.handleFileDelete(writer, request)
 	default:
@@ -258,6 +260,35 @@ func (s *Server) handleFileMove(writer http.ResponseWriter, request *http.Reques
 	writeFileSuccess(writer, map[string]any{})
 }
 
+func (s *Server) handleFileArchive(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	target, source := fileTarget(request)
+	var input struct {
+		Destination string `json:"destination"`
+	}
+	if err := decodeFileJSON(request, &input, 64*1024); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	created, err := s.consumeFileTicket(request, "file.archive", target, source)
+	if err == nil && !created.AllowsPath(input.Destination) {
+		err = apperr.New("PERMISSION_DENIED", "临时凭证不允许写入压缩目标路径")
+	}
+	var result fileservice.Entry
+	if err == nil {
+		result, err = s.files.Archive(target, source, input.Destination)
+	}
+	s.publishFileResult(created, target, []string{source, input.Destination}, err)
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, result)
+}
+
 func (s *Server) handleFileDelete(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		writeFileMethodError(writer, "POST")
@@ -307,7 +338,7 @@ func (s *Server) consumeFileTicket(request *http.Request, scope string, target f
 		return ticket.Ticket{}, apperr.New("UNAUTHENTICATED", "缺少文件临时凭证")
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(authorization, "Bearer "))
-	return s.tickets.ConsumeRestricted(token, scope, target.Type, target.ID, relative, request.Method)
+	return s.tickets.ConsumeRestrictedFrom(token, scope, target.Type, target.ID, relative, request.Method, s.requestSourceIP(request))
 }
 
 func fileTarget(request *http.Request) (fileservice.Target, string) {

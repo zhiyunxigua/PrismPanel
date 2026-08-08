@@ -5,6 +5,7 @@ import {
   Activity,
   Bell,
   Boxes,
+  CalendarClock,
   ChevronDown,
   Gamepad2,
   Gauge,
@@ -12,11 +13,13 @@ import {
   ListTodo,
   LogOut,
   Menu,
+  Moon,
   Network,
   Package,
   Server,
   Settings,
   ShieldCheck,
+  Sun,
   UserRound,
   Users,
   X,
@@ -24,12 +27,16 @@ import {
 import { ElMessage } from "element-plus";
 import { changePassword, hasPermission, logout, sessionState } from "../session";
 import { isWinApp } from "../runtime";
+import { currentTheme, toggleTheme } from "../theme";
+import TaskRunDrawer from "../components/TaskRunDrawer.vue";
 
 const route = useRoute();
 const router = useRouter();
+const isDarkTheme = computed(() => currentTheme.value === "dark");
 const mobileNavigationOpen = ref(false);
 const passwordDialogOpen = ref(false);
 const taskDrawerOpen = ref(false);
+const taskRunningCount = ref(0);
 const alertDrawerOpen = ref(false);
 const passwordSubmitting = ref(false);
 const passwordFormRef = ref();
@@ -44,6 +51,7 @@ const navigation = computed(() => [
   { label: "加入游戏", route: "join-game", icon: Gamepad2, winAppOnly: true },
   { label: "网络游戏", route: "net-games", icon: Activity, permission: "dashboard.view" },
   { label: "服务器", route: "servers", icon: Server, permission: "server.view" },
+  { label: "定时任务", route: "scheduled-tasks", icon: CalendarClock, permission: "schedule.view" },
   { label: "插件", route: "plugins", icon: Package, permission: "plugin.view" },
   { label: "用户", route: "users", icon: Users, permission: "user.view" },
   { label: "网络白名单", route: "firewall", icon: ShieldCheck, permission: "firewall.view" },
@@ -166,10 +174,22 @@ async function submitPassword() {
         </div>
 
         <div class="topbar-actions">
-          <el-tooltip content="任务" placement="bottom">
-            <button class="icon-control count-control" type="button" aria-label="任务" @click="taskDrawerOpen = true">
+          <el-tooltip :content="isDarkTheme ? '切换为亮色主题' : '切换为暗色主题'" placement="bottom">
+            <button
+              class="icon-control theme-control"
+              type="button"
+              :aria-label="isDarkTheme ? '切换为亮色主题' : '切换为暗色主题'"
+              :aria-pressed="isDarkTheme"
+              @click="toggleTheme"
+            >
+              <Sun v-if="isDarkTheme" :size="18" />
+              <Moon v-else :size="18" />
+            </button>
+          </el-tooltip>
+          <el-tooltip v-if="hasPermission('task.view')" content="执行日志" placement="bottom">
+            <button class="icon-control count-control" type="button" aria-label="执行日志" @click="taskDrawerOpen = true">
               <ListTodo :size="19" />
-              <span>0</span>
+              <span>{{ taskRunningCount }}</span>
             </button>
           </el-tooltip>
           <el-tooltip content="告警" placement="bottom">
@@ -237,9 +257,11 @@ async function submitPassword() {
     </template>
   </el-dialog>
 
-  <el-drawer v-model="taskDrawerOpen" title="任务" size="min(420px, 92vw)">
-    <div class="drawer-empty"><Inbox :size="24" /><span>暂无运行任务</span></div>
-  </el-drawer>
+  <TaskRunDrawer
+    v-if="hasPermission('task.view')"
+    v-model="taskDrawerOpen"
+    @running-count="taskRunningCount = $event"
+  />
   <el-drawer v-model="alertDrawerOpen" title="告警" size="min(420px, 92vw)">
     <div class="drawer-empty"><Inbox :size="24" /><span>暂无未处理告警</span></div>
   </el-drawer>

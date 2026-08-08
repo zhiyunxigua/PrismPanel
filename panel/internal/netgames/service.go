@@ -2,6 +2,7 @@ package netgames
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -32,6 +33,22 @@ type SeriesResponse struct {
 	WindowEnd   time.Time                    `json:"window_end"`
 	Runs        []store.NetGameCollectionRun `json:"runs"`
 	Games       []SeriesGame                 `json:"games"`
+}
+
+type CatalogGame struct {
+	GameID            string `json:"game_id"`
+	Name              string `json:"name"`
+	Summary           string `json:"summary"`
+	Author            string `json:"author"`
+	Image             string `json:"image"`
+	LatestOnlineCount uint32 `json:"latest_online_count"`
+	Rank              int    `json:"rank"`
+	DetailsStatus     string `json:"details_status"`
+}
+
+type CatalogResponse struct {
+	SampledAt *time.Time    `json:"sampled_at,omitempty"`
+	Games     []CatalogGame `json:"games"`
 }
 
 type GameResponse struct {
@@ -170,13 +187,56 @@ func (s *Service) RefreshDetails(ctx context.Context, gameID string) (store.NetG
 	return s.refreshOneDetail(ctx, strings.TrimSpace(gameID))
 }
 
-func (s *Service) Series(ctx context.Context, userID string, displayCount int, forcedIDs []string, from, to time.Time) (SeriesResponse, error) {
+func (s *Service) Catalog(ctx context.Context) (CatalogResponse, error) {
+	latest, err := s.store.LatestSuccessfulNetGameRun(ctx)
+	if errors.Is(err, store.ErrNotFound) {
+		return CatalogResponse{Games: []CatalogGame{}}, nil
+	}
+	if err != nil {
+		return CatalogResponse{}, err
+	}
+	ranked, err := s.store.AllRankedGamesForRun(ctx, latest.ID)
+	if err != nil {
+		return CatalogResponse{}, err
+	}
+	games := make([]CatalogGame, 0, len(ranked))
+	for _, item := range ranked {
+		games = append(games, CatalogGame{
+			GameID: item.GameID, Name: item.Name, Summary: item.Summary, Author: item.Author,
+			Image: firstNetGameImage(item.Images), LatestOnlineCount: item.OnlineCount,
+			Rank: item.Rank, DetailsStatus: item.DetailsStatus,
+		})
+	}
+	sampledAt := latest.StartedAt
+	return CatalogResponse{SampledAt: &sampledAt, Games: games}, nil
+}
+
+func (s *Service) ResolveSelection(ctx context.Context, limit int, forcedIDs []string) ([]string, error) {
+	if limit < 1 || limit > 20 {
+		limit = 5
+	}
+	latest, err := s.store.LatestSuccessfulNetGameRun(ctx)
+	if errors.Is(err, store.ErrNotFound) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	ranked, err := s.store.RankedGamesForRun(ctx, latest.ID, forcedIDs, limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(ranked))
+	for _, item := range ranked {
+		result = append(result, item.GameID)
+	}
+	return result, nil
+}
+
+func (s *Service) Series(ctx context.Context, gameIDs []string, from, to time.Time) (SeriesResponse, error) {
 	if from.IsZero() || to.IsZero() || !from.Before(to) {
 		to = time.Now().UTC()
 		from = to.Add(-24 * time.Hour)
-	}
-	if displayCount < 1 || displayCount > 20 {
-		displayCount = 10
 	}
 	runs, err := s.store.NetGameRunsBetween(ctx, from, to)
 	if err != nil {
@@ -186,14 +246,18 @@ func (s *Service) Series(ctx context.Context, userID string, displayCount int, f
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return SeriesResponse{}, err
 	}
-	games := make([]SeriesGame, 0)
+	games := make([]SeriesGame, 0, len(gameIDs))
 	if err == nil {
-		ranked, rankErr := s.store.RankedGamesForRun(ctx, latest.ID, forcedIDs, displayCount)
+		ranked, rankErr := s.store.AllRankedGamesForRun(ctx, latest.ID)
 		if rankErr != nil {
 			return SeriesResponse{}, rankErr
 		}
+		rankedByID := make(map[string]store.RankedNetGame, len(ranked))
+		for _, item := range ranked {
+			rankedByID[item.GameID] = item
+		}
 		observationMap := make(map[uint64]map[string]uint32)
-		observations, obsErr := s.store.NetGameObservationsBetween(ctx, from, to)
+		observations, obsErr := s.store.NetGameObservationsBetweenForGames(ctx, from, to, gameIDs)
 		if obsErr != nil {
 			return SeriesResponse{}, obsErr
 		}
@@ -205,7 +269,11 @@ func (s *Service) Series(ctx context.Context, userID string, displayCount int, f
 			}
 			bucket[observation.GameID] = observation.OnlineCount
 		}
-		for _, rankedGame := range ranked {
+		for _, gameID := range gameIDs {
+			rankedGame, exists := rankedByID[gameID]
+			if !exists {
+				continue
+			}
 			series := SeriesGame{
 				GameID: rankedGame.GameID, Name: rankedGame.Name, Rank: rankedGame.Rank,
 				ColorRank: rankedGame.Rank, LatestOnlineCount: rankedGame.OnlineCount,
@@ -227,12 +295,12 @@ func (s *Service) Series(ctx context.Context, userID string, displayCount int, f
 	return SeriesResponse{WindowStart: from, WindowEnd: to, Runs: runs, Games: games}, nil
 }
 
-func (s *Service) Game(ctx context.Context, gameID string, displayCount int, forcedIDs []string, from, to time.Time) (GameResponse, error) {
+func (s *Service) Game(ctx context.Context, gameID string, from, to time.Time) (GameResponse, error) {
 	game, err := s.store.GetNetGame(ctx, strings.TrimSpace(gameID))
 	if err != nil {
 		return GameResponse{}, err
 	}
-	series, err := s.Series(ctx, "", displayCount, forcedIDs, from, to)
+	series, err := s.Series(ctx, []string{game.GameID}, from, to)
 	if err != nil {
 		return GameResponse{}, err
 	}
@@ -255,6 +323,19 @@ func (s *Service) Game(ctx context.Context, gameID string, displayCount int, for
 		}
 	}
 	return GameResponse{Game: game, Rank: rank, LatestOnlineCount: latest, Runs: series.Runs, Points: points}, nil
+}
+
+func firstNetGameImage(raw json.RawMessage) string {
+	var images []string
+	if len(raw) == 0 || json.Unmarshal(raw, &images) != nil {
+		return ""
+	}
+	for _, image := range images {
+		if value := strings.TrimSpace(image); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Service) collectionLoop(ctx context.Context) {

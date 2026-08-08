@@ -25,6 +25,9 @@ type Manager struct {
 	hostOnce      sync.Once
 	beforeStartMu sync.RWMutex
 	beforeStart   func(instanceID, workspace string) error
+	operatorMu    sync.RWMutex
+	operators     OperatorRegistryState
+	saveOperators func(OperatorRegistryState) error
 }
 
 func (m *Manager) SetBeforeStart(hook func(instanceID, workspace string) error) {
@@ -36,6 +39,7 @@ func (m *Manager) SetBeforeStart(hook func(instanceID, workspace string) error) 
 func NewManager(cfg config.Config, events *eventbus.Bus, servers []model.ServerConfig) (*Manager, error) {
 	manager := &Manager{
 		config: cfg, events: events, instances: make(map[string]*instance),
+		operators: OperatorRegistryState{Sources: []OperatorSource{}},
 	}
 	for _, server := range servers {
 		server.Normalize()
@@ -254,6 +258,9 @@ func (m *Manager) Subscribe(instanceID string, afterSequence uint64) ([]ConsoleL
 		return nil, nil, nil, err
 	}
 	current.mu.Lock()
+	if afterSequence > current.sequence {
+		afterSequence = 0
+	}
 	history := current.console.after(afterSequence)
 	current.nextSubID++
 	subscriptionID := current.nextSubID

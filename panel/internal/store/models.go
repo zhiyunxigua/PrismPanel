@@ -144,6 +144,23 @@ type AuditList struct {
 	PageSize int        `json:"page_size"`
 }
 
+type Operator struct {
+	UUID              string    `json:"uuid"`
+	Name              string    `json:"name"`
+	CreatedByUserID   string    `json:"created_by_user_id"`
+	CreatedByUsername string    `json:"created_by_username"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type OperatorState struct {
+	PanelID     string     `json:"panel_id"`
+	Revision    uint64     `json:"revision"`
+	Initialized bool       `json:"initialized"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	Operators   []Operator `json:"operators"`
+}
+
 type FileOperation struct {
 	ID               string         `json:"id"`
 	RequestID        string         `json:"request_id"`

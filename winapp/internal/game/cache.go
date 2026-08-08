@@ -20,6 +20,8 @@ type CachePaths struct {
 	Downloads string
 	Base      string
 	BaseMC    string
+	Game      string
+	GameMods  string
 	Runtime   string
 	Java      string
 }
@@ -39,7 +41,8 @@ func DefaultCachePathsForVersion(versionLabel string) (CachePaths, error) {
 	versionDir := filepath.Join(root, safePathSegment(versionLabel))
 	return CachePaths{
 		Root: root, Version: versionDir, Downloads: filepath.Join(versionDir, "downloads"),
-		Base: versionDir, BaseMC: filepath.Join(versionDir, ".minecraft"), Runtime: filepath.Join(root, "runtime"),
+		Base: versionDir, BaseMC: filepath.Join(versionDir, ".minecraft"),
+		Game: filepath.Join(root, "Game"), GameMods: filepath.Join(root, "GameMods"), Runtime: filepath.Join(root, "runtime"),
 		Java: filepath.Join(root, "java"),
 	}, nil
 }

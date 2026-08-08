@@ -22,6 +22,7 @@ import (
 	"PrismPanel/internal/netgames"
 	panelnodes "PrismPanel/internal/nodes"
 	panelplugins "PrismPanel/internal/plugins"
+	"PrismPanel/internal/schedule"
 	"PrismPanel/internal/store"
 )
 
@@ -34,10 +35,12 @@ type Server struct {
 	metrics     *panelmetrics.Store
 	plugins     *panelplugins.Repository
 	netGames    *netgames.Service
+	scheduler   *schedule.Service
 	fileProxies *fileProxyStore
 	http        *http.Server
 	logger      *slog.Logger
 	proxySyncMu sync.Mutex
+	operatorMu  sync.Mutex
 }
 
 type response struct {
@@ -56,24 +59,28 @@ func NewServer(
 	metricStore *panelmetrics.Store,
 	pluginRepository *panelplugins.Repository,
 	netGameService *netgames.Service,
+	scheduler *schedule.Service,
 	logger *slog.Logger,
 ) *Server {
 	server := &Server{
 		config: cfg, auth: authService, store: repository, connections: connectionManager,
 		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, netGames: netGameService,
-		fileProxies: newFileProxyStore(), logger: logger,
+		scheduler: scheduler, fileProxies: newFileProxyStore(), logger: logger,
 	}
 	connectionManager.AddStatusCallback(func(_ string, status daemon.RuntimeStatus) {
 		if status.State == "ONLINE" {
 			go server.reconcileAllProxies(context.Background())
+			go server.reconcileOperators(context.Background())
 		}
 	})
 	go server.reconcileAllProxies(context.Background())
+	go server.reconcileOperators(context.Background())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/auth/status", server.handleAuthStatus)
 	mux.HandleFunc("/api/v1/auth/login", server.handleLogin)
 	mux.HandleFunc("/api/v1/auth/logout", server.requireAuth(server.handleLogout))
 	mux.HandleFunc("/api/v1/auth/session", server.requireAuth(server.handleSession))
+	mux.HandleFunc("/api/v1/auth/client-ip", server.requireAuth(server.handleClientIP))
 	mux.HandleFunc("/api/v1/auth/password", server.requireAuth(server.handlePassword))
 	mux.HandleFunc("/api/v1/users", server.requireAuth(server.handleUsers))
 	mux.HandleFunc("/api/v1/users/", server.requireAuth(server.handleUser))
@@ -88,6 +95,10 @@ func NewServer(
 	mux.HandleFunc("/api/v1/servers", server.requireAuth(server.handleServers))
 	mux.HandleFunc("/api/v1/servers/", server.requireAuth(server.handleServer))
 	mux.HandleFunc("/api/v1/instances/", server.requireAuth(server.handleInstance))
+	mux.HandleFunc("/api/v1/scheduled-tasks", server.requireAuth(server.handleScheduledTasks))
+	mux.HandleFunc("/api/v1/scheduled-tasks/", server.requireAuth(server.handleScheduledTask))
+	mux.HandleFunc("/api/v1/task-runs", server.requireAuth(server.handleTaskRuns))
+	mux.HandleFunc("/api/v1/task-runs/", server.requireAuth(server.handleTaskRun))
 	mux.HandleFunc("/api/v1/deployments/", server.requireAuth(server.handleDeployment))
 	mux.HandleFunc("/api/v1/plugins", server.requireAuth(server.handlePlugins))
 	mux.HandleFunc("/api/v1/plugins/", server.requireAuth(server.handlePluginArtifact))
@@ -99,10 +110,15 @@ func NewServer(
 	mux.HandleFunc("/api/v1/net-games/account/verify", server.requireSuperAdmin(server.handleNetGameAccountVerify))
 	mux.HandleFunc("/api/v1/net-games/collect", server.requireSuperAdmin(server.handleNetGameCollect))
 	mux.HandleFunc("/api/v1/net-games/collector-status", server.requireSuperAdmin(server.handleNetGameCollectorStatus))
+	mux.HandleFunc("/api/v1/net-games/catalog", server.requirePermission("dashboard.view", server.handleNetGameCatalog))
 	mux.HandleFunc("/api/v1/net-games/series", server.requirePermission("dashboard.view", server.handleNetGameSeries))
 	mux.HandleFunc("/api/v1/net-games/", server.requirePermission("dashboard.view", server.handleNetGame))
 	mux.HandleFunc("/api/v1/user/preferences/net-games", server.requirePermission("dashboard.view", server.handleNetGamePreference))
 	mux.HandleFunc("/api/v1/players/transfer", server.requireAuth(server.handlePlayerTransfer))
+	mux.HandleFunc("/api/v1/operators", server.requireSuperAdmin(server.handleOperators))
+	mux.HandleFunc("/api/v1/operators/", server.requireSuperAdmin(server.handleOperator))
+	mux.HandleFunc("/api/v1/firewall/nodes", server.requireAuth(server.handleFirewall))
+	mux.HandleFunc("/api/v1/firewall/nodes/", server.requireAuth(server.handleFirewall))
 	mux.HandleFunc("/api/v1/files/authorize", server.requireAuth(server.handleFileAuthorize))
 	mux.HandleFunc("/api/v1/files/export", server.requireAuth(server.handleFileExport))
 	mux.HandleFunc("/api/v1/files/proxy/", server.requireAuth(server.handleFileProxy))

@@ -191,13 +191,19 @@ func (s *Service) Uninstall(input OperationInput) (OperationResult, error) {
 
 func (s *Service) applyOrQueue(target operationTarget, operation pendingOperation, bundlePath string, apply func() error) (TargetResult, error) {
 	if err := ensureWorkspace(target.Workspace); err != nil {
-		if target.Image {
-			return TargetResult{Target: target.ID, Status: "failed", Message: err.Error()}, err
-		}
-		if target.Optional {
+		if target.Optional && errors.Is(err, os.ErrNotExist) {
 			return TargetResult{Target: target.ID, Status: "inherited_from_image"}, nil
 		}
-		return TargetResult{Target: target.ID, Status: "failed", Message: err.Error()}, err
+		if target.Optional {
+			return TargetResult{Target: target.ID, Status: "failed", Message: err.Error()}, err
+		}
+		if mkdirErr := os.MkdirAll(target.Workspace, 0o750); mkdirErr != nil {
+			err = errors.Join(err, mkdirErr)
+			return TargetResult{Target: target.ID, Status: "failed", Message: err.Error()}, err
+		}
+		if workspaceErr := ensureWorkspace(target.Workspace); workspaceErr != nil {
+			return TargetResult{Target: target.ID, Status: "failed", Message: workspaceErr.Error()}, workspaceErr
+		}
 	}
 	if err := apply(); err != nil {
 		if target.Running && !target.Image && retryableFileError(err) {

@@ -4,7 +4,6 @@ import com.velocitypowered.api.plugin.PluginContainer;
 import com.velocitypowered.api.plugin.PluginDescription;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
-import com.xigua.prism.core.FileFingerprintCache;
 import com.xigua.prism.core.TelemetryProvider;
 
 import java.lang.management.ManagementFactory;
@@ -21,7 +20,6 @@ import java.util.concurrent.ConcurrentHashMap;
 final class VelocityTelemetry implements TelemetryProvider {
     private final ProxyServer proxy;
     private final Map<UUID, Instant> joinedAt = new ConcurrentHashMap<>();
-    private final FileFingerprintCache fingerprints = new FileFingerprintCache();
 
     VelocityTelemetry(ProxyServer proxy) {
         this.proxy = proxy;
@@ -76,7 +74,10 @@ final class VelocityTelemetry implements TelemetryProvider {
             item.put("version", description.getVersion().orElse(""));
             item.put("authors", description.getAuthors());
             item.put("enabled", true);
-            fingerprints.add(source, item);
+            Path fileName = source.toAbsolutePath().normalize().getFileName();
+            if (fileName != null) {
+                item.put("source_file", fileName.toString());
+            }
             result.add(item);
         }
         return result;

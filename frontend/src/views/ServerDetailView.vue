@@ -193,6 +193,7 @@ const pluginStatusLabels = {
   disabled: "已禁用",
   runtime_only: "内置插件",
   disabled_pending_restart: "禁用待重启",
+  install_pending_restart: "安装待重启",
   update_pending_restart: "更新待重启",
   uninstall_pending_restart: "卸载待重启",
   conflict: "同名冲突",
@@ -1148,9 +1149,9 @@ onBeforeRouteLeave(async () => {
             </el-table-column>
             <el-table-column label="校验" width="100">
               <template #default="{ row }">
-                <el-tooltip :content="row.sha256 || '无文件摘要'">
-                  <el-tag :type="row.issues?.some((item) => item.includes('mismatch')) ? 'danger' : 'success'" effect="plain">
-                    {{ row.issues?.some((item) => item.includes('mismatch')) ? "不一致" : (row.sha256 ? "已校验" : "未知") }}
+                <el-tooltip :content="row.issues?.includes('file_changed_since_start') ? '启动后插件 JAR 已发生变化' : (row.sha256 || '无文件摘要')">
+                  <el-tag :type="row.issues?.includes('file_changed_since_start') ? 'danger' : (row.sha256 ? 'success' : 'info')" effect="plain">
+                    {{ row.issues?.includes("file_changed_since_start") ? "已变更" : (row.sha256 ? "已校验" : "未知") }}
                   </el-tag>
                 </el-tooltip>
               </template>

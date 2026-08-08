@@ -10,14 +10,15 @@ import (
 
 type controlClient struct {
 	conn      *websocket.Conn
+	source    string
 	send      chan protocol.Outgoing
 	done      chan struct{}
 	closeOnce sync.Once
 }
 
-func newControlClient(conn *websocket.Conn) *controlClient {
+func newControlClient(conn *websocket.Conn, source string) *controlClient {
 	return &controlClient{
-		conn: conn, send: make(chan protocol.Outgoing, 256), done: make(chan struct{}),
+		conn: conn, source: source, send: make(chan protocol.Outgoing, 256), done: make(chan struct{}),
 	}
 }
 

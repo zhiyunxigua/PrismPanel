@@ -2,6 +2,7 @@ package game
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -103,22 +104,50 @@ func (m *JoinManager) update(serverID string, fn func(*JoinProgress)) {
 	}
 }
 
-func PrepareJoinWithProgress(ctx context.Context, server ServerConfig, client *Client, account AccountState, processes *ProcessManager, report func(stage, message string, percent float64)) (LaunchResult, error) {
+func PrepareJoinWithProgress(ctx context.Context, server ServerConfig, kind LaunchKind, client *Client, account AccountState, processes *ProcessManager, report func(stage, message string, percent float64)) (LaunchResult, error) {
 	report("login", "网易账号已验证", 5)
+	if kind != LaunchKindNetGame {
+		return LaunchResult{}, fmt.Errorf("only NetEase network game launches are supported")
+	}
+	if err := ValidateNetGameID(server.GameID); err != nil {
+		return LaunchResult{}, err
+	}
+	report("metadata", "正在获取网络游戏版本和角色", 8)
+	detail, err := client.FetchNetGameDetail(ctx, server.GameID)
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	server.GameID = detail.GameID
+	server.Version = detail.Version
+	server.VersionLabel = detail.VersionLabel
+	if _, err := client.EnsureGameCharacter(ctx, server.GameID, server.Username); err != nil {
+		return LaunchResult{}, err
+	}
 	paths, err := DefaultCachePathsForVersion(server.VersionLabel)
 	if err != nil {
 		return LaunchResult{}, err
 	}
-	report("download", fmt.Sprintf("准备下载 %s", server.VersionLabel), 10)
+	report("mods", "正在下载网络游戏模组", 10)
+	modList, err := client.InstallNetGameResources(ctx, server.GameID, server.Version, paths, func(stage, message string, percent float64) {
+		report(stage, message, percent)
+	})
+	if err != nil {
+		return LaunchResult{}, err
+	}
+	modInfo, err := json.Marshal(modList)
+	if err != nil {
+		return LaunchResult{}, fmt.Errorf("encode network game mod info: %w", err)
+	}
+	report("download", fmt.Sprintf("准备下载 %s", server.VersionLabel), 45)
 	downloads, err := client.DownloadVersionPackagesWithProgress(ctx, server.Version, paths, func(label, phase string, itemIndex, itemCount int, current, total int64) {
-		base := 10.0 + float64(itemIndex)*(60.0/float64(itemCount))
+		base := 45.0 + float64(itemIndex)*(40.0/float64(itemCount))
 		part := 0.0
 		if total > 0 {
 			part = float64(current) / float64(total)
 		} else if current > 0 {
 			part = 0.5
 		}
-		percent := base + part*(60.0/float64(itemCount))
+		percent := base + part*(40.0/float64(itemCount))
 		stage := "download"
 		verb := "下载中"
 		if phase == "extract" {
@@ -136,14 +165,16 @@ func PrepareJoinWithProgress(ctx context.Context, server ServerConfig, client *C
 	if err != nil {
 		return LaunchResult{}, err
 	}
-	report("extract", "解压/校验完成，正在复制运行目录", 75)
-	prepared, err := PrepareServerRuntime(server)
+	report("extract", "解压/校验完成，正在复制运行目录", 90)
+	profile := NewNetGameLaunchProfile(server, client.LauncherVersion())
+	profile.ModInfo = string(modInfo)
+	prepared, err := PrepareLaunchRuntime(server, profile)
 	if err != nil {
 		return LaunchResult{}, err
 	}
 	prepared.Downloads = downloads
 	report("runtime", "运行目录已准备", 95)
-	return LaunchPreparedGame(ctx, LaunchRequest{Server: server, Preparation: prepared, Account: account, ProtocolVersion: client.LauncherVersion()}, processes, report)
+	return LaunchPreparedGame(ctx, LaunchRequest{Server: server, Preparation: prepared, Account: account, ProtocolVersion: client.LauncherVersion(), Profile: profile}, processes, report)
 }
 
 func clampPercent(value float64) float64 {

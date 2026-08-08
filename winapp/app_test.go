@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"PrismPanel-winapp/internal/application"
 	"PrismPanel-winapp/internal/credentials"
+	"PrismPanel-winapp/internal/game"
 	"PrismPanel-winapp/internal/settings"
 )
 
@@ -35,5 +37,25 @@ func TestRuntimeConfigWaitsForStartup(t *testing.T) {
 	case <-result:
 	case <-time.After(time.Second):
 		t.Fatal("RuntimeConfig did not return after startup completed")
+	}
+}
+
+func TestLoginSavedNetEaseSessionReusesCachedClient(t *testing.T) {
+	client, err := game.NewClient(game.AccountState{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := game.AccountState{UserID: "123", UserToken: "token"}
+	app := &App{netEaseClient: client, netEaseAccount: account}
+
+	gotClient, gotAccount, err := app.loginSavedNetEaseSession(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotClient != client {
+		t.Fatal("cached NetEase client was not reused")
+	}
+	if gotAccount.UserID != account.UserID || gotAccount.UserToken != account.UserToken {
+		t.Fatalf("cached NetEase account mismatch: %+v", gotAccount)
 	}
 }

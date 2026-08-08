@@ -53,4 +53,36 @@ func TestFetchMinecraftClientLibsWithNetEaseAccount(t *testing.T) {
 	if len(downloads) != 3 {
 		t.Fatalf("unexpected download count: %d", len(downloads))
 	}
+
+	gameID := os.Getenv("PRISM_TEST_NETEASE_GAME_ID")
+	if gameID == "" {
+		return
+	}
+	options, err := client.FetchNetGameLaunchOptions(ctx, gameID)
+	if err != nil {
+		t.Fatalf("fetch network game launch options failed: %v", err)
+	}
+	if options.Detail.GameID == "" || options.Detail.VersionLabel == "" {
+		t.Fatalf("incomplete network game details: %+v", options.Detail)
+	}
+	if options.Address.IP == "" || options.Address.Port <= 0 {
+		t.Fatalf("incomplete network game address: %+v", options.Address)
+	}
+	t.Logf("network game id=%s version=%s address=%s:%d characters=%d", options.Detail.GameID, options.Detail.VersionLabel, options.Address.IP, options.Address.Port, len(options.Characters))
+	if os.Getenv("PRISM_TEST_NETEASE_RESOURCES") != "1" {
+		return
+	}
+	paths, err = DefaultCachePathsForVersion(options.Detail.VersionLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mods, err := client.InstallNetGameResources(ctx, options.Detail.GameID, options.Detail.Version, paths, func(stage, message string, percent float64) {
+		t.Logf("resource %s %.0f%%: %s", stage, percent, message)
+	})
+	if err != nil {
+		t.Fatalf("install network game resources failed: %v", err)
+	}
+	if len(mods.Mods) == 0 {
+		t.Fatal("network game resources returned no mods")
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type ServerConfig struct {
@@ -86,10 +87,56 @@ func (s ServerStore) Create(input ServerConfigInput) (ServerConfig, error) {
 	return server, nil
 }
 
+func (s ServerStore) Update(id string, input ServerConfigInput) (ServerConfig, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ServerConfig{}, errors.New("server id is required")
+	}
+	updated, err := normalizeServerInput(input)
+	if err != nil {
+		return ServerConfig{}, err
+	}
+	servers, err := s.load()
+	if err != nil {
+		return ServerConfig{}, err
+	}
+	found := false
+	for index := range servers {
+		if servers[index].ID != id {
+			continue
+		}
+		updated.ID = servers[index].ID
+		updated.CreatedAt = servers[index].CreatedAt
+		servers[index] = updated
+		found = true
+		break
+	}
+	if !found {
+		return ServerConfig{}, fmt.Errorf("server config not found: %s", id)
+	}
+	if err := s.save(servers); err != nil {
+		return ServerConfig{}, err
+	}
+	return updated, nil
+}
+
 func NewTransientServer(input ServerConfigInput) (ServerConfig, error) {
 	server, err := normalizeServerInput(input)
 	if err != nil {
 		return ServerConfig{}, err
+	}
+	server.ID = stableServerID(server)
+	server.CreatedAt = time.Now().UTC()
+	return server, nil
+}
+
+func NewTransientNetworkGame(input ServerConfigInput) (ServerConfig, error) {
+	server, err := normalizeServerInputForLaunch(input, true)
+	if err != nil {
+		return ServerConfig{}, err
+	}
+	if strings.TrimSpace(server.GameID) == "" || server.GameID == localLauncherGameIDValue {
+		return ServerConfig{}, errors.New("network game id is required")
 	}
 	server.ID = stableServerID(server)
 	server.CreatedAt = time.Now().UTC()
@@ -167,6 +214,10 @@ func (s ServerStore) save(servers []ServerConfig) error {
 }
 
 func normalizeServerInput(input ServerConfigInput) (ServerConfig, error) {
+	return normalizeServerInputForLaunch(input, true)
+}
+
+func normalizeServerInputForLaunch(input ServerConfigInput, requireModDir bool) (ServerConfig, error) {
 	name := strings.TrimSpace(input.Name)
 	ip := strings.TrimSpace(input.IP)
 	username := strings.TrimSpace(input.Username)
@@ -187,8 +238,17 @@ func normalizeServerInput(input ServerConfigInput) (ServerConfig, error) {
 	if username == "" {
 		return ServerConfig{}, errors.New("role username is required")
 	}
-	if modDir == "" {
-		return ServerConfig{}, errors.New("mod directory is required")
+	if strings.TrimSpace(gameID) == "" {
+		return ServerConfig{}, errors.New("network game id is required")
+	}
+	if err := ValidateNetGameID(gameID); err != nil {
+		return ServerConfig{}, err
+	}
+	if modDir != "" {
+		modDir = cleanOptionalPath(modDir)
+	}
+	if requireModDir && modDir == "" {
+		return ServerConfig{}, errors.New("custom resource directory is required")
 	}
 	if err := input.Version.Validate(); err != nil || input.Version == VersionBase {
 		return ServerConfig{}, errors.New("game version is required")
@@ -199,8 +259,15 @@ func normalizeServerInput(input ServerConfigInput) (ServerConfig, error) {
 	}
 	return ServerConfig{
 		Name: name, GameID: gameID, IP: ip, Port: input.Port, Username: username,
-		Version: input.Version, VersionLabel: label, ModDir: filepath.Clean(modDir),
+		Version: input.Version, VersionLabel: label, ModDir: modDir,
 	}, nil
+}
+
+func cleanOptionalPath(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return filepath.Clean(value)
 }
 
 func stableServerID(server ServerConfig) string {
@@ -221,8 +288,15 @@ func serverID(server ServerConfig) string {
 }
 
 func PrepareServerRuntime(server ServerConfig) (JoinPreparation, error) {
-	if err := EnsureModDirectories(server.ModDir); err != nil {
-		return JoinPreparation{}, err
+	return PrepareLaunchRuntime(server, NewLocalLaunchProfile(server, ""))
+}
+
+func PrepareLaunchRuntime(server ServerConfig, profile LaunchProfile) (JoinPreparation, error) {
+	profile = profile.normalized(server, "")
+	if profile.UseCustomResourceDir {
+		if err := EnsureModDirectories(server.ModDir); err != nil {
+			return JoinPreparation{}, err
+		}
 	}
 	paths, err := DefaultCachePathsForVersion(server.VersionLabel)
 	if err != nil {
@@ -238,13 +312,44 @@ func PrepareServerRuntime(server ServerConfig) (JoinPreparation, error) {
 	if err := copyDirectory(paths.BaseMC, runtimeDir); err != nil {
 		return JoinPreparation{}, fmt.Errorf("copy base minecraft files: %w", err)
 	}
+	if profile.Kind == LaunchKindNetGame {
+		gameRoot := filepath.Join(paths.Game, safePathSegment(profile.LauncherGameID()), ".minecraft")
+		if directoryExists(gameRoot) {
+			if err := copyDirectory(gameRoot, runtimeDir); err != nil {
+				return JoinPreparation{}, fmt.Errorf("copy network game component: %w", err)
+			}
+		}
+		if err := installCachedCoreMods(paths, profile.LauncherGameID(), filepath.Join(runtimeDir, "mods")); err != nil {
+			return JoinPreparation{}, err
+		}
+	}
 	if err := ensureNetEaseNativeRuntime(paths, runtimeDir, server.VersionLabel); err != nil {
 		return JoinPreparation{}, err
 	}
-	if err := mergeModDirectory(server.ModDir, runtimeDir); err != nil {
-		return JoinPreparation{}, err
+	if profile.UseCustomResourceDir {
+		if err := mergeModDirectory(server.ModDir, runtimeDir); err != nil {
+			return JoinPreparation{}, err
+		}
 	}
 	return JoinPreparation{Server: server, VersionDir: paths.Version, RuntimeDir: runtimeDir, GameDir: runtimeDir}, nil
+}
+
+func installCachedCoreMods(paths CachePaths, gameID, targetModsPath string) error {
+	sourceRoot := filepath.Join(paths.GameMods, safePathSegment(gameID))
+	if !directoryExists(sourceRoot) {
+		return nil
+	}
+	files, err := filesWithExtension(sourceRoot, ".jar")
+	if err != nil {
+		return err
+	}
+	for _, source := range files {
+		target := filepath.Join(targetModsPath, filepath.Base(source))
+		if err := copyFile(source, target); err != nil {
+			return fmt.Errorf("copy core mod %s: %w", filepath.Base(source), err)
+		}
+	}
+	return nil
 }
 
 const netEaseRuntimeDLL = "api-ms-win-crt-utility-l1-1-1.dll"
@@ -256,12 +361,12 @@ func ensureNetEaseNativeRuntime(paths CachePaths, runtimeDir, versionLabel strin
 	}
 	runtimePath := filepath.Join(nativesPath, "runtime")
 	target := filepath.Join(runtimePath, netEaseRuntimeDLL)
-	if fileExists(target) {
-		return nil
-	}
 	source, err := findNetEaseRuntimeDLL(paths, runtimeDir, versionLabel)
 	if err != nil {
 		return err
+	}
+	if samePath(source, target) {
+		return nil
 	}
 	if err := os.MkdirAll(runtimePath, 0o755); err != nil {
 		return fmt.Errorf("create NetEase native runtime directory: %w", err)
@@ -345,7 +450,23 @@ func samePath(left, right string) bool {
 }
 
 func RuntimeDirectory(paths CachePaths, server ServerConfig) string {
-	return filepath.Join(paths.Runtime, safePathSegment(server.ID))
+	gameID := safeRuntimeSegment(server.GameID)
+	roleName := safeRuntimeSegment(server.Username)
+	return filepath.Join(paths.Runtime, gameID+"-"+roleName)
+}
+
+func safeRuntimeSegment(value string) string {
+	cleaned := strings.Map(func(char rune) rune {
+		if unicode.IsLetter(char) || unicode.IsDigit(char) || char == '.' || char == '_' || char == '-' {
+			return char
+		}
+		return '-'
+	}, strings.TrimSpace(value))
+	cleaned = strings.Trim(cleaned, "-._")
+	if cleaned == "" {
+		return "game"
+	}
+	return cleaned
 }
 
 func mergeModDirectory(sourceRoot, gameDir string) error {

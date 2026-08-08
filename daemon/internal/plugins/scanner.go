@@ -3,6 +3,7 @@ package plugins
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -124,4 +125,35 @@ func hashFile(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func scanEnabledPluginHashes(workspace string) (map[string]string, error) {
+	pluginDir := filepath.Join(workspace, "plugins")
+	entries, err := os.ReadDir(pluginDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string)
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(name), ".jar") {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			return nil, infoErr
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		digest, hashErr := hashFile(filepath.Join(pluginDir, name))
+		if hashErr != nil {
+			return nil, hashErr
+		}
+		result[strings.ToLower(name)] = digest
+	}
+	return result, nil
 }

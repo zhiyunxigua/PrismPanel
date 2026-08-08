@@ -30,4 +30,6 @@ PRISM_PLUGIN_TOKEN
 - 在线玩家、延迟和加入时间
 - Bukkit/Paper 插件列表
 
+当面板完成全服 OP 初始化后，Spigot/Paper 插件还会接收 daemon 合并后的本节点 OP 名单，拦截玩家和服务端控制台执行的 `op` / `deop`，并每 5 秒修复其他插件造成的 OP 状态漂移。代理插件不参与 OP 管理。
+
 实例进程树的 CPU 和 RSS 由 daemon 独立采样，不由插件上报。

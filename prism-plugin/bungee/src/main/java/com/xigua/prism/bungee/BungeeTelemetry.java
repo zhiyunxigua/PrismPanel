@@ -1,6 +1,5 @@
 package com.xigua.prism.bungee;
 
-import com.xigua.prism.core.FileFingerprintCache;
 import com.xigua.prism.core.TelemetryProvider;
 import net.md_5.bungee.api.ProxyServer;
 import net.md_5.bungee.api.connection.ProxiedPlayer;
@@ -8,6 +7,7 @@ import net.md_5.bungee.api.plugin.Plugin;
 import net.md_5.bungee.api.plugin.PluginDescription;
 
 import java.lang.management.ManagementFactory;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -20,7 +20,6 @@ import java.util.concurrent.ConcurrentHashMap;
 final class BungeeTelemetry implements TelemetryProvider {
     private final ProxyServer proxy;
     private final Map<UUID, Instant> joinedAt = new ConcurrentHashMap<>();
-    private final FileFingerprintCache fingerprints = new FileFingerprintCache();
 
     BungeeTelemetry(ProxyServer proxy) {
         this.proxy = proxy;
@@ -72,7 +71,10 @@ final class BungeeTelemetry implements TelemetryProvider {
             item.put("main", description.getMain());
             item.put("authors", description.getAuthor() == null ? List.of() : List.of(description.getAuthor()));
             item.put("enabled", true);
-            fingerprints.add(plugin.getFile().toPath(), item);
+            Path fileName = plugin.getFile().toPath().toAbsolutePath().normalize().getFileName();
+            if (fileName != null) {
+                item.put("source_file", fileName.toString());
+            }
             result.add(item);
         }
         return result;

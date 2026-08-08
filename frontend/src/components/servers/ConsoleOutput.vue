@@ -1,10 +1,14 @@
 <script setup>
-import { nextTick, onBeforeUnmount, ref, watch } from "vue";
-import Convert from "ansi-to-html";
-import { Eraser, RefreshCw, Send } from "lucide-vue-next";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 import { ElMessage } from "element-plus";
+import { Eraser, RefreshCw, Send } from "lucide-vue-next";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { request } from "../../api";
-import { websocketURL } from "../../runtime";
+import { consoleWebSocketURL } from "../../runtime";
+import { addCommandHistory, navigateCommandHistory } from "./console-history";
+import { consoleLineToAnsi } from "./minecraft-format";
 
 const props = defineProps({
   nodeId: { type: String, required: true },
@@ -14,27 +18,119 @@ const props = defineProps({
   running: { type: Boolean, default: false },
 });
 
-const outputRef = ref();
-const lines = ref([]);
+const HISTORY_STORAGE_KEY = "prism.console.command-history";
+const PROMPT = "\u001b[38;2;118;196;154m> \u001b[0m";
+const RESET_LINE = "\u001b[0m\r\n";
+
+const terminalRef = ref();
 const status = ref("disconnected");
 const statusMessage = ref("");
 const command = ref("");
 const sending = ref(false);
 const autoScroll = ref(true);
+const commandHistory = ref(loadCommandHistory());
+
+let terminal;
+let fitAddon;
+let resizeObserver;
+let inputDisposable;
+let scrollDisposable;
 let socket;
 let reconnectTimer;
+let outputFrame;
+let pendingOutput = "";
 let generation = 0;
 let lastSequence = 0;
-let converter = createConverter();
+let currentSessionId = "";
+let directInput = "";
+let promptVisible = false;
+let commandNavigation = emptyNavigation();
+let directNavigation = emptyNavigation();
 
-function createConverter() {
-  return new Convert({
-    fg: "#d8dee9",
-    bg: "#171b1f",
-    newline: false,
-    escapeXML: true,
-    stream: true,
+function emptyNavigation() {
+  return { index: -1, draft: "" };
+}
+
+function loadCommandHistory() {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(HISTORY_STORAGE_KEY) || "[]");
+    return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberCommand(value) {
+  commandHistory.value = addCommandHistory(commandHistory.value, value);
+  try {
+    window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(commandHistory.value));
+  } catch {
+    // 浏览器禁用本地存储时，当前页面内的历史仍然可用。
+  }
+}
+
+function canUseTerminalInput() {
+  return props.canCommand && props.running && status.value === "connected";
+}
+
+function initTerminal() {
+  terminal = new Terminal({
+    convertEol: true,
+    cursorBlink: true,
+    cursorStyle: "underline",
+    disableStdin: !canUseTerminalInput(),
+    fontFamily: 'Consolas, "Cascadia Mono", "Courier New", monospace',
+    fontSize: 12,
+    letterSpacing: 0,
+    lineHeight: 1,
+    scrollback: 2000,
+    theme: {
+      background: "#171b1f",
+      foreground: "#d8dee9",
+      cursor: "#76c49a",
+      cursorAccent: "#171b1f",
+      selectionBackground: "#45645599",
+      black: "#000000",
+      red: "#aa0000",
+      green: "#00aa00",
+      yellow: "#ffaa00",
+      blue: "#0000aa",
+      magenta: "#aa00aa",
+      cyan: "#00aaaa",
+      white: "#aaaaaa",
+      brightBlack: "#555555",
+      brightRed: "#ff5555",
+      brightGreen: "#55ff55",
+      brightYellow: "#ffff55",
+      brightBlue: "#5555ff",
+      brightMagenta: "#ff55ff",
+      brightCyan: "#55ffff",
+      brightWhite: "#ffffff",
+    },
   });
+  fitAddon = new FitAddon();
+  terminal.loadAddon(fitAddon);
+  terminal.open(terminalRef.value);
+  terminal.textarea?.setAttribute("aria-label", "控制台终端");
+  terminal.attachCustomKeyEventHandler(handleTerminalKeyEvent);
+  inputDisposable = terminal.onData(handleTerminalInput);
+  scrollDisposable = terminal.onScroll(handleTerminalScroll);
+  resizeObserver = new ResizeObserver(fitTerminal);
+  resizeObserver.observe(terminalRef.value);
+  nextTick(() => {
+    fitTerminal();
+    syncTerminalInput();
+  });
+}
+
+function fitTerminal() {
+  const element = terminalRef.value;
+  if (!fitAddon || !element?.clientWidth || !element?.clientHeight) return;
+  try {
+    fitAddon.fit();
+  } catch {
+    // 页签切换过程中容器可能短暂不可测量，ResizeObserver 会再次触发。
+  }
 }
 
 function stopConnection() {
@@ -51,6 +147,7 @@ function stopConnection() {
 function scheduleReconnect(expectedGeneration) {
   if (!props.enabled || expectedGeneration !== generation) return;
   status.value = "disconnected";
+  syncTerminalInput();
   reconnectTimer = window.setTimeout(() => connect(expectedGeneration), 3000);
 }
 
@@ -58,13 +155,14 @@ async function connect(expectedGeneration = generation) {
   if (!props.enabled || !props.nodeId || !props.instanceId || expectedGeneration !== generation) return;
   status.value = "connecting";
   statusMessage.value = "";
+  syncTerminalInput();
   try {
     const ticket = await request(
       `/api/v1/instances/${encodeURIComponent(props.instanceId)}/console-ticket?node_id=${encodeURIComponent(props.nodeId)}`,
       { method: "POST", body: "{}" },
     );
     if (expectedGeneration !== generation) return;
-    const current = new WebSocket(websocketURL(ticket.websocket_url));
+    const current = new WebSocket(consoleWebSocketURL(ticket.websocket_url, props.nodeId));
     socket = current;
     current.onopen = () => {
       current.send(JSON.stringify({
@@ -89,18 +187,23 @@ async function connect(expectedGeneration = generation) {
           status.value = "error";
           statusMessage.value = message.error?.message || "控制台鉴权失败";
         }
+        syncTerminalInput();
         return;
       }
       if (message.type === "proxy.error") {
         status.value = "error";
         statusMessage.value = message.message || "控制台代理连接失败";
+        syncTerminalInput();
         return;
       }
+      if (message.type === "console.snapshot") applySnapshot(message);
+      if (message.type === "console.reset") resetOutput(message);
       if (message.type === "console.line") appendLine(message);
     };
     current.onerror = () => {
       status.value = "error";
       statusMessage.value = "控制台连接失败";
+      syncTerminalInput();
     };
     current.onclose = () => {
       if (socket === current) socket = undefined;
@@ -109,26 +212,229 @@ async function connect(expectedGeneration = generation) {
   } catch (error) {
     status.value = "error";
     statusMessage.value = error.message;
+    syncTerminalInput();
     scheduleReconnect(expectedGeneration);
   }
 }
 
+function formatLine(line) {
+  if (line?.type !== "console.line") return "";
+  return consoleLineToAnsi(String(line.content ?? "")) + RESET_LINE;
+}
+
+function applySnapshot(snapshot) {
+  const sessionId = String(snapshot.session_id ?? "");
+  const replace = !currentSessionId
+    || sessionId !== currentSessionId
+    || Boolean(snapshot.truncated)
+    || lastSequence === 0;
+  if (replace) {
+    clearTerminalOutput();
+    lastSequence = 0;
+  }
+  if (sessionId) currentSessionId = sessionId;
+  lastSequence = Math.max(lastSequence, Number(snapshot.sequence) || 0);
+  const output = Array.isArray(snapshot.lines) ? snapshot.lines.map(formatLine).join("") : "";
+  queueTerminalOutput(output);
+}
+
 function appendLine(line) {
-  lastSequence = Math.max(lastSequence, Number(line.sequence) || 0);
-  // escapeXML 保证日志正文不会通过 v-html 注入页面。
-  lines.value.push({ ...line, html: converter.toHtml(String(line.content ?? "")) });
-  if (lines.value.length > 5000) lines.value.splice(0, lines.value.length - 5000);
-  if (autoScroll.value) {
-    nextTick(() => {
-      const element = outputRef.value;
-      if (element) element.scrollTop = element.scrollHeight;
-    });
+  const sequence = Number(line.sequence) || 0;
+  if (sequence && sequence <= lastSequence) return;
+  const sessionId = String(line.session_id ?? "");
+  if (sessionId && currentSessionId && sessionId !== currentSessionId) clearTerminalOutput();
+  if (sessionId) currentSessionId = sessionId;
+  lastSequence = Math.max(lastSequence, sequence);
+  queueTerminalOutput(formatLine(line));
+}
+
+function resetOutput(event) {
+  const sessionId = String(event.session_id ?? "");
+  const sessionChanged = Boolean(sessionId && sessionId !== currentSessionId);
+  currentSessionId = sessionId;
+  lastSequence = sessionChanged
+    ? Number(event.sequence) || 0
+    : Math.max(lastSequence, Number(event.sequence) || 0);
+  clearTerminalOutput();
+}
+
+function queueTerminalOutput(value) {
+  if (!value) return;
+  pendingOutput += value;
+  if (outputFrame) return;
+  outputFrame = window.requestAnimationFrame(flushTerminalOutput);
+}
+
+function flushTerminalOutput() {
+  outputFrame = undefined;
+  if (!terminal || !pendingOutput) return;
+  const output = pendingOutput;
+  const viewport = terminal.buffer.active.viewportY;
+  const shouldFollow = autoScroll.value;
+  pendingOutput = "";
+  erasePrompt();
+  terminal.write(output, () => {
+    if (shouldFollow) terminal.scrollToBottom();
+    else terminal.scrollToLine(viewport);
+    renderPrompt();
+  });
+}
+
+function clearPendingOutput() {
+  if (outputFrame) window.cancelAnimationFrame(outputFrame);
+  outputFrame = undefined;
+  pendingOutput = "";
+}
+
+function clearTerminalOutput() {
+  clearPendingOutput();
+  directInput = "";
+  directNavigation = emptyNavigation();
+  promptVisible = false;
+  if (!terminal) return;
+  terminal.clear();
+  terminal.write("\u001b[2J\u001b[H", renderPrompt);
+}
+
+function erasePrompt() {
+  if (!terminal || !promptVisible) return;
+  terminal.write("\r\u001b[2K");
+  promptVisible = false;
+}
+
+function renderPrompt() {
+  if (!terminal) return;
+  if (!canUseTerminalInput()) {
+    erasePrompt();
+    return;
+  }
+  terminal.write("\r\u001b[2K" + PROMPT + terminalSafeText(directInput));
+  promptVisible = true;
+  if (autoScroll.value) terminal.scrollToBottom();
+}
+
+function syncTerminalInput() {
+  if (!terminal) return;
+  terminal.options.disableStdin = !canUseTerminalInput();
+  if (canUseTerminalInput()) renderPrompt();
+  else {
+    erasePrompt();
+    terminal.blur();
   }
 }
 
-function clearOutput() {
-  lines.value = [];
-  converter = createConverter();
+function terminalSafeText(value) {
+  return String(value ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+}
+
+function handleTerminalScroll(position) {
+  if (!terminal) return;
+  autoScroll.value = position >= terminal.buffer.active.baseY;
+}
+
+function handleTerminalKeyEvent(event) {
+  if (event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "c") {
+    return false;
+  }
+  return true;
+}
+
+function handleTerminalInput(data) {
+  if (!canUseTerminalInput()) return;
+  autoScroll.value = true;
+  terminal.scrollToBottom();
+  if (data === "\r") {
+    submitDirectCommand();
+    return;
+  }
+  if (data === "\u007f") {
+    directInput = Array.from(directInput).slice(0, -1).join("");
+    directNavigation = emptyNavigation();
+    renderPrompt();
+    return;
+  }
+  if (data === "\u001b[A" || data === "\u001b[B") {
+    const result = navigateCommandHistory(
+      commandHistory.value,
+      directNavigation,
+      data === "\u001b[A" ? -1 : 1,
+      directInput,
+    );
+    directNavigation = result.navigation;
+    directInput = result.value;
+    renderPrompt();
+    return;
+  }
+  const printable = terminalSafeText(data);
+  if (!printable || directInput.length + printable.length > 8192) return;
+  directInput += printable;
+  directNavigation = emptyNavigation();
+  renderPrompt();
+}
+
+function submitDirectCommand() {
+  if (sending.value) return;
+  const value = directInput.trim();
+  terminal.write("\r\u001b[2K" + PROMPT + terminalSafeText(directInput) + "\r\n");
+  promptVisible = false;
+  directInput = "";
+  directNavigation = emptyNavigation();
+  if (!value) {
+    renderPrompt();
+    return;
+  }
+  executeCommand(value);
+}
+
+async function sendCommand() {
+  const value = command.value.trim();
+  if (!value || sending.value || !props.canCommand) return;
+  echoCommand(value);
+  const success = await executeCommand(value);
+  if (success) command.value = "";
+  commandNavigation = emptyNavigation();
+}
+
+function echoCommand(value) {
+  if (!terminal) return;
+  erasePrompt();
+  terminal.write(PROMPT + terminalSafeText(value) + "\r\n", renderPrompt);
+}
+
+async function executeCommand(value) {
+  if (!value || sending.value || !props.canCommand || !props.running) return false;
+  sending.value = true;
+  rememberCommand(value);
+  try {
+    await request(
+      `/api/v1/instances/${encodeURIComponent(props.instanceId)}/command?node_id=${encodeURIComponent(props.nodeId)}`,
+      { method: "POST", body: JSON.stringify({ command: value }) },
+    );
+    return true;
+  } catch (error) {
+    ElMessage.error(error.message);
+    return false;
+  } finally {
+    sending.value = false;
+    renderPrompt();
+  }
+}
+
+function handleCommandKeydown(event) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  event.preventDefault();
+  const result = navigateCommandHistory(
+    commandHistory.value,
+    commandNavigation,
+    event.key === "ArrowUp" ? -1 : 1,
+    command.value,
+  );
+  commandNavigation = result.navigation;
+  command.value = result.value;
+}
+
+function resetCommandNavigation() {
+  commandNavigation = emptyNavigation();
 }
 
 function reconnect() {
@@ -136,37 +442,47 @@ function reconnect() {
   connect(generation);
 }
 
-async function sendCommand() {
-  const value = command.value.trim();
-  if (!value || sending.value || !props.canCommand) return;
-  sending.value = true;
-  try {
-    await request(
-      `/api/v1/instances/${encodeURIComponent(props.instanceId)}/command?node_id=${encodeURIComponent(props.nodeId)}`,
-      { method: "POST", body: JSON.stringify({ command: value }) },
-    );
-    command.value = "";
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    sending.value = false;
-  }
+function resetConsoleContext() {
+  stopConnection();
+  clearTerminalOutput();
+  lastSequence = 0;
+  currentSessionId = "";
+  status.value = props.enabled ? "connecting" : "disconnected";
+  statusMessage.value = "";
+  syncTerminalInput();
+  if (props.enabled) connect(generation);
 }
 
 watch(
   () => [props.nodeId, props.instanceId, props.enabled],
   () => {
-    stopConnection();
-    lines.value = [];
-    lastSequence = 0;
-    converter = createConverter();
-    status.value = props.enabled ? "connecting" : "disconnected";
-    if (props.enabled) connect(generation);
+    if (terminal) resetConsoleContext();
   },
-  { immediate: true },
 );
 
-onBeforeUnmount(stopConnection);
+watch(
+  () => [props.canCommand, props.running],
+  syncTerminalInput,
+);
+
+watch(autoScroll, (enabled) => {
+  if (enabled) terminal?.scrollToBottom();
+});
+
+onMounted(() => {
+  initTerminal();
+  resetConsoleContext();
+});
+
+onBeforeUnmount(() => {
+  stopConnection();
+  clearPendingOutput();
+  resizeObserver?.disconnect();
+  inputDisposable?.dispose();
+  scrollDisposable?.dispose();
+  terminal?.dispose();
+  terminal = undefined;
+});
 </script>
 
 <template>
@@ -185,20 +501,22 @@ onBeforeUnmount(stopConnection);
           </button>
         </el-tooltip>
         <el-tooltip content="清空显示">
-          <button class="console-icon-button" type="button" aria-label="清空显示" @click="clearOutput">
+          <button class="console-icon-button" type="button" aria-label="清空显示" @click="clearTerminalOutput">
             <Eraser :size="15" />
           </button>
         </el-tooltip>
       </div>
     </div>
-    <div ref="outputRef" class="console-output" role="log" aria-live="off">
-      <div v-if="!lines.length" class="console-empty">暂无控制台输出</div>
-      <div v-for="(line, index) in lines" :key="line.session_id + '-' + line.sequence + '-' + index" class="console-line">
-        <span class="console-content" v-html="line.html" />
-      </div>
-    </div>
+    <div ref="terminalRef" class="console-terminal" />
     <form v-if="canCommand" class="console-command" @submit.prevent="sendCommand">
-      <el-input v-model="command" :disabled="!running" maxlength="8192" placeholder="输入控制台命令" />
+      <el-input
+        v-model="command"
+        :disabled="!running"
+        maxlength="8192"
+        placeholder="输入控制台命令"
+        @input="resetCommandNavigation"
+        @keydown="handleCommandKeydown"
+      />
       <el-button type="primary" native-type="submit" :loading="sending" :disabled="!running || !command.trim()">
         <Send v-if="!sending" :size="15" />
         发送
@@ -263,31 +581,30 @@ onBeforeUnmount(stopConnection);
   border-radius: 4px;
 }
 .console-icon-button:hover { color: #fff; background: #303840; border-color: #46515b; }
-.console-output {
+.console-terminal {
   height: 520px;
-  padding: 10px 0;
-  overflow: auto;
-  color: #d8dee9;
+  padding: 8px 8px 5px 10px;
   background: #171b1f;
-  font: 12px/1.55 Consolas, "Cascadia Mono", "Courier New", monospace;
 }
-.console-line {
-  min-height: 20px;
-  padding: 1px 12px;
+.console-terminal :deep(.xterm) { height: 100%; user-select: none; }
+.console-terminal :deep(.xterm-viewport) {
+  overscroll-behavior: contain;
+  scrollbar-color: #59656f #171b1f;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
 }
-.console-line:hover { background: #1e2429; }
-.console-content {
-  display: block;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+.console-terminal :deep(.xterm-screen) { touch-action: pan-y; }
+.console-terminal :deep(.xterm-viewport::-webkit-scrollbar) { width: 14px; }
+.console-terminal :deep(.xterm-viewport::-webkit-scrollbar-track) { background: #171b1f; }
+.console-terminal :deep(.xterm-viewport::-webkit-scrollbar-thumb) {
+  min-height: 36px;
+  background: #59656f;
+  border: 3px solid #171b1f;
+  border-radius: 8px;
 }
-.console-empty {
-  display: grid;
-  place-items: center;
-  height: 100%;
-  color: #68737c;
-  font-size: 11px;
-}
+.console-terminal :deep(.xterm-viewport::-webkit-scrollbar-thumb:hover) { background: #74808a; }
 .console-command {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -304,8 +621,7 @@ onBeforeUnmount(stopConnection);
 @media (max-width: 680px) {
   .console-toolbar { align-items: flex-start; }
   .console-status small { display: none; }
-  .console-output { height: 430px; font-size: 11px; }
-  .console-line { padding-inline: 8px; }
+  .console-terminal { height: 430px; padding-inline: 8px; }
   .console-actions :deep(.el-checkbox__label) { display: none; }
 }
 </style>

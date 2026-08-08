@@ -46,3 +46,13 @@ func TestCopyConcurrencyValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestHTTPSPublicURLWithTLSReverseProxy(t *testing.T) {
+	cfg := Default()
+	cfg.Server.PublicURL = "https://daemon.example.com"
+	cfg.SSL.Enabled = false
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("HTTPS public URL behind TLS reverse proxy was rejected: %v", err)
+	}
+}

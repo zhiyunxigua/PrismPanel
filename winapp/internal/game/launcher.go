@@ -18,6 +18,7 @@ type LaunchRequest struct {
 	Preparation     JoinPreparation
 	Account         AccountState
 	ProtocolVersion string
+	Profile         LaunchProfile
 }
 
 type LaunchResult struct {
@@ -65,7 +66,10 @@ func LaunchPreparedGame(ctx context.Context, request LaunchRequest, processes *P
 	}
 
 	report("launch", "\u6b63\u5728\u542f\u52a8\u672c\u5730\u8ba4\u8bc1\u670d\u52a1", 96.5)
-	localServices, err := StartLocalLauncherServices(ctx, LocalLauncherServicesConfig{Server: server, Account: request.Account})
+	localServices, err := StartLocalLauncherServices(ctx, LocalLauncherServicesConfig{
+		Server: server, Account: request.Account, Profile: request.Profile.normalized(server, request.ProtocolVersion),
+		BaseMC: filepath.Join(request.Preparation.VersionDir, ".minecraft"),
+	})
 	if err != nil {
 		return LaunchResult{}, err
 	}
@@ -77,9 +81,10 @@ func LaunchPreparedGame(ctx context.Context, request LaunchRequest, processes *P
 	}()
 
 	report("launch", "\u6b63\u5728\u751f\u6210\u542f\u52a8\u53c2\u6570", 97)
+	profile := request.Profile.normalized(server, request.ProtocolVersion)
 	args, err := BuildLaunchArguments(LaunchArgumentInput{
 		Config: cfg, Server: server, Account: request.Account, GameDir: request.Preparation.GameDir,
-		LauncherControlPort: localServices.AuthPort(), LauncherPort: localServices.RPCPort(), ProtocolVersion: request.ProtocolVersion,
+		LauncherControlPort: localServices.AuthPort(), LauncherPort: localServices.RPCPort(), ProtocolVersion: request.ProtocolVersion, Profile: profile,
 	})
 	if err != nil {
 		return LaunchResult{}, err
@@ -132,9 +137,11 @@ type LaunchArgumentInput struct {
 	LauncherControlPort int
 	LauncherPort        int
 	ProtocolVersion     string
+	Profile             LaunchProfile
 }
 
 func BuildLaunchArguments(input LaunchArgumentInput) ([]string, error) {
+	profile := input.Profile.normalized(input.Server, input.ProtocolVersion)
 	jvmArgs, err := splitCommandLine(input.Config.JVMArguments)
 	if err != nil {
 		return nil, fmt.Errorf("parse jvm arguments: %w", err)
@@ -161,7 +168,7 @@ func BuildLaunchArguments(input LaunchArgumentInput) ([]string, error) {
 	jvmArgs = removeFlagWithValue(jvmArgs, "-Xmx")
 	jvmArgs = append([]string{"-Xmx2048M"}, jvmArgs...)
 	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "launcherControlPort", strconv.Itoa(input.LauncherControlPort))
-	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "launcherGameId", localLauncherGameID(input.Server))
+	jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "launcherGameId", profile.LauncherGameID())
 	if input.Account.UserID != "" {
 		jvmArgs = appendOrReplaceJavaProperty(jvmArgs, "userId", input.Account.UserID)
 	}
@@ -179,9 +186,9 @@ func BuildLaunchArguments(input LaunchArgumentInput) ([]string, error) {
 		jvmArgs = append(jvmArgs, mainClass)
 	}
 
-	uuid := generateRoleUUID(input.Server.Username, input.Account.UserID)
+	uuid := generateRoleUUID(profile.RoleName, input.Account.UserID)
 	replacements := map[string]string{
-		"${auth_player_name}":  input.Server.Username,
+		"${auth_player_name}":  profile.RoleName,
 		"${version_name}":      input.Server.VersionLabel,
 		"${game_directory}":    ".",
 		"${assets_root}":       "assets",
@@ -196,10 +203,10 @@ func BuildLaunchArguments(input LaunchArgumentInput) ([]string, error) {
 	gameArgs = replacePlaceholders(gameArgs, replacements)
 	gameArgs = upsertFlagValue(gameArgs, "--gameDir", ".")
 	gameArgs = upsertFlagValue(gameArgs, "--assetsDir", "assets")
-	gameArgs = upsertFlagValue(gameArgs, "--server", input.Server.IP)
-	gameArgs = upsertFlagValue(gameArgs, "--port", strconv.Itoa(input.Server.Port))
+	gameArgs = upsertFlagValue(gameArgs, "--server", profile.ServerIP)
+	gameArgs = upsertFlagValue(gameArgs, "--port", strconv.Itoa(profile.ServerPort))
 	gameArgs = upsertFlagValue(gameArgs, "--userProperties", buildUserProperties(input))
-	gameArgs = upsertFlagValue(gameArgs, "--userPropertiesEx", buildUserPropertiesEx(input.ProtocolVersion))
+	gameArgs = upsertFlagValue(gameArgs, "--userPropertiesEx", buildUserPropertiesEx(profile))
 	gameArgs = dropUnresolvedPlaceholderArgs(gameArgs)
 
 	return append(jvmArgs, gameArgs...), nil
@@ -392,20 +399,13 @@ func removeExactArg(args []string, value string) []string {
 	return out
 }
 
-func localLauncherGameID(server ServerConfig) string {
-	if value := strings.TrimSpace(server.GameID); value != "" {
-		return value
-	}
-	return "0"
-}
-
 func buildUserProperties(input LaunchArgumentInput) string {
 	protocolVersion := strings.TrimSpace(input.ProtocolVersion)
 	if protocolVersion == "" {
 		protocolVersion = "0"
 	}
 	uid := numericJSONValue(input.Account.UserID)
-	gameID := numericJSONValue(localLauncherGameID(input.Server))
+	gameID := json.Number("0")
 	encoded, _ := json.Marshal(map[string]any{
 		"uid":           []any{uid, 0},
 		"gameid":        []any{gameID, 0},
@@ -418,13 +418,13 @@ func buildUserProperties(input LaunchArgumentInput) string {
 	return string(encoded)
 }
 
-func buildUserPropertiesEx(protocolVersion string) string {
-	protocolVersion = strings.TrimSpace(protocolVersion)
+func buildUserPropertiesEx(profile LaunchProfile) string {
+	protocolVersion := strings.TrimSpace(profile.ProtocolVersion)
 	if protocolVersion == "" {
 		protocolVersion = "0"
 	}
 	encoded, _ := json.Marshal(map[string]any{
-		"GameType":        2,
+		"GameType":        profile.GameType,
 		"channel":         "netease",
 		"isFilter":        true,
 		"launcherVersion": protocolVersion,

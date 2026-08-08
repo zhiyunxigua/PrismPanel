@@ -35,6 +35,7 @@ final class DaemonBridge implements AutoCloseable {
     private final PlatformScheduler platformScheduler;
     private final ProxyBackendRegistry backendRegistry;
     private final PlayerTransferService transferService;
+    private final OperatorRegistry operatorRegistry;
     private final List<String> capabilities;
     private final long pid = ProcessHandle.current().pid();
     private final Gson gson = new Gson();
@@ -59,13 +60,15 @@ final class DaemonBridge implements AutoCloseable {
             PrismLogger logger,
             PlatformScheduler platformScheduler,
             ProxyBackendRegistry backendRegistry,
-            PlayerTransferService transferService
+            PlayerTransferService transferService,
+            OperatorRegistry operatorRegistry
     ) {
         this.environment = environment;
         this.logger = logger;
         this.platformScheduler = platformScheduler;
         this.backendRegistry = backendRegistry;
         this.transferService = transferService;
+        this.operatorRegistry = operatorRegistry;
         List<String> declared = new ArrayList<>();
         declared.add("telemetry");
         declared.add("plugin.inventory");
@@ -74,6 +77,10 @@ final class DaemonBridge implements AutoCloseable {
         }
         if (transferService != null) {
             declared.add("player.transfer");
+        }
+        if (operatorRegistry != null) {
+            declared.add("operators.sync");
+            operatorRegistry.setDriftReporter(this::publishOperatorDrift);
         }
         this.capabilities = List.copyOf(declared);
     }
@@ -220,6 +227,7 @@ final class DaemonBridge implements AutoCloseable {
             operation = switch (type) {
                 case "proxy.backends.replace" -> replaceBackends(data);
                 case "player.transfer" -> transferPlayer(data);
+                case "operators.replace" -> replaceOperators(data);
                 default -> CompletableFuture.failedFuture(
                         new PrismCommandException("UNKNOWN_COMMAND", "unsupported command: " + type)
                 );
@@ -273,6 +281,52 @@ final class DaemonBridge implements AutoCloseable {
                         "player_uuid", playerId.toString(),
                         "target_server_id", request.targetServerId()
                 ));
+    }
+
+    private CompletableFuture<OperatorApplyResult> replaceOperators(JsonObject data) {
+        if (operatorRegistry == null) {
+            return CompletableFuture.failedFuture(new PrismCommandException(
+                    "UNSUPPORTED_CAPABILITY", "operator management is unavailable"
+            ));
+        }
+        OperatorCatalogRequest request = gson.fromJson(data, OperatorCatalogRequest.class);
+        if (request == null || request.revision() < 0 || request.operators() == null) {
+            return CompletableFuture.failedFuture(
+                    new PrismCommandException("INVALID_REQUEST", "operator catalog is invalid")
+            );
+        }
+        List<ManagedOperator> operators = new ArrayList<>(request.operators().size());
+        java.util.HashSet<UUID> seen = new java.util.HashSet<>();
+        for (OperatorRequest item : request.operators()) {
+            if (item == null || item.uuid() == null) {
+                return CompletableFuture.failedFuture(
+                        new PrismCommandException("INVALID_REQUEST", "operator UUID is required")
+                );
+            }
+            UUID uuid;
+            try {
+                uuid = UUID.fromString(item.uuid());
+            } catch (IllegalArgumentException error) {
+                return CompletableFuture.failedFuture(
+                        new PrismCommandException("INVALID_REQUEST", "operator UUID is invalid")
+                );
+            }
+            if (!seen.add(uuid)) {
+                return CompletableFuture.failedFuture(
+                        new PrismCommandException("INVALID_REQUEST", "operator UUID is duplicated")
+                );
+            }
+            operators.add(new ManagedOperator(uuid, item.name() == null ? "" : item.name().trim()));
+        }
+        return platformScheduler.call(() -> operatorRegistry.replace(
+                request.revision(), request.active(), List.copyOf(operators)
+        ));
+    }
+
+    private void publishOperatorDrift(OperatorDriftReport report) {
+        if (authenticated.get()) {
+            send(Map.of("type", "operator.drift", "data", report), true);
+        }
     }
 
     private void sendResponse(String requestId, Object result, Throwable error) {
@@ -368,6 +422,16 @@ final class DaemonBridge implements AutoCloseable {
             @SerializedName("player_uuid") String playerId,
             @SerializedName("target_server_id") String targetServerId
     ) {
+    }
+
+    private record OperatorCatalogRequest(
+            long revision,
+            boolean active,
+            List<OperatorRequest> operators
+    ) {
+    }
+
+    private record OperatorRequest(String uuid, String name) {
     }
 
     private record OutboundMessage(String payload, boolean critical) {

@@ -55,10 +55,17 @@ func writeRequestError(writer http.ResponseWriter, err error) {
 		case "SERVER_NOT_FOUND", "INSTANCE_NOT_FOUND", "FILE_NOT_FOUND":
 			status = http.StatusNotFound
 		case "INSTANCE_BUSY", "PORT_CONFLICT", "SERVER_ID_CONFLICT", "DEPLOYMENT_ALREADY_RUNNING",
-			"FILE_EXISTS", "FILE_CHANGED", "PLUGIN_EXISTS", "PLUGIN_NAME_CONFLICT", "PLUGIN_FILE_CONFLICT":
+			"FILE_EXISTS", "FILE_CHANGED", "PLUGIN_EXISTS", "PLUGIN_NAME_CONFLICT", "PLUGIN_FILE_CONFLICT",
+			"FIREWALL_REVISION_CONFLICT", "FIREWALL_RULE_CONFLICT", "FIREWALL_DRIFT", "FIREWALL_LOCKOUT_RISK":
 			status = http.StatusConflict
+		case "FIREWALL_RULE_NOT_FOUND":
+			status = http.StatusNotFound
 		case "PERMISSION_DENIED", "PATH_ESCAPE":
 			status = http.StatusForbidden
+		case "FIREWALL_UNSUPPORTED":
+			status = http.StatusUnprocessableEntity
+		case "FIREWALL_APPLY_FAILED", "FIREWALL_INSPECT_FAILED":
+			status = http.StatusBadGateway
 		case "FILE_TOO_LARGE":
 			status = http.StatusRequestEntityTooLarge
 		case "TOO_MANY_REQUESTS":

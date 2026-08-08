@@ -18,6 +18,7 @@ import (
 	"PrismPanel-daemon/internal/deployment"
 	"PrismPanel-daemon/internal/eventbus"
 	fileservice "PrismPanel-daemon/internal/files"
+	firewallservice "PrismPanel-daemon/internal/firewall"
 	pluginservice "PrismPanel-daemon/internal/plugins"
 	"PrismPanel-daemon/internal/secret"
 	serverservice "PrismPanel-daemon/internal/server"
@@ -34,7 +35,7 @@ func main() {
 }
 
 func run() error {
-	configPath := flag.String("config", "data/daemon.yaml", "path to daemon YAML configuration")
+	configPath := flag.String("config", "daemon.yaml", "path to daemon YAML configuration")
 	showSecret := flag.Bool("show-secret", false, "print the local daemon main secret and exit")
 	resetSecret := flag.Bool("reset-secret", false, "replace the local daemon main secret and exit")
 	flag.Parse()
@@ -81,6 +82,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	operatorStore := store.NewOperatorStore(dataDir)
+	operatorState, err := operatorStore.Load()
+	if err != nil {
+		return err
+	}
+	if err := manager.ConfigureOperators(operatorState, operatorStore.Save); err != nil {
+		return fmt.Errorf("configure operator registry: %w", err)
+	}
 	serverService := serverservice.NewService(serverStore, manager, serverConfigs)
 	ticketManager := ticket.NewManager()
 	deploymentManager := deployment.NewManager(serverService, manager, cfg.Files.CopyConcurrency)
@@ -92,14 +101,24 @@ func run() error {
 		serverService, manager, deploymentManager, cfg.Files.MaxEditFileSize,
 		cfg.Files.MaxUploadFileSize, cfg.Files.MaxExtractedSize, cfg.Files.MaxConcurrentTransfers,
 	)
+	firewallManager, err := firewallservice.New(dataDir, cfg.Server.Port, slog.Default())
+	if err != nil {
+		return err
+	}
+	firewallContext, firewallCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := firewallManager.Initialize(firewallContext); err != nil {
+		slog.Error("initialize firewall service", "error", err)
+	}
+	firewallCancel()
 	httpServer := api.NewServer(
 		cfg, secretFile.Secret, secretFile.NodeID, serverService, manager, ticketManager,
-		deploymentManager, pluginManager, fileManager, events, slog.Default(),
+		deploymentManager, pluginManager, fileManager, firewallManager, events, slog.Default(),
 	)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	manager.StartMetrics(ctx)
+	pluginManager.Start(ctx)
 	serverError := make(chan error, 1)
 	go func() {
 		scheme := "http"

@@ -1,15 +1,17 @@
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Boxes, LogIn, Settings, Trash2 } from "lucide-vue-next";
+import { Boxes, LogIn, Moon, Settings, Sun, Trash2 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { login, loginSavedAccount, sessionState } from "../session";
 import {
   deleteSavedAccountWinApp, isWinApp, runtimeConfig, savedAccounts,
 } from "../runtime";
+import { currentTheme, toggleTheme } from "../theme";
 
 const route = useRoute();
 const router = useRouter();
+const isDarkTheme = computed(() => currentTheme.value === "dark");
 const formRef = ref();
 const usernameInput = ref();
 const submitting = ref(false);
@@ -132,6 +134,18 @@ function formatLoginTime(value) {
 
 <template>
   <main class="login-screen">
+    <el-tooltip :content="isDarkTheme ? '切换为亮色主题' : '切换为暗色主题'" placement="left">
+      <button
+        class="icon-control login-theme-control"
+        type="button"
+        :aria-label="isDarkTheme ? '切换为亮色主题' : '切换为暗色主题'"
+        :aria-pressed="isDarkTheme"
+        @click="toggleTheme"
+      >
+        <Sun v-if="isDarkTheme" :size="18" />
+        <Moon v-else :size="18" />
+      </button>
+    </el-tooltip>
     <section v-loading="loadingAccounts" class="login-form-wrap" aria-labelledby="login-title">
       <div class="login-product">
         <span class="login-brand-mark"><Boxes :size="21" /></span>

@@ -13,6 +13,7 @@ globalThis.window = {
 
 const {
   apiURL,
+  consoleWebSocketURL,
   createGameServer,
   deleteGameServer,
   deleteNetEaseAccount,
@@ -29,6 +30,7 @@ const {
   loginSavedAccountWinApp,
   loginWinApp,
   netEaseAccount,
+  runtimeConfig,
   savedAccounts,
   selectGameModDirectory,
   updateSavedPasswordWinApp,
@@ -57,6 +59,32 @@ test("direct daemon WebSocket never receives the local session", () => {
     "wss://node.example.com/api/v1/ws/console",
   );
   assert.equal(isProxyURL("https://node.example.com/api/v1/files/download"), false);
+});
+
+test("console WebSocket selects a browser-compatible transport", () => {
+  const savedRuntime = { ...runtimeConfig };
+  const savedLocation = window.location.href;
+  for (const key of Object.keys(runtimeConfig)) delete runtimeConfig[key];
+  try {
+    window.location.href = "https://panel.example.com/servers/lobby";
+    assert.equal(
+      consoleWebSocketURL("http://node.example.com:24444/api/v1/ws/console", "node-a"),
+      "wss://panel.example.com/api/v1/ws/console?node_id=node-a",
+    );
+    assert.equal(
+      consoleWebSocketURL("https://node.example.com/api/v1/ws/console", "node-a"),
+      "wss://node.example.com/api/v1/ws/console",
+    );
+
+    window.location.href = "http://panel.example.com/servers/lobby";
+    assert.equal(
+      consoleWebSocketURL("http://node.example.com:24444/api/v1/ws/console", "node-a"),
+      "ws://node.example.com:24444/api/v1/ws/console",
+    );
+  } finally {
+    window.location.href = savedLocation;
+    Object.assign(runtimeConfig, savedRuntime);
+  }
 });
 
 test("WinApp account operations use the Wails bridge", async () => {

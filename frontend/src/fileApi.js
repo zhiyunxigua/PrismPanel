@@ -2,7 +2,7 @@ import { ApiError, request } from "./api";
 import { apiURL, runtimeHeaders, runtimeConfig } from "./runtime";
 
 const proxyNodes = new Set();
-const mutatingScopes = new Set(["file.edit", "file.upload", "file.import", "file.create", "file.move", "file.delete"]);
+const mutatingScopes = new Set(["file.edit", "file.upload", "file.import", "file.create", "file.move", "file.archive", "file.delete"]);
 
 export async function fileJSON(authorization, method, body, extraHeaders = {}) {
   return withAuthorization(authorization, async (grant) => {

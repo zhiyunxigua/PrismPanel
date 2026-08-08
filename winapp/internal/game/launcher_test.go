@@ -84,6 +84,38 @@ func TestBuildLaunchArgumentsPlacesLauncherPropertiesBeforeMainClass(t *testing.
 	}
 }
 
+func TestBuildLaunchArgumentsUsesNetGameProfile(t *testing.T) {
+	server := ServerConfig{ID: "net-a", GameID: "4661334467366178884", IP: "10.0.0.2", Port: 25566, Username: "西瓜", Version: Version1_21_8, VersionLabel: "1.21.8"}
+	args, err := BuildLaunchArguments(LaunchArgumentInput{
+		Config: versionConfig{
+			ID:                 "26",
+			MainClass:          "cpw.mods.bootstraplauncher.BootstrapLauncher",
+			JVMArguments:       "-Xmx2G -cp libraries\\a.jar cpw.mods.bootstraplauncher.BootstrapLauncher",
+			ParameterArguments: "--username ${auth_player_name} --gameDir . --assetsDir assets --assetIndex 26 --uuid ${auth_uuid} --accessToken ${auth_access_token} --launchTarget neoforgeclient",
+		},
+		Server:              server,
+		Account:             AccountState{UserID: "123456", UserToken: "token-value"},
+		LauncherControlPort: 34567,
+		LauncherPort:        45678,
+		ProtocolVersion:     "1.2.3",
+		Profile:             NewNetGameLaunchProfile(server, "1.2.3"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value := propertyValue(t, args, "launcherGameId"); value != "4661334467366178884" {
+		t.Fatalf("launcherGameId mismatch: %s", value)
+	}
+	assertArgValue(t, args, "--server", "10.0.0.2")
+	assertArgValue(t, args, "--port", "25566")
+	assertArgValue(t, args, "--username", "西瓜")
+	assertArgValue(t, args, "--userPropertiesEx", `{"GameType":2,"channel":"netease","isFilter":true,"launcherVersion":"1.2.3","timedelta":0}`)
+	userProperties := valueAfterArg(t, args, "--userProperties")
+	if !strings.Contains(userProperties, `"gameid":[0,0]`) {
+		t.Fatalf("gameid mismatch: %s", userProperties)
+	}
+}
+
 func TestSplitCommandLineKeepsQuotedClasspath(t *testing.T) {
 	args, err := splitCommandLine(`-Xmx2G -cp "libraries/a.jar;libraries/b.jar" main.Class --name "Steve Jobs"`)
 	if err != nil {
@@ -258,6 +290,49 @@ func TestEnsureNetEaseNativeRuntimeCopiesCachedDLL(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFileContent(t, filepath.Join(nativesPath, "runtime", netEaseRuntimeDLL), "netease-native")
+}
+
+func TestEnsureNetEaseNativeRuntimeReplacesExistingDLL(t *testing.T) {
+	root := t.TempDir()
+	paths := CachePaths{Root: root, BaseMC: filepath.Join(root, ".minecraft")}
+	runtimeDir := filepath.Join(root, "runtime", "server-a")
+	target := filepath.Join(runtimeDir, "versions", "1.21.8", "natives-windows-x86_64", "runtime", netEaseRuntimeDLL)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("old-native"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cachedDLL := filepath.Join(root, "native-runtime", netEaseRuntimeDLL)
+	if err := os.MkdirAll(filepath.Dir(cachedDLL), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachedDLL, []byte("netease-native"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureNetEaseNativeRuntime(paths, runtimeDir, "1.21.8"); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, target, "netease-native")
+}
+
+func TestEnsureNetEaseNativeRuntimeKeepsExistingDLLWhenItIsTheOnlySource(t *testing.T) {
+	root := t.TempDir()
+	paths := CachePaths{Root: root, BaseMC: filepath.Join(root, ".minecraft")}
+	runtimeDir := filepath.Join(root, "runtime", "server-a")
+	target := filepath.Join(runtimeDir, "versions", "1.21.8", "natives-windows-x86_64", "runtime", netEaseRuntimeDLL)
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("existing-native"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureNetEaseNativeRuntime(paths, runtimeDir, "1.21.8"); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContent(t, target, "existing-native")
 }
 
 func TestEnsureNetEaseNativeRuntimeReportsMissingDLL(t *testing.T) {

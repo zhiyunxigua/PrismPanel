@@ -28,7 +28,10 @@ export async function deleteNetEaseAccount() { return callWinApp("DeleteNetEaseA
 export async function gameVersions() { return callWinApp("GameVersions"); }
 export async function gameServers() { return callWinApp("GameServers"); }
 export async function createGameServer(input) { return callWinApp("CreateGameServer", input); }
+export async function updateGameServer(id, input) { return callWinApp("UpdateGameServer", id, input); }
 export async function deleteGameServer(id) { return callWinApp("DeleteGameServer", id); }
+export async function netGameLaunchOptions(gameID) { return callWinApp("NetGameLaunchOptions", gameID); }
+export async function deleteNetGameCharacter(gameID, roleName) { return callWinApp("DeleteNetGameCharacter", gameID, roleName); }
 export async function selectGameModDirectory() { return callWinApp("SelectGameModDirectory"); }
 export async function joinGameServer(id) { return callWinApp("JoinGameServer", id); }
 export async function joinGameServerConfig(input) { return callWinApp("JoinGameServerConfig", input); }
@@ -63,6 +66,15 @@ export function websocketURL(value) {
   }
   if (target.protocol === "http:") target.protocol = "ws:";
   if (target.protocol === "https:") target.protocol = "wss:";
+  return target.toString();
+}
+
+export function consoleWebSocketURL(value, nodeID) {
+  const target = new URL(websocketURL(value));
+  const pageProtocol = new URL(window.location.href).protocol;
+  if (pageProtocol === "https:" && target.protocol === "ws:") {
+    return websocketURL(`/api/v1/ws/console?node_id=${encodeURIComponent(nodeID)}`);
+  }
   return target.toString();
 }
 

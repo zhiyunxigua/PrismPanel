@@ -3,6 +3,7 @@ package ticket
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"net/netip"
 	"path"
 	"strings"
 	"sync"
@@ -29,7 +30,14 @@ type Ticket struct {
 	OperationID    string    `json:"operation_id,omitempty"`
 	AllowOverwrite bool      `json:"allow_overwrite,omitempty"`
 	AllowRecursive bool      `json:"allow_recursive,omitempty"`
+	ClientIP       string    `json:"-"`
+	SessionID      string    `json:"-"`
 	uses           int
+}
+
+type TicketOptions struct {
+	ClientIP  string
+	SessionID string
 }
 
 type RestrictedOptions struct {
@@ -47,6 +55,8 @@ type RestrictedOptions struct {
 	SHA256         string
 	TTL            time.Duration
 	MaxUses        int
+	ClientIP       string
+	SessionID      string
 }
 
 func (m *Manager) CreateRestricted(options RestrictedOptions) (Ticket, error) {
@@ -71,7 +81,9 @@ func (m *Manager) CreateRestricted(options RestrictedOptions) (Ticket, error) {
 	if len(cleanPaths) == 0 {
 		cleanPaths = []string{cleanPath}
 	}
-	item, err := m.Create(options.Scope, options.ResourceID, options.TTL, options.MaxUses)
+	item, err := m.CreateWithOptions(options.Scope, options.ResourceID, options.TTL, options.MaxUses, TicketOptions{
+		ClientIP: options.ClientIP, SessionID: options.SessionID,
+	})
 	if err != nil {
 		return Ticket{}, err
 	}
@@ -123,11 +135,19 @@ func NewManager() *Manager {
 }
 
 func (m *Manager) Create(scope, instanceID string, ttl time.Duration, maxUses int) (Ticket, error) {
+	return m.CreateWithOptions(scope, instanceID, ttl, maxUses, TicketOptions{})
+}
+
+func (m *Manager) CreateWithOptions(scope, instanceID string, ttl time.Duration, maxUses int, options TicketOptions) (Ticket, error) {
 	if ttl <= 0 || ttl > 15*time.Minute {
 		return Ticket{}, apperr.New("INVALID_TICKET", "临时凭证有效期必须在 15 分钟以内")
 	}
 	if maxUses <= 0 {
 		maxUses = 1
+	}
+	clientIP, err := normalizeClientIP(options.ClientIP)
+	if err != nil {
+		return Ticket{}, err
 	}
 	id, err := randomValue(16)
 	if err != nil {
@@ -140,6 +160,7 @@ func (m *Manager) Create(scope, instanceID string, ttl time.Duration, maxUses in
 	item := &Ticket{
 		ID: id, Token: token, Scope: scope, InstanceID: instanceID,
 		ExpiresAt: time.Now().UTC().Add(ttl), MaxUses: maxUses,
+		ClientIP: clientIP, SessionID: strings.TrimSpace(options.SessionID),
 	}
 	m.mu.Lock()
 	m.removeExpiredLocked(time.Now())
@@ -150,20 +171,72 @@ func (m *Manager) Create(scope, instanceID string, ttl time.Duration, maxUses in
 }
 
 func (m *Manager) Consume(token, scope, instanceID string) (Ticket, error) {
+	return m.ConsumeFrom(token, scope, instanceID, "")
+}
+
+func (m *Manager) ConsumeFrom(token, scope, instanceID, source string) (Ticket, error) {
+	clientIP, err := normalizeClientIP(source)
+	if err != nil {
+		return Ticket{}, err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	item := m.byToken[token]
-	if item == nil {
-		return Ticket{}, apperr.New("UNAUTHENTICATED", "临时凭证无效")
-	}
-	if time.Now().After(item.ExpiresAt) {
-		delete(m.byToken, item.Token)
-		delete(m.byID, item.ID)
-		return Ticket{}, apperr.New("TICKET_EXPIRED", "临时凭证已过期")
+	item, err := m.activeTicketLocked(token)
+	if err != nil {
+		return Ticket{}, err
 	}
 	if item.Scope != scope || item.InstanceID != instanceID {
 		return Ticket{}, apperr.New("PERMISSION_DENIED", "临时凭证不允许当前操作")
 	}
+	if err := item.validateSource(clientIP); err != nil {
+		return Ticket{}, err
+	}
+	return consumeTicketLocked(item)
+}
+
+func (m *Manager) ConsumeRestricted(token, scope, resourceType, resourceID, requestPath, method string) (Ticket, error) {
+	return m.ConsumeRestrictedFrom(token, scope, resourceType, resourceID, requestPath, method, "")
+}
+
+func (m *Manager) ConsumeRestrictedFrom(token, scope, resourceType, resourceID, requestPath, method, source string) (Ticket, error) {
+	cleanPath, err := normalizePath(requestPath)
+	if err != nil {
+		return Ticket{}, err
+	}
+	clientIP, err := normalizeClientIP(source)
+	if err != nil {
+		return Ticket{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	item, err := m.activeTicketLocked(token)
+	if err != nil {
+		return Ticket{}, err
+	}
+	if item.Scope != scope || item.ResourceType != resourceType || item.ResourceID != resourceID ||
+		item.Method != strings.ToUpper(method) || !ticketPathAllowed(*item, cleanPath) {
+		return Ticket{}, apperr.New("PERMISSION_DENIED", "临时凭证不允许当前文件操作")
+	}
+	if err := item.validateSource(clientIP); err != nil {
+		return Ticket{}, err
+	}
+	return consumeTicketLocked(item)
+}
+
+func (m *Manager) activeTicketLocked(token string) (*Ticket, error) {
+	item := m.byToken[token]
+	if item == nil {
+		return nil, apperr.New("UNAUTHENTICATED", "临时凭证无效")
+	}
+	if time.Now().After(item.ExpiresAt) {
+		delete(m.byToken, item.Token)
+		delete(m.byID, item.ID)
+		return nil, apperr.New("TICKET_EXPIRED", "临时凭证已过期")
+	}
+	return item, nil
+}
+
+func consumeTicketLocked(item *Ticket) (Ticket, error) {
 	if item.uses >= item.MaxUses {
 		return Ticket{}, apperr.New("UNAUTHENTICATED", "临时凭证已被使用")
 	}
@@ -171,31 +244,23 @@ func (m *Manager) Consume(token, scope, instanceID string) (Ticket, error) {
 	return *item, nil
 }
 
-func (m *Manager) ConsumeRestricted(token, scope, resourceType, resourceID, requestPath, method string) (Ticket, error) {
-	cleanPath, err := normalizePath(requestPath)
-	if err != nil {
-		return Ticket{}, err
+func (item Ticket) validateSource(source string) error {
+	if item.ClientIP == "" || item.ClientIP == source {
+		return nil
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	item := m.byToken[token]
-	if item == nil {
-		return Ticket{}, apperr.New("UNAUTHENTICATED", "临时凭证无效")
+	return apperr.New("PERMISSION_DENIED", "临时凭证不允许当前来源 IP 使用")
+}
+
+func normalizeClientIP(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
 	}
-	if time.Now().After(item.ExpiresAt) {
-		delete(m.byToken, item.Token)
-		delete(m.byID, item.ID)
-		return Ticket{}, apperr.New("TICKET_EXPIRED", "临时凭证已过期")
+	address, err := netip.ParseAddr(value)
+	if err != nil || !address.IsValid() {
+		return "", apperr.New("INVALID_TICKET", "临时凭证来源 IP 无效")
 	}
-	if item.Scope != scope || item.ResourceType != resourceType || item.ResourceID != resourceID ||
-		item.Method != strings.ToUpper(method) || !ticketPathAllowed(*item, cleanPath) {
-		return Ticket{}, apperr.New("PERMISSION_DENIED", "临时凭证不允许当前文件操作")
-	}
-	if item.uses >= item.MaxUses {
-		return Ticket{}, apperr.New("UNAUTHENTICATED", "临时凭证已被使用")
-	}
-	item.uses++
-	return *item, nil
+	return address.Unmap().String(), nil
 }
 
 func ticketPathAllowed(item Ticket, requestPath string) bool {
@@ -240,6 +305,21 @@ func (m *Manager) Revoke(ticketID string) {
 	if item := m.byID[ticketID]; item != nil {
 		delete(m.byID, item.ID)
 		delete(m.byToken, item.Token)
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) RevokeSession(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	m.mu.Lock()
+	for token, item := range m.byToken {
+		if item.SessionID == sessionID {
+			delete(m.byToken, token)
+			delete(m.byID, item.ID)
+		}
 	}
 	m.mu.Unlock()
 }

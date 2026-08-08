@@ -40,7 +40,6 @@ type Plugin struct {
 	Loaded         bool     `json:"loaded"`
 	RuntimeVersion string   `json:"runtime_version,omitempty"`
 	RuntimeMain    string   `json:"runtime_main,omitempty"`
-	RuntimeSHA256  string   `json:"runtime_sha256,omitempty"`
 	Status         string   `json:"status"`
 	Issues         []string `json:"issues"`
 	PendingRestart bool     `json:"pending_restart"`

@@ -12,9 +12,10 @@ const NodesView = () => import("./views/NodesView.vue");
 const NodeDetailView = () => import("./views/NodeDetailView.vue");
 const ServersView = () => import("./views/ServersView.vue");
 const ServerDetailView = () => import("./views/ServerDetailView.vue");
+const ScheduledTasksView = () => import("./views/ScheduledTasksView.vue");
 const PluginsView = () => import("./views/PluginsView.vue");
 const NetGamesView = () => import("./views/NetGamesView.vue");
-const PlaceholderView = () => import("./views/PlaceholderView.vue");
+const FirewallView = () => import("./views/FirewallView.vue");
 
 const routes = [
   {
@@ -54,6 +55,12 @@ const routes = [
         meta: { title: "服务器详情", permission: "server.view" },
       },
       {
+        path: "scheduled-tasks",
+        name: "scheduled-tasks",
+        component: ScheduledTasksView,
+        meta: { title: "定时任务", permission: "schedule.view" },
+      },
+      {
         path: "plugins",
         name: "plugins",
         component: PluginsView,
@@ -74,8 +81,8 @@ const routes = [
       {
         path: "firewall",
         name: "firewall",
-        component: PlaceholderView,
-        meta: { title: "网络白名单", resource: "网络规则" },
+        component: FirewallView,
+        meta: { title: "网络白名单", permission: "firewall.view" },
       },
       {
         path: "nodes",

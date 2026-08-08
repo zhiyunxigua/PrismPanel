@@ -45,3 +45,30 @@ func TestRestrictedTicketBindsMethodAndPaths(t *testing.T) {
 		t.Fatal("expected destination path to be allowed")
 	}
 }
+
+func TestTicketSourceBindingAndSessionRevocation(t *testing.T) {
+	manager := NewManager()
+	created, err := manager.CreateWithOptions("console.read", "lobby", time.Minute, 1, TicketOptions{
+		ClientIP: "2001:db8::10", SessionID: "session-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ConsumeFrom(created.Token, "console.read", "lobby", "2001:db8::11"); err == nil {
+		t.Fatal("expected source mismatch rejection")
+	}
+	if _, err := manager.ConsumeFrom(created.Token, "console.read", "lobby", "2001:db8::10"); err != nil {
+		t.Fatal(err)
+	}
+
+	revoked, err := manager.CreateWithOptions("console.read", "lobby", time.Minute, 1, TicketOptions{
+		SessionID: "session-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.RevokeSession("session-a")
+	if _, err := manager.Consume(revoked.Token, "console.read", "lobby"); err == nil {
+		t.Fatal("expected session revocation to invalidate ticket")
+	}
+}

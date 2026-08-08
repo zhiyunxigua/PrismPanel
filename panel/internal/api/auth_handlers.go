@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
+	"time"
 
 	"PrismPanel/internal/store"
 )
@@ -85,10 +88,27 @@ func (s *Server) handleSession(writer http.ResponseWriter, request *http.Request
 	})
 }
 
+func (s *Server) handleClientIP(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, "GET")
+		return
+	}
+	ip, ok := s.directAccessSourceIP(request)
+	if !ok {
+		writeRequestError(writer, apiError("CLIENT_IP_UNAVAILABLE", "无法安全确定客户端 IP，请检查面板可信代理配置"))
+		return
+	}
+	writeSuccess(writer, map[string]string{"ip": ip})
+}
+
 func (s *Server) handleLogout(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		methodNotAllowed(writer, "POST")
 		return
+	}
+	sessionID := ""
+	if tokenHash := currentSession(request).TokenHash; len(tokenHash) > 0 {
+		sessionID = hex.EncodeToString(tokenHash)
 	}
 	cookie, _ := request.Cookie(s.config.Auth.CookieName)
 	if cookie != nil {
@@ -96,9 +116,27 @@ func (s *Server) handleLogout(writer http.ResponseWriter, request *http.Request)
 			s.logger.Error("revoke session", "error", err)
 		}
 	}
+	if sessionID != "" {
+		go s.revokeSessionDirectAccess(sessionID)
+	}
 	s.clearSessionCookie(writer)
 	s.record(request, "auth.logout", currentSession(request).User.ID, nil, nil)
 	writeSuccess(writer, map[string]any{})
+}
+
+func (s *Server) revokeSessionDirectAccess(sessionID string) {
+	for _, nodeID := range s.connections.NodeIDs() {
+		nodeID := nodeID
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.connections.Call(ctx, nodeID, "firewall.grants.revoke_session", map[string]string{
+				"session_id": sessionID,
+			}, nil); err != nil {
+				s.logger.Debug("revoke direct-access grants after logout", "node_id", nodeID, "error", err)
+			}
+		}()
+	}
 }
 
 func (s *Server) handlePassword(writer http.ResponseWriter, request *http.Request) {
@@ -150,6 +188,47 @@ func clientIP(request *http.Request) string {
 		return host
 	}
 	return request.RemoteAddr
+}
+
+func (s *Server) directAccessSourceIP(request *http.Request) (string, bool) {
+	remote, ok := requestAddressIP(request.RemoteAddr)
+	if !ok {
+		return "", false
+	}
+	forwarded := strings.TrimSpace(request.Header.Get("X-Forwarded-For"))
+	if forwarded == "" {
+		return remote.String(), true
+	}
+	if !s.config.Security.IsTrustedProxy(remote) {
+		return "", false
+	}
+	forwardedAddresses := strings.Split(forwarded, ",")
+	for index := len(forwardedAddresses) - 1; index >= 0; index-- {
+		candidate, valid := parseAddressIP(forwardedAddresses[index])
+		if !valid {
+			return "", false
+		}
+		if !s.config.Security.IsTrustedProxy(candidate) {
+			return candidate.String(), true
+		}
+	}
+	return "", false
+}
+
+func requestAddressIP(remoteAddress string) (netip.Addr, bool) {
+	host, _, err := net.SplitHostPort(remoteAddress)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return parseAddressIP(host)
+}
+
+func parseAddressIP(value string) (netip.Addr, bool) {
+	address, err := netip.ParseAddr(strings.TrimSpace(value))
+	if err != nil || !address.IsValid() {
+		return netip.Addr{}, false
+	}
+	return address.Unmap(), true
 }
 
 func methodNotAllowed(writer http.ResponseWriter, allow string) {

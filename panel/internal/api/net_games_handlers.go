@@ -15,10 +15,16 @@ import (
 
 const (
 	netGamesPreferenceNamespace = "net_games"
-	netGamesPreferenceVersion   = 1
+	netGamesPreferenceVersion   = 2
+	defaultNetGameSelectionSize = 5
+	maxNetGameSelectionSize     = 20
 )
 
 type netGamesPreference struct {
+	SelectedGameIDs []string `json:"selected_game_ids"`
+}
+
+type legacyNetGamesPreference struct {
 	DisplayGameCount int      `json:"display_game_count"`
 	ForcedGameIDs    []string `json:"forced_game_ids"`
 }
@@ -145,14 +151,26 @@ func (s *Server) handleNetGameSeries(writer http.ResponseWriter, request *http.R
 	}
 	var series netgames.SeriesResponse
 	if err == nil {
-		series, err = s.netGames.Series(request.Context(), currentSession(request).User.ID,
-			preference.DisplayGameCount, preference.ForcedGameIDs, from, to)
+		series, err = s.netGames.Series(request.Context(), preference.SelectedGameIDs, from, to)
 	}
 	if err != nil {
 		writeRequestError(writer, netGamesPublicError(err))
 		return
 	}
 	writeSuccess(writer, series)
+}
+
+func (s *Server) handleNetGameCatalog(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, "GET")
+		return
+	}
+	catalog, err := s.netGames.Catalog(request.Context())
+	if err != nil {
+		writeRequestError(writer, netGamesPublicError(err))
+		return
+	}
+	writeSuccess(writer, catalog)
 }
 
 func (s *Server) handleNetGame(writer http.ResponseWriter, request *http.Request) {
@@ -170,14 +188,10 @@ func (s *Server) handleNetGame(writer http.ResponseWriter, request *http.Request
 		methodNotAllowed(writer, "GET")
 		return
 	}
-	preference, err := s.loadNetGamesPreference(request)
-	from, to, windowErr := netGameWindow(request)
-	if err == nil {
-		err = windowErr
-	}
+	from, to, err := netGameWindow(request)
 	var game netgames.GameResponse
 	if err == nil {
-		game, err = s.netGames.Game(request.Context(), parts[0], preference.DisplayGameCount, preference.ForcedGameIDs, from, to)
+		game, err = s.netGames.Game(request.Context(), parts[0], from, to)
 	}
 	if err != nil {
 		writeRequestError(writer, netGamesPublicError(err))
@@ -246,17 +260,32 @@ func (s *Server) handleNetGamePreference(writer http.ResponseWriter, request *ht
 }
 
 func (s *Server) loadNetGamesPreference(request *http.Request) (netGamesPreference, error) {
-	preference := defaultNetGamesPreference()
 	record, err := s.store.GetUserPreference(request.Context(), currentSession(request).User.ID, netGamesPreferenceNamespace)
 	if errors.Is(err, store.ErrNotFound) {
-		return preference, nil
+		return s.defaultNetGamesPreference(request)
 	}
 	if err != nil {
-		return preference, err
+		return netGamesPreference{}, err
 	}
 	if len(record.Settings) == 0 {
-		return preference, nil
+		return s.defaultNetGamesPreference(request)
 	}
+	if record.SchemaVersion < netGamesPreferenceVersion {
+		var legacy legacyNetGamesPreference
+		if err := json.Unmarshal(record.Settings, &legacy); err != nil {
+			return netGamesPreference{}, apiError("INVALID_REQUEST", "网络游戏偏好设置格式无效")
+		}
+		legacy, err = normalizeLegacyNetGamesPreference(legacy)
+		if err != nil {
+			return netGamesPreference{}, err
+		}
+		ids, err := s.netGames.ResolveSelection(request.Context(), legacy.DisplayGameCount, legacy.ForcedGameIDs)
+		if err != nil {
+			return netGamesPreference{}, err
+		}
+		return netGamesPreference{SelectedGameIDs: ids}, nil
+	}
+	preference := defaultNetGamesPreference()
 	if err := json.Unmarshal(record.Settings, &preference); err != nil {
 		return defaultNetGamesPreference(), apiError("INVALID_REQUEST", "网络游戏偏好设置格式无效")
 	}
@@ -264,37 +293,57 @@ func (s *Server) loadNetGamesPreference(request *http.Request) (netGamesPreferen
 }
 
 func defaultNetGamesPreference() netGamesPreference {
-	return netGamesPreference{DisplayGameCount: 10, ForcedGameIDs: []string{}}
+	return netGamesPreference{SelectedGameIDs: []string{}}
 }
 
 func normalizeNetGamesPreference(input netGamesPreference) (netGamesPreference, error) {
-	if input.DisplayGameCount == 0 {
-		input.DisplayGameCount = 10
-	}
-	if input.DisplayGameCount < 1 || input.DisplayGameCount > 20 {
-		return netGamesPreference{}, apiError("INVALID_REQUEST", "显示游戏数量必须在 1 到 20 之间")
-	}
-	seen := make(map[string]struct{}, len(input.ForcedGameIDs))
-	forced := make([]string, 0, len(input.ForcedGameIDs))
-	for _, raw := range input.ForcedGameIDs {
+	seen := make(map[string]struct{}, len(input.SelectedGameIDs))
+	selected := make([]string, 0, len(input.SelectedGameIDs))
+	for _, raw := range input.SelectedGameIDs {
 		id := strings.TrimSpace(raw)
 		if id == "" {
 			continue
 		}
 		if len(id) > 64 {
-			return netGamesPreference{}, apiError("INVALID_REQUEST", "强制显示游戏 ID 不能超过 64 个字符")
+			return netGamesPreference{}, apiError("INVALID_REQUEST", "游戏 ID 不能超过 64 个字符")
 		}
 		if _, exists := seen[id]; exists {
 			continue
 		}
 		seen[id] = struct{}{}
-		forced = append(forced, id)
+		selected = append(selected, id)
 	}
-	if len(forced) > input.DisplayGameCount {
-		return netGamesPreference{}, apiError("INVALID_REQUEST", "强制显示游戏数量不能超过显示游戏数量")
+	if len(selected) > maxNetGameSelectionSize {
+		return netGamesPreference{}, apiError("INVALID_REQUEST", "最多选择 20 个游戏")
 	}
-	input.ForcedGameIDs = forced
+	input.SelectedGameIDs = selected
 	return input, nil
+}
+
+func normalizeLegacyNetGamesPreference(input legacyNetGamesPreference) (legacyNetGamesPreference, error) {
+	if input.DisplayGameCount == 0 {
+		input.DisplayGameCount = 10
+	}
+	if input.DisplayGameCount < 1 || input.DisplayGameCount > maxNetGameSelectionSize {
+		return legacyNetGamesPreference{}, apiError("INVALID_REQUEST", "显示游戏数量必须在 1 到 20 之间")
+	}
+	preference, err := normalizeNetGamesPreference(netGamesPreference{SelectedGameIDs: input.ForcedGameIDs})
+	if err != nil {
+		return legacyNetGamesPreference{}, err
+	}
+	if len(preference.SelectedGameIDs) > input.DisplayGameCount {
+		return legacyNetGamesPreference{}, apiError("INVALID_REQUEST", "强制显示游戏数量不能超过显示游戏数量")
+	}
+	input.ForcedGameIDs = preference.SelectedGameIDs
+	return input, nil
+}
+
+func (s *Server) defaultNetGamesPreference(request *http.Request) (netGamesPreference, error) {
+	ids, err := s.netGames.ResolveSelection(request.Context(), defaultNetGameSelectionSize, nil)
+	if err != nil {
+		return netGamesPreference{}, err
+	}
+	return netGamesPreference{SelectedGameIDs: ids}, nil
 }
 
 func netGameWindow(request *http.Request) (time.Time, time.Time, error) {

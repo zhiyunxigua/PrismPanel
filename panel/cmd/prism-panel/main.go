@@ -22,6 +22,7 @@ import (
 	"PrismPanel/internal/netgames"
 	"PrismPanel/internal/nodes"
 	panelplugins "PrismPanel/internal/plugins"
+	"PrismPanel/internal/schedule"
 	"PrismPanel/internal/secret"
 	"PrismPanel/internal/store"
 )
@@ -108,6 +109,22 @@ func run() error {
 		}
 	})
 	connectionManager.SetEventCallback(func(nodeID, eventType string, data json.RawMessage) {
+		if eventType == "operator.drift" {
+			var event struct {
+				InstanceID    string `json:"instance_id"`
+				Revision      uint64 `json:"revision"`
+				RestoredCount int    `json:"restored_count"`
+				RemovedCount  int    `json:"removed_count"`
+			}
+			if err := json.Unmarshal(data, &event); err != nil {
+				slog.Error("decode operator drift event", "node_id", nodeID, "error", err)
+				return
+			}
+			slog.Warn("corrected Minecraft operator drift",
+				"node_id", nodeID, "instance_id", event.InstanceID, "revision", event.Revision,
+				"restored_count", event.RestoredCount, "removed_count", event.RemovedCount)
+			return
+		}
 		if eventType != "file.operation_result" {
 			return
 		}
@@ -151,9 +168,11 @@ func run() error {
 	metricStore := panelmetrics.NewStore()
 	panelmetrics.NewCollector(connectionManager, metricStore, slog.Default()).Start(ctx)
 	netGameService.Start(ctx)
+	scheduler := schedule.NewService(repository, connectionManager, cfg.Minecraft.ManageOperators, slog.Default())
+	scheduler.Start(ctx)
 	httpServer := api.NewServer(
 		cfg, authService, repository, nodeService, connectionManager, metricStore,
-		pluginRepository, netGameService, slog.Default(),
+		pluginRepository, netGameService, scheduler, slog.Default(),
 	)
 	serverError := make(chan error, 1)
 	go func() {

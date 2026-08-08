@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
+	"gopkg.in/yaml.v3"
 )
 
 func TestDatabaseConfigDSN(t *testing.T) {
@@ -31,5 +32,21 @@ func TestDatabaseConfigRejectsUnsafePrefix(t *testing.T) {
 	}
 	if err := input.Validate(); err == nil {
 		t.Fatal("accepted an unsafe table prefix")
+	}
+}
+
+func TestDefaultManagesOperators(t *testing.T) {
+	if !Default().Minecraft.ManageOperators {
+		t.Fatal("operator management should default to enabled")
+	}
+}
+
+func TestConfigCanDisableOperatorManagement(t *testing.T) {
+	cfg := Default()
+	if err := yaml.Unmarshal([]byte("minecraft:\n  manage_operators: false\n"), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Minecraft.ManageOperators {
+		t.Fatal("operator management should respect an explicit false value")
 	}
 }

@@ -39,14 +39,35 @@ func TestPrefixStatementNewPluginAndSelectionTables(t *testing.T) {
 		`proxy_sync_rules`,
 		`plugin_deploy_preferences`,
 		`user_preferences`,
+		`scheduled_tasks`,
+		`scheduled_task_targets`,
+		`task_runs`,
+		`task_run_targets`,
 		`net_games`,
 		`net_game_collection_runs`,
 		`net_game_observations`,
+		`operator_state`,
+		`operators`,
 	} {
 		statement := prefixStatement(`DELETE FROM `+table, `prism_`)
 		quotedTable := string(rune(96)) + `prism_` + table + string(rune(96))
 		if !strings.Contains(statement, quotedTable) {
 			t.Fatalf(`missing prefixed table %q in %q`, table, statement)
+		}
+	}
+}
+
+func TestNormalizeMinecraftUUID(t *testing.T) {
+	const expected = "123e4567-e89b-12d3-a456-426614174000"
+	for _, input := range []string{expected, "123E4567E89B12D3A456426614174000"} {
+		actual, err := NormalizeMinecraftUUID(input)
+		if err != nil || actual != expected {
+			t.Fatalf("NormalizeMinecraftUUID(%q) = %q, %v", input, actual, err)
+		}
+	}
+	for _, input := range []string{"", "not-a-uuid", "123e4567-e89b-12d3-a456-42661417400z"} {
+		if _, err := NormalizeMinecraftUUID(input); err == nil {
+			t.Fatalf("expected %q to be rejected", input)
 		}
 	}
 }

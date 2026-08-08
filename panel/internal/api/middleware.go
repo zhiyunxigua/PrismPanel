@@ -49,7 +49,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) requireSuperAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return s.requireAuth(func(writer http.ResponseWriter, request *http.Request) {
 		if !currentSession(request).User.IsSuperAdmin() {
-			writeRequestError(writer, apiError("FORBIDDEN", "仅超级管理员可以管理用户"))
+			writeRequestError(writer, apiError("FORBIDDEN", "仅超级管理员可以执行此操作"))
 			return
 		}
 		next(writer, request)

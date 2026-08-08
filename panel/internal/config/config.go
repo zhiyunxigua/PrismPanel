@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,11 +19,12 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Auth     AuthConfig     `yaml:"auth"`
-	Security SecurityConfig `yaml:"security"`
-	Frontend Frontend       `yaml:"frontend"`
+	Server    ServerConfig    `yaml:"server"`
+	Database  DatabaseConfig  `yaml:"database"`
+	Auth      AuthConfig      `yaml:"auth"`
+	Security  SecurityConfig  `yaml:"security"`
+	Minecraft MinecraftConfig `yaml:"minecraft"`
+	Frontend  Frontend        `yaml:"frontend"`
 }
 
 type ServerConfig struct {
@@ -49,8 +51,13 @@ type AuthConfig struct {
 }
 
 type SecurityConfig struct {
-	MasterKeyFile  string   `yaml:"master_key_file"`
-	AllowedOrigins []string `yaml:"allowed_origins"`
+	MasterKeyFile     string   `yaml:"master_key_file"`
+	AllowedOrigins    []string `yaml:"allowed_origins"`
+	TrustedProxyCIDRs []string `yaml:"trusted_proxy_cidrs"`
+}
+
+type MinecraftConfig struct {
+	ManageOperators bool `yaml:"manage_operators"`
 }
 
 type Frontend struct {
@@ -77,8 +84,10 @@ func Default() Config {
 			AllowedOrigins: []string{
 				"wails://wails.localhost", "http://wails.localhost", "https://wails.localhost",
 			},
+			TrustedProxyCIDRs: []string{},
 		},
-		Frontend: Frontend{Directory: "../frontend/dist"},
+		Minecraft: MinecraftConfig{ManageOperators: true},
+		Frontend:  Frontend{Directory: "../frontend/dist"},
 	}
 }
 
@@ -183,7 +192,46 @@ func (c SecurityConfig) Validate() error {
 		}
 		seen[origin] = struct{}{}
 	}
+	proxySeen := make(map[string]struct{}, len(c.TrustedProxyCIDRs))
+	for _, raw := range c.TrustedProxyCIDRs {
+		prefix, err := normalizeTrustedProxyCIDR(raw)
+		if err != nil {
+			return fmt.Errorf("security.trusted_proxy_cidrs: %w", err)
+		}
+		value := prefix.String()
+		if _, exists := proxySeen[value]; exists {
+			return fmt.Errorf("security.trusted_proxy_cidrs contains duplicate CIDR %q", value)
+		}
+		proxySeen[value] = struct{}{}
+	}
 	return nil
+}
+
+func (c SecurityConfig) IsTrustedProxy(address netip.Addr) bool {
+	address = address.Unmap()
+	for _, raw := range c.TrustedProxyCIDRs {
+		prefix, err := normalizeTrustedProxyCIDR(raw)
+		if err == nil && prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeTrustedProxyCIDR(raw string) (netip.Prefix, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || value != raw {
+		return netip.Prefix{}, errors.New("CIDR must not be empty or padded")
+	}
+	if address, err := netip.ParseAddr(value); err == nil {
+		address = address.Unmap()
+		return netip.PrefixFrom(address, address.BitLen()), nil
+	}
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil || prefix.Addr().Is4In6() {
+		return netip.Prefix{}, fmt.Errorf("invalid CIDR %q", raw)
+	}
+	return prefix.Masked(), nil
 }
 
 func NormalizeOrigin(raw string) (string, error) {

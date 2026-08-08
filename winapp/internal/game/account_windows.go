@@ -24,7 +24,6 @@ const (
 
 var ErrNotFound = errors.New("local NetEase account not found")
 
-
 var (
 	advapi32        = windows.NewLazySystemDLL("advapi32.dll")
 	procCredWriteW  = advapi32.NewProc("CredWriteW")

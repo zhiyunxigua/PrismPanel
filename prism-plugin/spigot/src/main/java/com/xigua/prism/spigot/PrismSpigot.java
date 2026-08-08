@@ -11,19 +11,24 @@ public final class PrismSpigot extends JavaPlugin {
     public void onEnable() {
         SpigotLogger logger = new SpigotLogger(getLogger());
         SpigotTelemetry telemetry = new SpigotTelemetry();
+        SpigotOperatorRegistry operators = new SpigotOperatorRegistry(this, logger);
         core = PrismCore.create(
                 "spigot",
                 logger,
                 new SpigotScheduler(this),
                 telemetry,
                 null,
-                null
+                null,
+                operators
         ).orElse(null);
         if (core == null) {
+            operators.close();
             getLogger().info("Prism daemon environment is unavailable; integration is disabled.");
             return;
         }
         Bukkit.getPluginManager().registerEvents(telemetry, this);
+        Bukkit.getPluginManager().registerEvents(operators, this);
+        operators.start();
         core.start();
     }
 

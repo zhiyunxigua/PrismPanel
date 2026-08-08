@@ -324,6 +324,40 @@ func (s *Store) NetGameObservationsBetween(ctx context.Context, from, to time.Ti
 	return result, rows.Err()
 }
 
+func (s *Store) NetGameObservationsBetweenForGames(ctx context.Context, from, to time.Time, gameIDs []string) ([]NetGameObservationPoint, error) {
+	ids := uniqueNetGameIDs(gameIDs)
+	if len(ids) == 0 {
+		return []NetGameObservationPoint{}, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+3)
+	args = append(args, NetGameRunSuccess, from.UTC(), to.UTC())
+	for index, id := range ids {
+		placeholders[index] = "?"
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id, g.game_id, r.started_at, o.online_count
+		FROM net_game_observations o
+		JOIN net_game_collection_runs r ON r.id = o.run_id
+		JOIN net_games g ON g.id = o.game_key
+		WHERE r.status = ? AND r.started_at >= ? AND r.started_at < ?
+		AND g.game_id IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY r.started_at ASC, g.game_id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]NetGameObservationPoint, 0)
+	for rows.Next() {
+		var point NetGameObservationPoint
+		if err := rows.Scan(&point.RunID, &point.GameID, &point.SampledAt, &point.OnlineCount); err != nil {
+			return nil, err
+		}
+		result = append(result, point)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) EarliestNetGameSuccess(ctx context.Context) (time.Time, error) {
 	var value time.Time
 	err := s.db.QueryRowContext(ctx, `SELECT started_at FROM net_game_collection_runs
@@ -338,21 +372,8 @@ func (s *Store) RankedGamesForRun(ctx context.Context, runID uint64, forcedIDs [
 	if limit < 1 || limit > 100 {
 		limit = 10
 	}
-	rows, err := s.db.QueryContext(ctx, netGameWithObservationQuery+` WHERE o.run_id = ?
-		ORDER BY o.online_count DESC, g.name ASC, g.game_id ASC`, runID)
+	items, err := s.AllRankedGamesForRun(ctx, runID)
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := make([]RankedNetGame, 0)
-	for rows.Next() {
-		item, err := readRankedNetGame(rows)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	forcedSet := make(map[string]struct{}, len(forcedIDs))
@@ -385,10 +406,48 @@ func (s *Store) RankedGamesForRun(ctx context.Context, runID uint64, forcedIDs [
 	if len(filtered) > limit {
 		filtered = filtered[:limit]
 	}
-	for index := range filtered {
-		filtered[index].Rank = index + 1
-	}
 	return filtered, nil
+}
+
+func (s *Store) AllRankedGamesForRun(ctx context.Context, runID uint64) ([]RankedNetGame, error) {
+	rows, err := s.db.QueryContext(ctx, netGameWithObservationQuery+` WHERE o.run_id = ?
+		ORDER BY o.online_count DESC, g.name ASC, g.game_id ASC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]RankedNetGame, 0)
+	for rows.Next() {
+		item, err := readRankedNetGame(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].Rank = index + 1
+	}
+	return items, nil
+}
+
+func uniqueNetGameIDs(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		id := strings.TrimSpace(value)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
 }
 
 func (s *Store) upsertNetGameObservation(ctx context.Context, tx *transaction, runID uint64, item NetGameListItem) error {

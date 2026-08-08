@@ -1,11 +1,14 @@
 package plugins
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"PrismPanel-daemon/internal/model"
 	serverservice "PrismPanel-daemon/internal/server"
@@ -17,6 +20,9 @@ type Service struct {
 	servers    *serverservice.Service
 	cache      *scanCache
 	pending    *pendingStore
+	baselineMu sync.RWMutex
+	baselines  map[string]map[string]string
+	changes    map[string]map[string]struct{}
 }
 
 func NewService(manager *supervisor.Manager, servers *serverservice.Service, dataDir string) (*Service, error) {
@@ -24,9 +30,27 @@ func NewService(manager *supervisor.Manager, servers *serverservice.Service, dat
 	if err != nil {
 		return nil, err
 	}
-	service := &Service{supervisor: manager, servers: servers, cache: newScanCache(), pending: pending}
-	manager.SetBeforeStart(service.applyPending)
+	service := &Service{
+		supervisor: manager, servers: servers, cache: newScanCache(), pending: pending,
+		baselines: make(map[string]map[string]string), changes: make(map[string]map[string]struct{}),
+	}
+	manager.SetBeforeStart(service.beforeStart)
 	return service, nil
+}
+
+func (s *Service) Start(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.scanRunningInstances()
+			}
+		}
+	}()
 }
 
 func (s *Service) List(instanceID string) (ListResult, error) {
@@ -35,9 +59,14 @@ func (s *Service) List(instanceID string) (ListResult, error) {
 		return ListResult{}, err
 	}
 	files, warnings := s.cache.scan(snapshot.Workspace, model.PluginTypeForPlatform(snapshot.Platform))
-	items, pending := merge(files, snapshot.Plugins, snapshot.PluginConnected)
+	changes := map[string]struct{}{}
+	if snapshot.State == supervisor.StateRunning {
+		changes = s.instanceChanges(instanceID)
+	}
+	items, pending := merge(files, snapshot.Plugins, snapshot.PluginConnected, changes)
+	pending = pending || snapshot.PluginOperationPending
 	if snapshot.PluginConnected {
-		s.supervisor.SetPluginPendingRestart(instanceID, pending)
+		s.supervisor.SetPluginRuntimeMismatch(instanceID, hasRuntimeMismatch(items))
 	} else {
 		pending = pending || snapshot.PluginPendingRestart
 	}
@@ -45,6 +74,20 @@ func (s *Service) List(instanceID string) (ListResult, error) {
 		InstanceID: instanceID, PluginConnected: snapshot.PluginConnected,
 		PendingRestart: pending, Items: items, Warnings: warnings,
 	}, nil
+}
+
+func hasRuntimeMismatch(items []Plugin) bool {
+	for _, item := range items {
+		if !item.PendingRestart {
+			continue
+		}
+		for _, issue := range item.Issues {
+			if issue != "file_changed_since_start" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type operationTarget struct {
@@ -93,14 +136,21 @@ func (s *Service) targets(serverID string) ([]operationTarget, func(), error) {
 }
 
 func ensureWorkspace(path string) error {
-	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("workspace is unavailable: %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("workspace is unavailable: %s", path)
 	}
 	return nil
 }
 
-func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool) ([]Plugin, bool) {
+func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool, changedFiles ...map[string]struct{}) ([]Plugin, bool) {
+	changes := map[string]struct{}{}
+	if len(changedFiles) > 0 && changedFiles[0] != nil {
+		changes = changedFiles[0]
+	}
 	items := make([]Plugin, len(files))
 	byFile := make(map[string]int)
 	byName := make(map[string][]int)
@@ -135,8 +185,7 @@ func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool
 					items = append(items, Plugin{
 						FilePlugin: FilePlugin{Name: loaded.Name, Version: loaded.Version, Main: loaded.Main,
 							Authors: append([]string(nil), loaded.Authors...), Enabled: loaded.Enabled},
-						Loaded: true, RuntimeVersion: loaded.Version, RuntimeMain: loaded.Main,
-						RuntimeSHA256: loaded.SHA256, Status: "runtime_only",
+						Loaded: true, RuntimeVersion: loaded.Version, RuntimeMain: loaded.Main, Status: "runtime_only",
 						Issues: []string{"runtime_plugin_source_unavailable"},
 					})
 					continue
@@ -144,9 +193,9 @@ func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool
 				items = append(items, Plugin{
 					FilePlugin: FilePlugin{Name: loaded.Name, Version: loaded.Version, Main: loaded.Main,
 						Authors: append([]string(nil), loaded.Authors...), SourceFile: filepath.Base(loaded.SourceFile),
-						SHA256: loaded.SHA256, Enabled: loaded.Enabled},
+						Enabled: loaded.Enabled},
 					Loaded: true, RuntimeVersion: loaded.Version, RuntimeMain: loaded.Main,
-					RuntimeSHA256: loaded.SHA256, Status: "uninstall_pending_restart",
+					Status: "uninstall_pending_restart",
 					Issues: []string{"runtime_plugin_file_missing"}, PendingRestart: true,
 				})
 				continue
@@ -156,7 +205,6 @@ func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool
 			item.Loaded = true
 			item.RuntimeVersion = loaded.Version
 			item.RuntimeMain = loaded.Main
-			item.RuntimeSHA256 = loaded.SHA256
 			if !item.Enabled {
 				item.Status = "disabled_pending_restart"
 				item.Issues = append(item.Issues, "disabled_file_still_loaded")
@@ -168,10 +216,6 @@ func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool
 			}
 			if item.Main != "" && loaded.Main != "" && item.Main != loaded.Main {
 				item.Issues = append(item.Issues, "main_class_mismatch")
-				item.PendingRestart = true
-			}
-			if item.SHA256 != "" && loaded.SHA256 != "" && item.SHA256 != loaded.SHA256 {
-				item.Issues = append(item.Issues, "sha256_mismatch")
 				item.PendingRestart = true
 			}
 			if item.Status == "" {
@@ -186,6 +230,15 @@ func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool
 	pending := false
 	for index := range items {
 		item := &items[index]
+		if _, changed := changes[strings.ToLower(item.SourceFile)]; changed {
+			item.Issues = append(item.Issues, "file_changed_since_start")
+			item.PendingRestart = true
+			if item.FilePresent && item.Loaded {
+				item.Status = "update_pending_restart"
+			} else if item.FilePresent && item.Enabled {
+				item.Status = "install_pending_restart"
+			}
+		}
 		if item.Status == "conflict" {
 			item.PendingRestart = connected
 		}
@@ -210,4 +263,73 @@ func merge(files []FilePlugin, runtime []supervisor.LoadedPlugin, connected bool
 		return strings.ToLower(items[left].Name) < strings.ToLower(items[right].Name)
 	})
 	return items, pending
+}
+
+func (s *Service) beforeStart(instanceID, workspace string) error {
+	if err := s.applyPending(instanceID, workspace); err != nil {
+		return err
+	}
+	baseline, err := scanEnabledPluginHashes(workspace)
+	if err != nil {
+		return fmt.Errorf("scan plugins before start: %w", err)
+	}
+	s.baselineMu.Lock()
+	s.baselines[instanceID] = baseline
+	delete(s.changes, instanceID)
+	s.baselineMu.Unlock()
+	s.supervisor.SetPluginFilesChanged(instanceID, false)
+	return nil
+}
+
+func (s *Service) scanRunningInstances() {
+	for _, snapshot := range s.supervisor.List() {
+		if snapshot.State != supervisor.StateRunning {
+			continue
+		}
+		baseline, exists := s.instanceBaseline(snapshot.InstanceID)
+		if !exists {
+			continue
+		}
+		current, err := scanEnabledPluginHashes(snapshot.Workspace)
+		if err != nil {
+			continue
+		}
+		changes := changedPluginFiles(baseline, current)
+		s.baselineMu.Lock()
+		s.changes[snapshot.InstanceID] = changes
+		s.baselineMu.Unlock()
+		s.supervisor.SetPluginFilesChanged(snapshot.InstanceID, len(changes) > 0)
+	}
+}
+
+func (s *Service) instanceBaseline(instanceID string) (map[string]string, bool) {
+	s.baselineMu.RLock()
+	baseline, exists := s.baselines[instanceID]
+	s.baselineMu.RUnlock()
+	return baseline, exists
+}
+
+func (s *Service) instanceChanges(instanceID string) map[string]struct{} {
+	s.baselineMu.RLock()
+	defer s.baselineMu.RUnlock()
+	result := make(map[string]struct{}, len(s.changes[instanceID]))
+	for name := range s.changes[instanceID] {
+		result[name] = struct{}{}
+	}
+	return result
+}
+
+func changedPluginFiles(baseline, current map[string]string) map[string]struct{} {
+	result := make(map[string]struct{})
+	for name, digest := range baseline {
+		if current[name] != digest {
+			result[name] = struct{}{}
+		}
+	}
+	for name, digest := range current {
+		if baseline[name] != digest {
+			result[name] = struct{}{}
+		}
+	}
+	return result
 }

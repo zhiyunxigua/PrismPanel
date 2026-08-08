@@ -379,6 +379,14 @@ func (c *Client) postSignedEntity(ctx context.Context, baseURL, path string, bod
 }
 
 func (c *Client) postSigned(ctx context.Context, baseURL, path string, bodyValue map[string]any) (map[string]any, error) {
+	return c.requestSigned(ctx, http.MethodPost, baseURL, path, bodyValue)
+}
+
+func (c *Client) deleteSigned(ctx context.Context, baseURL, path string, bodyValue map[string]any) (map[string]any, error) {
+	return c.requestSigned(ctx, http.MethodDelete, baseURL, path, bodyValue)
+}
+
+func (c *Client) requestSigned(ctx context.Context, method, baseURL, path string, bodyValue map[string]any) (map[string]any, error) {
 	if c.userID == "" || c.userToken == "" {
 		return nil, protocolError("NOT_LOGGED_IN", "X19 login has not completed")
 	}
@@ -390,7 +398,7 @@ func (c *Client) postSigned(ctx context.Context, baseURL, path string, bodyValue
 	for key, value := range computeRequestToken(path, body, c.userID, c.userToken) {
 		headers[key] = value
 	}
-	return c.postJSONBytes(ctx, strings.TrimRight(baseURL, "/")+path, []byte(body), headers)
+	return c.requestJSONBytes(ctx, method, strings.TrimRight(baseURL, "/")+path, []byte(body), headers)
 }
 
 func (c *Client) postForm(ctx context.Context, target string, params map[string]string) (map[string]any, error) {
@@ -406,9 +414,16 @@ func (c *Client) postJSON(ctx context.Context, target string, value any, headers
 }
 
 func (c *Client) postJSONBytes(ctx context.Context, target string, body []byte, headers map[string]string) (map[string]any, error) {
-	response, err := c.do(ctx, http.MethodPost, target, body, headers)
+	return c.requestJSONBytes(ctx, http.MethodPost, target, body, headers)
+}
+
+func (c *Client) requestJSONBytes(ctx context.Context, method, target string, body []byte, headers map[string]string) (map[string]any, error) {
+	response, err := c.do(ctx, method, target, body, headers)
 	if err != nil {
 		return nil, err
+	}
+	if len(bytes.TrimSpace(response)) == 0 {
+		return map[string]any{"code": 0}, nil
 	}
 	var decoded map[string]any
 	if err := decodeJSON(response, &decoded); err != nil {

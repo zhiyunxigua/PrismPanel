@@ -51,6 +51,8 @@ func (m *Manager) startLocked(current *instance) error {
 	instanceID := current.cfg.InstanceID
 	workspace := current.cfg.Workspace
 	current.mu.Unlock()
+	sessionID := randomSessionID()
+	current.resetConsole(sessionID)
 	m.beforeStartMu.RLock()
 	beforeStart := m.beforeStart
 	m.beforeStartMu.RUnlock()
@@ -66,7 +68,6 @@ func (m *Manager) startLocked(current *instance) error {
 	current.mu.Unlock()
 	m.publishState(current)
 
-	sessionID := randomSessionID()
 	pluginToken, err := randomPluginToken()
 	if err != nil {
 		m.markStartFailed(current, err)
@@ -102,6 +103,8 @@ func (m *Manager) startLocked(current *instance) error {
 	current.pluginReport = PluginReport{}
 	current.pluginCapabilities = nil
 	current.pluginPendingRestart = false
+	current.pluginRuntimeMismatch = false
+	current.pluginFilesChanged = false
 	current.cpuPercent = nil
 	current.memoryBytes = nil
 	current.startedAt = &now
@@ -234,7 +237,6 @@ func (m *Manager) waitProcess(current *instance, cmd *exec.Cmd, done chan struct
 		}
 	}
 	shouldRestart := !expected && current.managed && current.cfg.Process.AutoRestart && m.allowAutoRestartLocked(current)
-	close(done)
 	current.mu.Unlock()
 	if pluginConnection != nil {
 		pluginConnection.Close()
@@ -245,6 +247,7 @@ func (m *Manager) waitProcess(current *instance, cmd *exec.Cmd, done chan struct
 		current.addConsole("system", "process exited")
 	}
 	m.publishState(current)
+	close(done)
 	if shouldRestart {
 		instanceID := current.snapshot().InstanceID
 		time.AfterFunc(2*time.Second, func() {

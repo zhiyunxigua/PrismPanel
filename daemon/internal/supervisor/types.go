@@ -45,7 +45,6 @@ type LoadedPlugin struct {
 	Authors    []string `json:"authors,omitempty"`
 	Enabled    bool     `json:"enabled"`
 	SourceFile string   `json:"source_file,omitempty"`
-	SHA256     string   `json:"sha256,omitempty"`
 }
 
 type PluginReport struct {
@@ -61,40 +60,42 @@ type PluginReport struct {
 }
 
 type Snapshot struct {
-	InstanceID           string           `json:"instance_id"`
-	ServerID             string           `json:"server_id"`
-	ServerType           string           `json:"server_type"`
-	Platform             string           `json:"platform"`
-	Slot                 int              `json:"slot,omitempty"`
-	Name                 string           `json:"name"`
-	Workspace            string           `json:"workspace"`
-	State                State            `json:"state"`
-	PID                  int              `json:"pid,omitempty"`
-	SessionID            string           `json:"session_id,omitempty"`
-	ConfiguredPort       int              `json:"configured_port"`
-	FilePort             *int             `json:"file_port"`
-	RuntimePort          *int             `json:"runtime_port"`
-	PendingRestart       bool             `json:"pending_restart"`
-	PluginPendingRestart bool             `json:"plugin_pending_restart"`
-	DeploymentLocked     bool             `json:"deployment_locked"`
-	StartedAt            *time.Time       `json:"started_at,omitempty"`
-	LastError            string           `json:"last_error,omitempty"`
-	ConsoleSequence      uint64           `json:"console_sequence"`
-	CPUPercent           *float64         `json:"cpu_percent,omitempty"`
-	MemoryBytes          *uint64          `json:"memory_bytes,omitempty"`
-	PluginConnected      bool             `json:"plugin_connected"`
-	PluginCapabilities   []string         `json:"plugin_capabilities,omitempty"`
-	ProxySync            *ProxySyncStatus `json:"proxy_sync,omitempty"`
-	PluginLastSeen       *time.Time       `json:"plugin_last_seen_at,omitempty"`
-	TPS                  *float64         `json:"tps,omitempty"`
-	MSPT                 *float64         `json:"mspt,omitempty"`
-	OnlinePlayers        *int             `json:"online_players,omitempty"`
-	MaxPlayers           *int             `json:"max_players,omitempty"`
-	JVMHeapUsed          *uint64          `json:"jvm_heap_used_bytes,omitempty"`
-	JVMHeapMax           *uint64          `json:"jvm_heap_max_bytes,omitempty"`
-	JVMThreads           *int             `json:"jvm_threads,omitempty"`
-	Players              []PlayerSnapshot `json:"players,omitempty"`
-	Plugins              []LoadedPlugin   `json:"plugins,omitempty"`
+	InstanceID             string              `json:"instance_id"`
+	ServerID               string              `json:"server_id"`
+	ServerType             string              `json:"server_type"`
+	Platform               string              `json:"platform"`
+	Slot                   int                 `json:"slot,omitempty"`
+	Name                   string              `json:"name"`
+	Workspace              string              `json:"workspace"`
+	State                  State               `json:"state"`
+	PID                    int                 `json:"pid,omitempty"`
+	SessionID              string              `json:"session_id,omitempty"`
+	ConfiguredPort         int                 `json:"configured_port"`
+	FilePort               *int                `json:"file_port"`
+	RuntimePort            *int                `json:"runtime_port"`
+	PendingRestart         bool                `json:"pending_restart"`
+	PluginPendingRestart   bool                `json:"plugin_pending_restart"`
+	PluginOperationPending bool                `json:"-"`
+	DeploymentLocked       bool                `json:"deployment_locked"`
+	StartedAt              *time.Time          `json:"started_at,omitempty"`
+	LastError              string              `json:"last_error,omitempty"`
+	ConsoleSequence        uint64              `json:"console_sequence"`
+	CPUPercent             *float64            `json:"cpu_percent,omitempty"`
+	MemoryBytes            *uint64             `json:"memory_bytes,omitempty"`
+	PluginConnected        bool                `json:"plugin_connected"`
+	PluginCapabilities     []string            `json:"plugin_capabilities,omitempty"`
+	ProxySync              *ProxySyncStatus    `json:"proxy_sync,omitempty"`
+	OperatorSync           *OperatorSyncStatus `json:"operator_sync,omitempty"`
+	PluginLastSeen         *time.Time          `json:"plugin_last_seen_at,omitempty"`
+	TPS                    *float64            `json:"tps,omitempty"`
+	MSPT                   *float64            `json:"mspt,omitempty"`
+	OnlinePlayers          *int                `json:"online_players,omitempty"`
+	MaxPlayers             *int                `json:"max_players,omitempty"`
+	JVMHeapUsed            *uint64             `json:"jvm_heap_used_bytes,omitempty"`
+	JVMHeapMax             *uint64             `json:"jvm_heap_max_bytes,omitempty"`
+	JVMThreads             *int                `json:"jvm_threads,omitempty"`
+	Players                []PlayerSnapshot    `json:"players,omitempty"`
+	Plugins                []LoadedPlugin      `json:"plugins,omitempty"`
 }
 
 type ring struct {
@@ -115,6 +116,10 @@ func (r *ring) add(line ConsoleLine) {
 	r.lines = append(r.lines, line)
 }
 
+func (r *ring) clear() {
+	r.lines = r.lines[:0]
+}
+
 func (r *ring) after(sequence uint64) []ConsoleLine {
 	result := make([]ConsoleLine, 0, len(r.lines))
 	for _, line := range r.lines {
@@ -129,38 +134,41 @@ type instance struct {
 	op sync.Mutex
 	mu sync.RWMutex
 
-	cfg                  model.InstanceConfig
-	managed              bool
-	state                State
-	cmd                  *exec.Cmd
-	stdin                io.WriteCloser
-	done                 chan struct{}
-	expectedExit         bool
-	sessionID            string
-	sequence             uint64
-	console              *ring
-	subscribers          map[uint64]chan ConsoleLine
-	nextSubID            uint64
-	pid                  int
-	runtimePort          *int
-	runtimeEncoding      string
-	cpuPercent           *float64
-	memoryBytes          *uint64
-	startedAt            *time.Time
-	lastError            string
-	restarts             []time.Time
-	pluginTokenHash      [32]byte
-	pluginTokenSet       bool
-	pluginGeneration     uint64
-	pluginConnected      bool
-	pluginLastSeen       *time.Time
-	pluginReport         PluginReport
-	pluginCapabilities   []string
-	pluginConnection     *PluginConnection
-	proxyCatalog         *ProxyBackendCatalog
-	proxySync            ProxySyncStatus
-	pluginPendingRestart bool
-	deploymentLocked     bool
+	cfg                   model.InstanceConfig
+	managed               bool
+	state                 State
+	cmd                   *exec.Cmd
+	stdin                 io.WriteCloser
+	done                  chan struct{}
+	expectedExit          bool
+	sessionID             string
+	sequence              uint64
+	console               *ring
+	subscribers           map[uint64]chan ConsoleLine
+	nextSubID             uint64
+	pid                   int
+	runtimePort           *int
+	runtimeEncoding       string
+	cpuPercent            *float64
+	memoryBytes           *uint64
+	startedAt             *time.Time
+	lastError             string
+	restarts              []time.Time
+	pluginTokenHash       [32]byte
+	pluginTokenSet        bool
+	pluginGeneration      uint64
+	pluginConnected       bool
+	pluginLastSeen        *time.Time
+	pluginReport          PluginReport
+	pluginCapabilities    []string
+	pluginConnection      *PluginConnection
+	proxyCatalog          *ProxyBackendCatalog
+	proxySync             ProxySyncStatus
+	operatorSync          OperatorSyncStatus
+	pluginPendingRestart  bool
+	pluginRuntimeMismatch bool
+	pluginFilesChanged    bool
+	deploymentLocked      bool
 }
 
 func newInstance(cfg model.InstanceConfig, consoleCapacity int) *instance {
@@ -177,33 +185,57 @@ func (i *instance) addConsole(stream, content string) ConsoleLine {
 		Type: "console.line", InstanceID: i.cfg.InstanceID, SessionID: i.sessionID,
 		Sequence: i.sequence, Stream: stream, Timestamp: time.Now().UTC(), Content: content,
 	}
+	i.publishConsoleLocked(line)
+	i.mu.Unlock()
+	return line
+}
+
+func (i *instance) resetConsole(sessionID string) ConsoleLine {
+	i.mu.Lock()
+	i.sessionID = sessionID
+	i.sequence++
+	i.console.clear()
+	line := ConsoleLine{
+		Type: "console.reset", InstanceID: i.cfg.InstanceID, SessionID: sessionID,
+		Sequence: i.sequence, Stream: "system", Timestamp: time.Now().UTC(),
+	}
+	i.publishConsoleLocked(line)
+	i.mu.Unlock()
+	return line
+}
+
+func (i *instance) publishConsoleLocked(line ConsoleLine) {
 	i.console.add(line)
-	for _, subscriber := range i.subscribers {
+	for id, subscriber := range i.subscribers {
 		select {
 		case subscriber <- line:
 		default:
+			delete(i.subscribers, id)
+			close(subscriber)
 		}
 	}
-	i.mu.Unlock()
-	return line
 }
 
 func (i *instance) snapshot() Snapshot {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	filePort, _ := readServerPort(i.cfg.Workspace)
+	pluginPendingRestart := i.pluginPendingRestart || i.pluginRuntimeMismatch ||
+		(i.state == StateRunning && i.pluginFilesChanged)
 	snapshot := Snapshot{
 		InstanceID: i.cfg.InstanceID, ServerID: i.cfg.ServerID, ServerType: i.cfg.ServerType, Platform: i.cfg.Platform,
 		Slot: i.cfg.Slot, Name: i.cfg.Name, Workspace: i.cfg.Workspace, State: i.state,
 		PID: i.pid, SessionID: i.sessionID, ConfiguredPort: i.cfg.Port, FilePort: filePort,
-		RuntimePort: copyInt(i.runtimePort), PendingRestart: i.pluginPendingRestart || i.runtimePort != nil &&
+		RuntimePort: copyInt(i.runtimePort), PendingRestart: pluginPendingRestart || i.runtimePort != nil &&
 			(*i.runtimePort != i.cfg.Port || i.runtimeEncoding != i.cfg.Console.Encoding),
-		PluginPendingRestart: i.pluginPendingRestart,
-		DeploymentLocked:     i.deploymentLocked,
-		StartedAt:            i.startedAt, LastError: i.lastError, ConsoleSequence: i.sequence,
+		PluginPendingRestart:   pluginPendingRestart,
+		PluginOperationPending: i.pluginPendingRestart,
+		DeploymentLocked:       i.deploymentLocked,
+		StartedAt:              i.startedAt, LastError: i.lastError, ConsoleSequence: i.sequence,
 		CPUPercent: copyFloat64(i.cpuPercent), MemoryBytes: copyUint64(i.memoryBytes),
 		PluginConnected: i.pluginConnected, PluginCapabilities: append([]string(nil), i.pluginCapabilities...),
 		PluginLastSeen: copyTime(i.pluginLastSeen), ProxySync: copyProxySync(i.proxySync),
+		OperatorSync: copyOperatorSync(i.operatorSync),
 	}
 	if i.pluginConnected {
 		snapshot.TPS = copyFloat64(i.pluginReport.TPS)
@@ -252,6 +284,14 @@ func copyTime(value *time.Time) *time.Time {
 }
 
 func copyProxySync(value ProxySyncStatus) *ProxySyncStatus {
+	if value.State == "" {
+		return nil
+	}
+	copied := value
+	return &copied
+}
+
+func copyOperatorSync(value OperatorSyncStatus) *OperatorSyncStatus {
 	if value.State == "" {
 		return nil
 	}

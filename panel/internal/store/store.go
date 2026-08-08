@@ -36,7 +36,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Store, error) {
 }
 
 var logicalTablePattern = regexp.MustCompile(
-	`\b(user_permission_overrides|group_permissions|user_preferences|user_groups|sessions|users|nodes|audit_logs|file_operations|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences|net_game_observations|net_game_collection_runs|net_games)\b`,
+	`\b(user_permission_overrides|group_permissions|user_preferences|user_groups|sessions|users|nodes|audit_logs|file_operations|operator_state|operators|scheduled_task_targets|scheduled_tasks|task_run_targets|task_runs|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences|net_game_observations|net_game_collection_runs|net_games)\b`,
 )
 
 type database struct {
@@ -154,9 +154,10 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			('admin','server.view'),('admin','server.create'),('admin','server.configure'),('admin','server.deploy'),('admin','server.delete'),
 			('admin','instance.start'),('admin','instance.stop'),('admin','instance.restart'),('admin','instance.kill'),
 			('admin','console.read'),('admin','console.command'),('admin','file.read'),('admin','file.write'),('admin','file.delete'),
-			('admin','player.view'),('admin','player.kick'),('admin','player.message'),('admin','player.transfer'),('admin','player.whitelist.manage'),('admin','player.op.manage'),
+			('admin','player.view'),('admin','player.kick'),('admin','player.message'),('admin','player.transfer'),('admin','player.whitelist.manage'),
 			('admin','plugin.view'),('admin','plugin.upload'),('admin','plugin.deploy'),('admin','plugin.remove'),
 			('admin','firewall.view'),('admin','firewall.manage'),('admin','task.view'),('admin','task.cancel'),('admin','task.retry'),
+			('admin','schedule.view'),('admin','schedule.manage'),
 			('admin','alert.view'),('admin','alert.acknowledge'),('admin','audit.view'),
 			('admin','user.view'),('admin','user.create'),('admin','user.update'),('admin','user.delete'),('admin','user.password.reset'),('admin','user.sessions.revoke'),
 			('operator','dashboard.view'),('operator','node.view'),('operator','server.view'),('operator','server.deploy'),
@@ -164,8 +165,9 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			('operator','console.read'),('operator','console.command'),('operator','file.read'),('operator','file.write'),('operator','file.delete'),
 			('operator','player.view'),('operator','player.kick'),('operator','player.message'),('operator','player.transfer'),('operator','player.whitelist.manage'),
 			('operator','plugin.view'),('operator','plugin.deploy'),('operator','task.view'),('operator','alert.view'),
+			('operator','schedule.view'),('operator','schedule.manage'),
 			('observer','dashboard.view'),('observer','node.view'),('observer','server.view'),('observer','console.read'),('observer','file.read'),
-			('observer','player.view'),('observer','plugin.view'),('observer','firewall.view'),('observer','task.view'),('observer','alert.view')`,
+			('observer','player.view'),('observer','plugin.view'),('observer','firewall.view'),('observer','task.view'),('observer','schedule.view'),('observer','alert.view')`,
 		`CREATE TABLE IF NOT EXISTS user_permission_overrides (
 			user_id CHAR(32) CHARACTER SET ascii NOT NULL,
 			permission_code VARCHAR(64) CHARACTER SET ascii NOT NULL,
@@ -215,6 +217,26 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			KEY idx_audit_resource (resource_type, resource_id, created_at),
 			KEY idx_audit_action (action, created_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS operator_state (
+			id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+			panel_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			revision BIGINT UNSIGNED NOT NULL DEFAULT 0,
+			initialized BOOLEAN NOT NULL DEFAULT FALSE,
+			updated_at DATETIME(6) NOT NULL,
+			UNIQUE KEY uq_operator_state_panel_id (panel_id),
+			CONSTRAINT chk_operator_state_singleton CHECK (id = 1)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`INSERT IGNORE INTO operator_state (id, panel_id, revision, initialized, updated_at)
+			VALUES (1, LOWER(REPLACE(UUID(), '-', '')), 0, FALSE, CURRENT_TIMESTAMP(6))`,
+		`CREATE TABLE IF NOT EXISTS operators (
+			uuid CHAR(36) CHARACTER SET ascii NOT NULL PRIMARY KEY,
+			name VARCHAR(64) NOT NULL DEFAULT '',
+			created_by_user_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			created_by_username VARCHAR(64) NOT NULL,
+			created_at DATETIME(6) NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			KEY idx_operators_name (name)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS file_operations (
 			id CHAR(32) CHARACTER SET ascii NOT NULL PRIMARY KEY,
 			request_id CHAR(32) CHARACTER SET ascii NOT NULL,
@@ -236,6 +258,74 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			detail JSON NULL,
 			KEY idx_file_operations_status (status, expires_at),
 			KEY idx_file_operations_actor (actor_user_id, created_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS scheduled_tasks (
+			id CHAR(32) CHARACTER SET ascii NOT NULL PRIMARY KEY,
+			name VARCHAR(100) NOT NULL,
+			enabled BOOLEAN NOT NULL,
+			schedule_type VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			schedule_config JSON NOT NULL,
+			timezone VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			action_type VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			action_payload TEXT NOT NULL,
+			next_run_at DATETIME(6) NULL,
+			last_run_at DATETIME(6) NULL,
+			created_by_user_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			created_by_username VARCHAR(64) NOT NULL,
+			created_by_display_name VARCHAR(100) NOT NULL,
+			created_at DATETIME(6) NOT NULL,
+			updated_at DATETIME(6) NOT NULL,
+			UNIQUE KEY uq_scheduled_tasks_name (name),
+			KEY idx_scheduled_tasks_due (enabled, next_run_at),
+			KEY idx_scheduled_tasks_updated (updated_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS scheduled_task_targets (
+			task_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			node_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			node_name VARCHAR(100) NOT NULL,
+			server_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			instance_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			instance_name VARCHAR(100) NOT NULL,
+			PRIMARY KEY (task_id, node_id, instance_id),
+			KEY idx_scheduled_task_targets_node (node_id, instance_id),
+			CONSTRAINT fk_scheduled_task_targets_task FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS task_runs (
+			id CHAR(32) CHARACTER SET ascii NOT NULL PRIMARY KEY,
+			scheduled_task_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			task_name VARCHAR(100) NOT NULL,
+			trigger_type VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			status VARCHAR(32) CHARACTER SET ascii NOT NULL,
+			action_type VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			action_payload TEXT NOT NULL,
+			scheduled_for DATETIME(6) NULL,
+			created_at DATETIME(6) NOT NULL,
+			started_at DATETIME(6) NULL,
+			finished_at DATETIME(6) NULL,
+			total_targets INT UNSIGNED NOT NULL,
+			success_targets INT UNSIGNED NOT NULL DEFAULT 0,
+			failed_targets INT UNSIGNED NOT NULL DEFAULT 0,
+			actor_user_id CHAR(32) CHARACTER SET ascii NOT NULL DEFAULT '',
+			actor_username VARCHAR(64) NOT NULL DEFAULT '',
+			actor_display_name VARCHAR(100) NOT NULL DEFAULT '',
+			KEY idx_task_runs_created (created_at, id),
+			KEY idx_task_runs_schedule (scheduled_task_id, created_at),
+			KEY idx_task_runs_status (status, created_at)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS task_run_targets (
+			run_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			node_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			node_name VARCHAR(100) NOT NULL,
+			instance_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			instance_name VARCHAR(100) NOT NULL,
+			status VARCHAR(16) CHARACTER SET ascii NOT NULL,
+			started_at DATETIME(6) NULL,
+			finished_at DATETIME(6) NULL,
+			error_code VARCHAR(64) CHARACTER SET ascii NOT NULL DEFAULT '',
+			error_message VARCHAR(500) NOT NULL DEFAULT '',
+			PRIMARY KEY (run_id, node_id, instance_id),
+			KEY idx_task_run_targets_status (status, started_at),
+			CONSTRAINT fk_task_run_targets_run FOREIGN KEY (run_id) REFERENCES task_runs(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS plugin_artifacts_v2 (
 			plugin_type VARCHAR(16) CHARACTER SET ascii NOT NULL,

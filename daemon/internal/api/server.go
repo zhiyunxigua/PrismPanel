@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log/slog"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"PrismPanel-daemon/internal/deployment"
 	"PrismPanel-daemon/internal/eventbus"
 	fileservice "PrismPanel-daemon/internal/files"
+	firewallservice "PrismPanel-daemon/internal/firewall"
 	"PrismPanel-daemon/internal/model"
 	pluginservice "PrismPanel-daemon/internal/plugins"
 	"PrismPanel-daemon/internal/protocol"
@@ -38,6 +40,7 @@ type Server struct {
 	deployments *deployment.Manager
 	plugins     *pluginservice.Service
 	files       *fileservice.Service
+	firewall    *firewallservice.Service
 	hub         *controlHub
 	http        *http.Server
 	startedAt   time.Time
@@ -54,17 +57,19 @@ func NewServer(
 	deployments *deployment.Manager,
 	plugins *pluginservice.Service,
 	files *fileservice.Service,
+	firewallManager *firewallservice.Service,
 	events *eventbus.Bus,
 	logger *slog.Logger,
 ) *Server {
 	api := &Server{
 		config: cfg, secret: mainSecret, nodeID: nodeID, servers: servers, supervisor: manager,
-		tickets: tickets, deployments: deployments, plugins: plugins, files: files,
+		tickets: tickets, deployments: deployments, plugins: plugins, files: files, firewall: firewallManager,
 		hub: newControlHub(), startedAt: time.Now().UTC(), logger: logger,
 	}
 	events.Subscribe(api.hub.broadcast)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", api.handleHealth)
+	mux.HandleFunc("/", api.handleRoot)
 	mux.HandleFunc("/api/v1/ws/control", api.handleControl)
 	mux.HandleFunc("/api/v1/ws/console", api.handleConsole)
 	mux.HandleFunc("/api/v1/ws/plugin", api.handlePlugin)
@@ -99,6 +104,46 @@ func (s *Server) handleHealth(writer http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (s *Server) handleRoot(writer http.ResponseWriter, request *http.Request) {
+	if request.URL.Path != "/" {
+		http.NotFound(writer, request)
+		return
+	}
+	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		writer.Header().Set("Allow", "GET, HEAD")
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodeID := html.EscapeString(strings.TrimSpace(s.nodeID))
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	if request.Method == http.MethodHead {
+		return
+	}
+	_, _ = fmt.Fprintf(writer, `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prism 守护进程</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f6f4;color:#1d2721}
+main{width:min(560px,calc(100%% - 48px));padding:40px;background:#fff;border:1px solid #d8dfd9;border-radius:8px;box-shadow:0 10px 30px #18251d14}
+h1{margin:14px 0 8px;font-size:28px}p{margin:0 0 24px;color:#5e6a62;line-height:1.6}
+.badge{display:inline-block;color:#27713c;font-size:12px;letter-spacing:.08em}
+dl{margin:0;display:grid;grid-template-columns:100px 1fr;gap:10px;font-size:14px}
+dt{color:#6c776f}dd{margin:0;overflow-wrap:anywhere}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#214b2d}
+@media(prefers-color-scheme:dark){body{background:#141815;color:#e8eee9}main{background:#1d241f;border-color:#354239}p,dt{color:#aab6ad}}
+</style>
+</head>
+<body><main><span class="badge">PRISM DAEMON</span><h1>守护进程已启动</h1>
+<p>请返回 PrismPanel，在节点管理中添加此守护进程。</p>
+<dl><dt>节点 ID</dt><dd><code>%s</code></dd></dl></main></body>
+</html>`, nodeID)
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("X-Content-Type-Options", "nosniff")
@@ -125,7 +170,25 @@ func secretsEqual(left, right string) bool {
 	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
 }
 
+func (s *Server) capabilities() []string {
+	capabilities := []string{
+		"server.manage", "instance.lifecycle", "console", "deployment",
+		"plugin.telemetry", "plugin.manage", "proxy.backends", "player.transfer", "operators.manage",
+		"metrics", "files",
+	}
+	if s.firewall != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		status := s.firewall.Status(ctx)
+		cancel()
+		if status.Supported {
+			capabilities = append(capabilities, "firewall.manage")
+		}
+	}
+	return capabilities
+}
+
 func (s *Server) handleControl(writer http.ResponseWriter, request *http.Request) {
+	clientSource := s.requestSourceIP(request)
 	conn, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
 		return
@@ -145,7 +208,7 @@ func (s *Server) handleControl(writer http.ResponseWriter, request *http.Request
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(75 * time.Second))
 	})
-	client := newControlClient(conn)
+	client := newControlClient(conn, clientSource)
 	s.hub.add(client)
 	defer s.hub.remove(client)
 	go client.writeLoop()
@@ -153,12 +216,8 @@ func (s *Server) handleControl(writer http.ResponseWriter, request *http.Request
 		Type: "auth.result", Success: boolPointer(true),
 		Data: map[string]any{
 			"node_id": s.nodeID, "version": Version, "protocol_version": ProtocolVersion,
-			"public_url": s.config.Server.PublicURL,
-			"capabilities": []string{
-				"server.manage", "instance.lifecycle", "console", "deployment",
-				"plugin.telemetry", "plugin.manage", "proxy.backends", "player.transfer",
-				"metrics", "files",
-			},
+			"public_url":   s.config.Server.PublicURL,
+			"capabilities": s.capabilities(),
 		},
 	})
 	client.enqueue(s.supervisor.SnapshotEvent())
@@ -177,7 +236,7 @@ func (s *Server) handleControl(writer http.ResponseWriter, request *http.Request
 }
 
 func (s *Server) handleControlRequest(client *controlClient, incoming protocol.Incoming) {
-	data, err := s.execute(incoming.Type, incoming.Data)
+	data, err := s.executeFrom(client.source, incoming.Type, incoming.Data)
 	if err != nil {
 		apiError := apperr.From(err)
 		if apiError.Code == "INTERNAL" {
@@ -190,6 +249,10 @@ func (s *Server) handleControlRequest(client *controlClient, incoming protocol.I
 }
 
 func (s *Server) execute(messageType string, raw json.RawMessage) (any, error) {
+	return s.executeFrom("", messageType, raw)
+}
+
+func (s *Server) executeFrom(callerSource, messageType string, raw json.RawMessage) (any, error) {
 	switch messageType {
 	case "server.list":
 		return s.servers.List(), nil
@@ -247,6 +310,32 @@ func (s *Server) execute(messageType string, raw json.RawMessage) (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		return map[string]any{}, s.supervisor.TransferPlayer(ctx, input)
+	case "operators.replace":
+		var input supervisor.OperatorSource
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		return s.supervisor.ReplaceOperatorSource(ctx, input)
+	case "operators.source.remove":
+		var input struct {
+			PanelID string `json:"panel_id"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		return s.supervisor.RemoveOperatorSource(ctx, input.PanelID)
+	case "operators.status":
+		var input struct {
+			PanelID string `json:"panel_id"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		return s.supervisor.OperatorStatus(input.PanelID), nil
 	case "server.get":
 		var input struct {
 			ServerID string `json:"server_id"`
@@ -318,6 +407,89 @@ func (s *Server) execute(messageType string, raw json.RawMessage) (any, error) {
 			return nil, invalidJSON(err)
 		}
 		return map[string]any{}, s.supervisor.Command(input.InstanceID, input.Command)
+	case "firewall.status":
+		if s.firewall == nil {
+			return nil, apperr.New("FIREWALL_UNSUPPORTED", "当前守护进程未初始化防火墙服务")
+		}
+		ctx, cancel := firewallCommandContext()
+		defer cancel()
+		return s.firewall.Status(ctx), nil
+	case "firewall.list":
+		if s.firewall == nil {
+			return nil, apperr.New("FIREWALL_UNSUPPORTED", "当前守护进程未初始化防火墙服务")
+		}
+		ctx, cancel := firewallCommandContext()
+		defer cancel()
+		return s.firewall.View(ctx), nil
+	case "firewall.rule.create":
+		if s.firewall == nil {
+			return nil, apperr.New("FIREWALL_UNSUPPORTED", "当前守护进程未初始化防火墙服务")
+		}
+		var input firewallservice.CreateRuleInput
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		ctx, cancel := firewallCommandContext()
+		defer cancel()
+		return s.firewall.CreateRule(ctx, input)
+	case "firewall.rule.update":
+		if s.firewall == nil {
+			return nil, apperr.New("FIREWALL_UNSUPPORTED", "当前守护进程未初始化防火墙服务")
+		}
+		var input struct {
+			RuleID           string                    `json:"rule_id"`
+			ExpectedRevision int64                     `json:"expected_revision"`
+			Rule             firewallservice.RuleInput `json:"rule"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		ctx, cancel := firewallCommandContext()
+		defer cancel()
+		return s.firewall.UpdateRule(ctx, input.RuleID, firewallservice.UpdateRuleInput{
+			ExpectedRevision: input.ExpectedRevision, Rule: input.Rule,
+		})
+	case "firewall.rule.delete":
+		if s.firewall == nil {
+			return nil, apperr.New("FIREWALL_UNSUPPORTED", "当前守护进程未初始化防火墙服务")
+		}
+		var input struct {
+			RuleID           string `json:"rule_id"`
+			ExpectedRevision int64  `json:"expected_revision"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		ctx, cancel := firewallCommandContext()
+		defer cancel()
+		return s.firewall.DeleteRule(ctx, input.RuleID, firewallservice.DeleteRuleInput{
+			ExpectedRevision: input.ExpectedRevision,
+		})
+	case "firewall.system.configure":
+		if s.firewall == nil {
+			return nil, apperr.New("FIREWALL_UNSUPPORTED", "当前守护进程未初始化防火墙服务")
+		}
+		var input firewallservice.ConfigureSystemInput
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		ctx, cancel := firewallCommandContext()
+		defer cancel()
+		return s.firewall.ConfigureSystem(ctx, callerSource, input)
+	case "firewall.grants.revoke_session":
+		if s.firewall == nil {
+			return nil, apperr.New("FIREWALL_UNSUPPORTED", "当前守护进程未初始化防火墙服务")
+		}
+		var input struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		s.tickets.RevokeSession(input.SessionID)
+		ctx, cancel := firewallCommandContext()
+		defer cancel()
+		return map[string]any{}, s.firewall.RevokeSessionGrants(ctx, input.SessionID)
 	case "ticket.create":
 		return s.createTicket(raw)
 	case "ticket.revoke":
@@ -383,9 +555,15 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 		OperationID  string   `json:"operation_id,omitempty"`
 		Overwrite    bool     `json:"overwrite,omitempty"`
 		Recursive    bool     `json:"recursive,omitempty"`
+		SourceIP     string   `json:"source_ip,omitempty"`
+		SessionID    string   `json:"session_id,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, invalidJSON(err)
+	}
+	if (input.SourceIP != "" || input.SessionID != "") &&
+		input.Scope != "console.read" && !strings.HasPrefix(input.Scope, "file.") {
+		return nil, apperr.New("INVALID_TICKET", "当前票据范围不支持直接访问授权")
 	}
 	if input.Scope == "plugin.upload" {
 		if _, err := s.supervisor.Get(input.InstanceID); err != nil {
@@ -403,6 +581,9 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			AllowOverwrite: input.Overwrite, TTL: time.Duration(input.TTLSeconds) * time.Second, MaxUses: 1,
 		})
 		if err != nil {
+			return nil, err
+		}
+		if err := s.prepareDirectTicket(created, input.SourceIP, input.SessionID); err != nil {
 			return nil, err
 		}
 		return map[string]any{
@@ -435,7 +616,7 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			"file.edit": http.MethodPut, "file.upload": http.MethodPost,
 			"file.import":   http.MethodPost,
 			"file.download": http.MethodGet, "file.create": http.MethodPost,
-			"file.move": http.MethodPost, "file.delete": http.MethodPost,
+			"file.move": http.MethodPost, "file.archive": http.MethodPost, "file.delete": http.MethodPost,
 		}
 		method, exists := allowed[input.Scope]
 		if !exists || (input.Method != "" && !strings.EqualFold(input.Method, method)) {
@@ -479,8 +660,12 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			OperationID: input.OperationID, MaxBytes: maxBytes, SHA256: input.SHA256,
 			AllowOverwrite: input.Overwrite, AllowRecursive: input.Recursive,
 			TTL: time.Duration(input.TTLSeconds) * time.Second, MaxUses: maxUses,
+			ClientIP: input.SourceIP, SessionID: input.SessionID,
 		})
 		if err != nil {
+			return nil, err
+		}
+		if err := s.prepareDirectTicket(created, input.SourceIP, input.SessionID); err != nil {
 			return nil, err
 		}
 		return map[string]any{
@@ -499,8 +684,13 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 	if input.TTLSeconds == 0 {
 		input.TTLSeconds = 120
 	}
-	created, err := s.tickets.Create(input.Scope, input.InstanceID, time.Duration(input.TTLSeconds)*time.Second, 1)
+	created, err := s.tickets.CreateWithOptions(input.Scope, input.InstanceID, time.Duration(input.TTLSeconds)*time.Second, 1, ticket.TicketOptions{
+		ClientIP: input.SourceIP, SessionID: input.SessionID,
+	})
 	if err != nil {
+		return nil, err
+	}
+	if err := s.prepareDirectTicket(created, input.SourceIP, input.SessionID); err != nil {
 		return nil, err
 	}
 	return map[string]any{
@@ -510,7 +700,25 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 	}, nil
 }
 
+func (s *Server) prepareDirectTicket(created ticket.Ticket, source, sessionID string) error {
+	if strings.TrimSpace(source) == "" {
+		return nil
+	}
+	if s.firewall == nil {
+		s.tickets.Revoke(created.ID)
+		return apperr.New("FIREWALL_UNSUPPORTED", "当前守护进程未初始化防火墙服务")
+	}
+	ctx, cancel := firewallCommandContext()
+	defer cancel()
+	if err := s.firewall.GrantDirectAccess(ctx, source, strings.TrimSpace(sessionID), created.ID); err != nil {
+		s.tickets.Revoke(created.ID)
+		return err
+	}
+	return nil
+}
+
 func (s *Server) handleConsole(writer http.ResponseWriter, request *http.Request) {
+	clientSource := s.requestSourceIP(request)
 	conn, err := upgrader.Upgrade(writer, request, nil)
 	if err != nil {
 		return
@@ -531,7 +739,7 @@ func (s *Server) handleConsole(writer http.ResponseWriter, request *http.Request
 		})
 		return
 	}
-	if _, err := s.tickets.Consume(auth.Ticket, "console.read", auth.InstanceID); err != nil {
+	if _, err := s.tickets.ConsumeFrom(auth.Ticket, "console.read", auth.InstanceID, clientSource); err != nil {
 		_ = conn.WriteJSON(map[string]any{
 			"type": "auth.result", "success": false, "error": apperr.From(err),
 		})
@@ -550,9 +758,9 @@ func (s *Server) handleConsole(writer http.ResponseWriter, request *http.Request
 	if err := conn.WriteJSON(map[string]any{"type": "auth.result", "success": true}); err != nil {
 		return
 	}
-	for _, line := range history {
+	if len(history) > 0 {
 		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-		if err := conn.WriteJSON(line); err != nil {
+		if err := conn.WriteJSON(buildConsoleSnapshot(history, auth.AfterSequence)); err != nil {
 			return
 		}
 	}
@@ -579,6 +787,10 @@ func (s *Server) handleConsole(writer http.ResponseWriter, request *http.Request
 
 func invalidJSON(err error) error {
 	return apperr.Wrap("INVALID_REQUEST", "请求数据格式无效", err)
+}
+
+func firewallCommandContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 15*time.Second)
 }
 
 func boolPointer(value bool) *bool {

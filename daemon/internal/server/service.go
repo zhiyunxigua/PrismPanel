@@ -1,7 +1,11 @@
 package server
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"PrismPanel-daemon/internal/apperr"
@@ -65,12 +69,66 @@ func (s *Service) Create(cfg model.ServerConfig) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureServerWorkspace(cfg); err != nil {
+		_ = s.supervisor.RemoveServer(cfg.ServerID)
+		return nil, err
+	}
 	if err := s.store.Save(cfg); err != nil {
 		_ = s.supervisor.RemoveServer(cfg.ServerID)
 		return nil, apperr.Wrap("CONFIG_WRITE_FAILED", "服务器配置保存失败", err)
 	}
 	s.servers[cfg.ServerID] = cfg
 	return warnings, nil
+}
+
+func ensureServerWorkspace(cfg model.ServerConfig) error {
+	target := cfg.Workspace
+	if cfg.Type == "mirror" {
+		target = filepath.Join(cfg.RootPath, cfg.ImageDirectory)
+	}
+	if !filepath.IsAbs(target) {
+		return apperr.New("INVALID_CONFIG", "server workspace must be an absolute path")
+	}
+	absolute := filepath.Clean(target)
+	missing := make([]string, 0)
+	current := absolute
+	for {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return apperr.New("PATH_ESCAPE", "server workspace cannot contain symbolic links")
+			}
+			resolved, resolveErr := filepath.EvalSymlinks(current)
+			if resolveErr != nil || !samePath(current, resolved) {
+				return apperr.New("PATH_ESCAPE", "server workspace cannot contain symbolic links")
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return apperr.Wrap("FILE_WRITE_FAILED", "server workspace is unavailable", err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return apperr.New("INVALID_CONFIG", "server workspace has no available parent directory")
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+	for index := len(missing) - 1; index >= 0; index-- {
+		current = filepath.Join(current, missing[index])
+		if err := os.Mkdir(current, 0o750); err != nil {
+			return apperr.Wrap("FILE_WRITE_FAILED", "server workspace creation failed", err)
+		}
+	}
+	return nil
+}
+
+func samePath(left, right string) bool {
+	left, right = filepath.Clean(left), filepath.Clean(right)
+	if filepath.Separator == 92 {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func (s *Service) Update(serverID string, cfg model.ServerConfig) ([]string, error) {

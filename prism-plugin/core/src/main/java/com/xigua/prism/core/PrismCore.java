@@ -9,6 +9,7 @@ public final class PrismCore implements AutoCloseable {
     private final PlatformScheduler scheduler;
     private final TelemetryProvider telemetry;
     private final DaemonBridge bridge;
+    private final OperatorRegistry operatorRegistry;
     private final AtomicBoolean started = new AtomicBoolean(false);
     private AutoCloseable telemetryTask;
 
@@ -18,12 +19,16 @@ public final class PrismCore implements AutoCloseable {
             PlatformScheduler scheduler,
             TelemetryProvider telemetry,
             ProxyBackendRegistry backendRegistry,
-            PlayerTransferService transferService
+            PlayerTransferService transferService,
+            OperatorRegistry operatorRegistry
     ) {
         this.logger = logger;
         this.scheduler = scheduler;
         this.telemetry = telemetry;
-        this.bridge = new DaemonBridge(environment, logger, scheduler, backendRegistry, transferService);
+        this.operatorRegistry = operatorRegistry;
+        this.bridge = new DaemonBridge(
+                environment, logger, scheduler, backendRegistry, transferService, operatorRegistry
+        );
     }
 
     public static Optional<PrismCore> create(
@@ -34,9 +39,22 @@ public final class PrismCore implements AutoCloseable {
             ProxyBackendRegistry backendRegistry,
             PlayerTransferService transferService
     ) {
+        return create(platform, logger, scheduler, telemetry, backendRegistry, transferService, null);
+    }
+
+    public static Optional<PrismCore> create(
+            String platform,
+            PrismLogger logger,
+            PlatformScheduler scheduler,
+            TelemetryProvider telemetry,
+            ProxyBackendRegistry backendRegistry,
+            PlayerTransferService transferService,
+            OperatorRegistry operatorRegistry
+    ) {
         return PrismEnvironment.fromSystem(logger, platform)
                 .map(environment -> new PrismCore(
-                        environment, logger, scheduler, telemetry, backendRegistry, transferService
+                        environment, logger, scheduler, telemetry, backendRegistry, transferService,
+                        operatorRegistry
                 ));
     }
 
@@ -70,5 +88,12 @@ public final class PrismCore implements AutoCloseable {
             telemetryTask = null;
         }
         bridge.close();
+        if (operatorRegistry != null) {
+            try {
+                operatorRegistry.close();
+            } catch (Exception error) {
+                logger.error("Failed to stop operator management.", error);
+            }
+        }
     }
 }

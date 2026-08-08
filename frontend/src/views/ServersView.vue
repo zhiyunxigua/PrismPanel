@@ -1,12 +1,14 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Activity, Boxes, Cpu, MemoryStick, Network, Plus, RefreshCw, Search, Server, Users } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { request } from "../api";
 import { importArchive } from "../fileApi";
-import { hasPermission } from "../session";
+import { hasPermission, sessionState } from "../session";
 import ServerEditorDialog from "../components/servers/ServerEditorDialog.vue";
+import OperatorManagementPanel from "../components/operators/OperatorManagementPanel.vue";
+import { mergeOnlinePlayers } from "../components/operators/operator-management";
 
 const router = useRouter();
 const route = useRoute();
@@ -14,13 +16,17 @@ const loading = ref(false);
 const submitting = ref(false);
 const nodeContents = ref([]);
 const dialogOpen = ref(false);
+const activeSection = ref("servers");
 const search = ref("");
-const nodeFilter = ref(String(route.query.node_id || ""));
+const nodeMemoryKey = "prism:servers:last-node:" + (sessionState.user?.id || "anonymous");
+const queryNode = String(route.query.node_id || "");
+const nodeFilter = ref(queryNode || rememberedNode());
 const stateFilter = ref("");
 const typeFilter = ref("");
 let refreshTimer;
 
 const canCreate = computed(() => hasPermission("server.create"));
+const isSuperAdmin = computed(() => sessionState.user?.group_code === "super_admin");
 const nodeOptions = computed(() => nodeContents.value.map((item) => item.node));
 const rows = computed(() => nodeContents.value.flatMap((content) => (
   (content.servers || []).map((server) => ({
@@ -45,6 +51,7 @@ const runningCount = computed(() => rows.value.reduce(
   (total, row) => total + row.instances.filter((instance) => instance.state === "running").length,
   0,
 ));
+const onlinePlayers = computed(() => mergeOnlinePlayers(nodeContents.value));
 
 const stateLabels = {
   stopped: "已停止",
@@ -80,6 +87,7 @@ async function load(silent = false) {
   try {
     const data = await request("/api/v1/servers");
     nodeContents.value = data.nodes || [];
+    validateRememberedNode();
   } catch (error) {
     if (!silent) ElMessage.error(error.message);
   } finally {
@@ -87,15 +95,67 @@ async function load(silent = false) {
   }
 }
 
+function rememberedNode() {
+  try {
+    return window.localStorage.getItem(nodeMemoryKey) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberNode(value) {
+  try {
+    if (value) window.localStorage.setItem(nodeMemoryKey, value);
+    else window.localStorage.removeItem(nodeMemoryKey);
+  } catch {
+    // 浏览器禁用本地存储时仅跳过记忆，不影响筛选。
+  }
+}
+
+function validateRememberedNode() {
+  if (!nodeFilter.value) return;
+  const exists = nodeContents.value.some((content) => content.node.id === nodeFilter.value);
+  if (exists) {
+    rememberNode(nodeFilter.value);
+    return;
+  }
+  nodeFilter.value = "";
+  rememberNode("");
+  if (route.query.node_id) {
+    const query = { ...route.query };
+    delete query.node_id;
+    router.replace({ query });
+  }
+}
+
 async function createServer({ nodeId, config, archive, proxyRules, proxyTargets }) {
   submitting.value = true;
   let created = false;
   try {
-    const result = await request(`/api/v1/servers?node_id=${encodeURIComponent(nodeId)}`, {
+    const createURL = "/api/v1/servers?node_id=" + encodeURIComponent(nodeId)
+      + "&defer_auto_install=true";
+    const result = await request(createURL, {
       method: "POST",
       body: JSON.stringify(config),
     });
     created = true;
+    let imported = null;
+    if (archive) {
+      try {
+        imported = await importArchive({
+          node_id: nodeId,
+          resource_type: config.type === "mirror" ? "image" : "instance",
+          resource_id: config.server_id,
+          path: ".",
+          scope: "file.import",
+        }, archive);
+      } catch (error) {
+        throw new Error("压缩包导入失败：" + error.message);
+      }
+    }
+    const installURL = "/api/v1/servers/" + encodeURIComponent(config.server_id)
+      + "/plugins/auto-install?node_id=" + encodeURIComponent(nodeId);
+    const installResult = await request(installURL, { method: "POST" });
     if (["velocity", "bungee"].includes(config.platform) && Array.isArray(proxyRules)) {
       const query = "?node_id=" + encodeURIComponent(nodeId)
         + "&server_id=" + encodeURIComponent(config.server_id);
@@ -119,29 +179,27 @@ async function createServer({ nodeId, config, archive, proxyRules, proxyTargets 
     }
     dialogOpen.value = false;
     if (result?.server?.warnings?.length) ElMessage.warning(result.server.warnings.join("；"));
-    const failed = (result?.auto_install || []).filter((item) => !item.success);
+    const failed = (installResult?.auto_install || []).filter((item) => !item.success);
     if (failed.length) {
-      ElMessage.warning("服务器已创建，但有 " + failed.length + " 个自动安装插件失败，自动启动已阻止");
-    }
-    if (archive) {
-      try {
-        const imported = await importArchive({
-          node_id: nodeId,
-          resource_type: config.type === "mirror" ? "image" : "instance",
-          resource_id: config.server_id,
-          path: ".",
-          scope: "file.import",
-        }, archive);
-        ElMessage.success(`服务器已创建，已导入 ${imported.files} 个文件`);
-      } catch (error) {
-        ElMessage.error(`服务器已创建，但压缩包导入失败：${error.message}`);
-      }
+      const prefix = imported
+        ? "服务器已创建并成功解压，已导入 " + imported.files + " 个文件；"
+        : "服务器已创建；";
+      const autoStartNotice = installResult?.auto_start_blocked
+        ? "，自动启动已禁用"
+        : "，且无法自动禁用自动启动，请先检查配置";
+      ElMessage.warning(prefix + "但有 " + failed.length + " 个自动安装插件在重试后仍失败" + autoStartNotice);
+    } else if (imported) {
+      ElMessage.success("服务器已创建并成功解压，已导入 " + imported.files + " 个文件");
     } else {
       ElMessage.success("服务器已创建");
     }
     await load();
   } catch (error) {
-    ElMessage.error(created ? `服务器已创建，但后续处理失败：${error.message}` : error.message);
+    if (created) {
+      dialogOpen.value = false;
+      await load();
+    }
+    ElMessage.error(created ? "服务器已创建，但后续处理失败：" + error.message : error.message);
   } finally {
     submitting.value = false;
   }
@@ -193,52 +251,59 @@ onMounted(() => {
   load();
   refreshTimer = window.setInterval(() => load(true), 10000);
 });
+watch(nodeFilter, (value) => rememberNode(value));
 onBeforeUnmount(() => window.clearInterval(refreshTimer));
 </script>
 
 <template>
   <div class="content-stack">
     <div class="page-toolbar">
-      <div><h2>服务器</h2><p>{{ rows.length }} 个服务器组 · {{ runningCount }} 个运行实例</p></div>
+      <div>
+        <h2>{{ activeSection === "players" ? "玩家管理" : "服务器" }}</h2>
+        <p v-if="activeSection === 'players'">{{ onlinePlayers.length }} 名玩家在线 · 全服统一权限</p>
+        <p v-else>{{ rows.length }} 个服务器组 · {{ runningCount }} 个运行实例</p>
+      </div>
       <div class="toolbar-actions">
-        <el-tooltip content="刷新">
+        <el-tooltip v-if="activeSection === 'servers'" content="刷新">
           <el-button class="square-button" :loading="loading" aria-label="刷新" @click="load()">
             <RefreshCw v-if="!loading" :size="16" />
           </el-button>
         </el-tooltip>
-        <el-button v-if="canCreate" type="primary" @click="dialogOpen = true">
+        <el-button v-if="canCreate && activeSection === 'servers'" type="primary" @click="dialogOpen = true">
           <Plus :size="16" />新增服务器
         </el-button>
       </div>
     </div>
 
-    <el-alert
-      v-for="item in nodeErrors"
-      :key="item.node.id"
-      type="warning"
-      :closable="false"
-      show-icon
-      :title="item.node.name + '：' + item.error.message"
-    />
+    <el-tabs v-model="activeSection" class="management-tabs">
+      <el-tab-pane label="服务器组" name="servers">
+        <el-alert
+          v-for="item in nodeErrors"
+          :key="item.node.id"
+          type="warning"
+          :closable="false"
+          show-icon
+          :title="item.node.name + '：' + item.error.message"
+        />
 
-    <div class="table-toolbar server-filters">
-      <el-input v-model="search" class="search-input" clearable placeholder="搜索名称、ID 或端口">
-        <template #prefix><Search :size="15" /></template>
-      </el-input>
-      <el-select v-model="nodeFilter" class="status-filter" clearable placeholder="全部节点">
-        <el-option v-for="node in nodeOptions" :key="node.id" :label="node.name" :value="node.id" />
-      </el-select>
-      <el-select v-model="stateFilter" class="status-filter" clearable placeholder="全部状态">
-        <el-option v-for="(label, value) in stateLabels" :key="value" :label="label" :value="value" />
-      </el-select>
-      <el-select v-model="typeFilter" class="status-filter" clearable placeholder="全部类型">
-        <el-option label="普通服务器" value="ordinary" />
-        <el-option label="镜像服" value="mirror" />
-        <el-option label="代理服" value="proxy" />
-      </el-select>
-    </div>
+        <div class="table-toolbar server-filters">
+          <el-input v-model="search" class="search-input" clearable placeholder="搜索名称、ID 或端口">
+            <template #prefix><Search :size="15" /></template>
+          </el-input>
+          <el-select v-model="nodeFilter" class="status-filter" clearable placeholder="全部节点">
+            <el-option v-for="node in nodeOptions" :key="node.id" :label="node.name" :value="node.id" />
+          </el-select>
+          <el-select v-model="stateFilter" class="status-filter" clearable placeholder="全部状态">
+            <el-option v-for="(label, value) in stateLabels" :key="value" :label="label" :value="value" />
+          </el-select>
+          <el-select v-model="typeFilter" class="status-filter" clearable placeholder="全部类型">
+            <el-option label="普通服务器" value="ordinary" />
+            <el-option label="镜像服" value="mirror" />
+            <el-option label="代理服" value="proxy" />
+          </el-select>
+        </div>
 
-    <div v-loading="loading" class="server-group-grid">
+        <div v-loading="loading" class="server-group-grid">
       <button
         v-for="row in filteredRows"
         :key="row.node.id + ':' + row.server_id"
@@ -281,7 +346,12 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
         <Server :size="26" />
         <strong>暂无服务器</strong>
       </div>
-    </div>
+        </div>
+      </el-tab-pane>
+      <el-tab-pane v-if="isSuperAdmin" label="玩家管理" name="players" lazy>
+        <OperatorManagementPanel :online-players="onlinePlayers" :node-contents="nodeContents" />
+      </el-tab-pane>
+    </el-tabs>
   </div>
 
   <ServerEditorDialog

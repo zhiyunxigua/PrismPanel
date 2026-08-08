@@ -57,6 +57,7 @@ func (s *Server) handlePlugin(writer http.ResponseWriter, request *http.Request)
 	}
 	go writePluginCommands(conn, connection)
 	go s.supervisor.RestoreProxyBackends(auth.InstanceID)
+	go s.supervisor.RestoreOperators(auth.InstanceID)
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(35 * time.Second))
 		var message pluginMessage
@@ -81,6 +82,13 @@ func (s *Server) handlePlugin(writer http.ResponseWriter, request *http.Request)
 				Error:     message.Error,
 			})
 			err = nil
+		case "operator.drift":
+			var report supervisor.OperatorDriftReport
+			if decodeErr := json.Unmarshal(message.Data, &report); decodeErr != nil {
+				err = apperr.Wrap("INVALID_REQUEST", "OP 漂移报告格式无效", decodeErr)
+			} else {
+				err = connection.ReportOperatorDrift(report)
+			}
 		default:
 			err = apperr.New("UNKNOWN_COMMAND", "不支持的插件消息")
 		}
