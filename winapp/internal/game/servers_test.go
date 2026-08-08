@@ -37,13 +37,16 @@ func TestServerStoreUpdatePreservesIdentity(t *testing.T) {
 	}
 }
 
-func TestNormalizeServerInputRequiresCustomResourceDirectory(t *testing.T) {
-	_, err := normalizeServerInput(ServerConfigInput{
+func TestNormalizeServerInputAllowsEmptyCustomResourceDirectory(t *testing.T) {
+	server, err := normalizeServerInput(ServerConfigInput{
 		Name: "server", GameID: "4661334467366178884", IP: "127.0.0.1", Port: 25565,
 		Username: "Steve", Version: Version1_20,
 	})
-	if err == nil {
-		t.Fatal("missing custom resource directory should be rejected")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if server.ModDir != "" {
+		t.Fatalf("custom resource directory = %q, want empty", server.ModDir)
 	}
 }
 

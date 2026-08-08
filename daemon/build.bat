@@ -16,9 +16,10 @@ if errorlevel 1 (
 set "GOOS=%~1"
 set "GOARCH=%~2"
 set "CGO_ENABLED=0"
+if not defined APP_VERSION set "APP_VERSION=0.0.1"
 
-echo Building prism-daemon for %GOOS%/%GOARCH%...
-go build -trimpath -o "%~3" "./cmd/prism-daemon"
+echo Building prism-daemon %APP_VERSION% for %GOOS%/%GOARCH%...
+go build -trimpath -ldflags "-X PrismPanel-daemon/internal/api.Version=%APP_VERSION%" -o "%~3" "./cmd/prism-daemon"
 if errorlevel 1 (
     echo [ERROR] prism-daemon build failed for %GOOS%/%GOARCH%.
     exit /b 1

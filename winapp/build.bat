@@ -32,9 +32,10 @@ for %%I in ("%~1") do if not exist "%%~dpI" mkdir "%%~dpI"
 set "GOOS=windows"
 set "GOARCH=amd64"
 set "CGO_ENABLED=0"
+if not defined APP_VERSION set "APP_VERSION=0.0.1"
 
-echo Building PrismPanel WinApp for windows/amd64...
-go build -trimpath -tags "desktop,production" -ldflags "-s -w -H windowsgui" -o "%~1" .
+echo Building PrismPanel WinApp %APP_VERSION% for windows/amd64...
+go build -trimpath -tags "desktop,production" -ldflags "-s -w -H windowsgui -X main.appVersion=%APP_VERSION%" -o "%~1" .
 if errorlevel 1 (
     echo [ERROR] PrismPanel WinApp build failed.
     exit /b 1

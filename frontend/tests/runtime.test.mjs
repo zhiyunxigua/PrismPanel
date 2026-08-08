@@ -14,6 +14,7 @@ globalThis.window = {
 const {
   apiURL,
   consoleWebSocketURL,
+  checkWinAppUpdate,
   createGameServer,
   deleteGameServer,
   deleteNetEaseAccount,
@@ -24,12 +25,14 @@ const {
   gameVersions,
   isProxyURL,
   isWinApp,
+  installWinAppUpdate,
   joinGameServer,
   joinGameServerConfig,
   loginNetEaseAccount,
   loginSavedAccountWinApp,
   loginWinApp,
   netEaseAccount,
+  reloginNetEaseAccount,
   runtimeConfig,
   savedAccounts,
   selectGameModDirectory,
@@ -115,7 +118,10 @@ test("WinApp game operations use the Wails bridge", async () => {
   window.go = { main: { App: {
     NetEaseAccount: async () => ({ email: "test@example.com" }),
     LoginNetEaseAccount: async (...args) => { calls.push(["netease-login", ...args]); return { email: args[0] }; },
+    ReloginNetEaseAccount: async (...args) => { calls.push(["netease-relogin", ...args]); return { email: "test@example.com" }; },
     DeleteNetEaseAccount: async (...args) => { calls.push(["netease-delete", ...args]); },
+    CheckWinAppUpdate: async (...args) => { calls.push(["update-check", ...args]); return { update_available: false }; },
+    InstallWinAppUpdate: async (...args) => { calls.push(["update-install", ...args]); },
     GameVersions: async () => [{ label: "1.20.6", version: 1020006, java: "jdk21" }],
     GameServers: async () => [{ id: "server-a", name: "local" }],
     CreateGameServer: async (...args) => { calls.push(["create-server", ...args]); return { id: "server-b" }; },
@@ -131,6 +137,9 @@ test("WinApp game operations use the Wails bridge", async () => {
   assert.equal((await gameVersions())[0].label, "1.20.6");
   assert.equal((await gameServers())[0].id, "server-a");
   await loginNetEaseAccount("test@example.com", "secret");
+  await reloginNetEaseAccount();
+  await checkWinAppUpdate();
+  await installWinAppUpdate("0.0.2");
   await createGameServer({ name: "local" });
   await selectGameModDirectory();
   await gameServerRunning("server-a");
@@ -141,6 +150,9 @@ test("WinApp game operations use the Wails bridge", async () => {
   await deleteNetEaseAccount();
   assert.deepEqual(calls, [
     ["netease-login", "test@example.com", "secret"],
+    ["netease-relogin"],
+    ["update-check"],
+    ["update-install", "0.0.2"],
     ["create-server", { name: "local" }],
     ["select-dir"],
     ["running", "server-a"],

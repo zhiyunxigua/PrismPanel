@@ -19,6 +19,7 @@ import (
 
 type RuntimeConfig struct {
 	Mode          string `json:"mode"`
+	Version       string `json:"version"`
 	Configured    bool   `json:"configured"`
 	PanelURL      string `json:"panelUrl"`
 	APIBaseURL    string `json:"apiBaseUrl"`

@@ -481,6 +481,8 @@ func resourceType(action string) string {
 
 func riskLevel(action string) string {
 	switch {
+	case action == "winapp.release.publish":
+		return "critical"
 	case strings.HasPrefix(action, "firewall.system"):
 		return "critical"
 	case strings.HasPrefix(action, "firewall."):

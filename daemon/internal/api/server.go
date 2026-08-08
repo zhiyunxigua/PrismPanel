@@ -27,7 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const Version = "dev"
+var Version = "0.0.1"
 const ProtocolVersion = "1"
 
 type Server struct {

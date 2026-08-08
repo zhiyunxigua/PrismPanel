@@ -16,6 +16,7 @@ const ScheduledTasksView = () => import("./views/ScheduledTasksView.vue");
 const PluginsView = () => import("./views/PluginsView.vue");
 const NetGamesView = () => import("./views/NetGamesView.vue");
 const FirewallView = () => import("./views/FirewallView.vue");
+const WinAppUpdatesView = () => import("./views/WinAppUpdatesView.vue");
 
 const routes = [
   {
@@ -96,6 +97,12 @@ const routes = [
         component: NodeDetailView,
         meta: { title: "节点详情", permission: "node.view" },
       },
+      {
+        path: "winapp-updates",
+        name: "winapp-updates",
+        component: WinAppUpdatesView,
+        meta: { title: "客户端更新", superAdmin: true },
+      },
     ],
   },
   { path: "/:pathMatch(.*)*", redirect: "/" },
@@ -120,6 +127,7 @@ router.beforeEach(async (to) => {
     return { name: "login", query: { redirect: to.fullPath } };
   }
   if (to.meta.winAppOnly && !isWinApp()) return { name: "overview" };
+  if (to.meta.superAdmin && sessionState.user?.group_code !== "super_admin") return { name: "overview" };
   if (to.meta.permission) {
     const permissions = sessionState.user?.permissions || [];
     if (!permissions.includes("*") && !permissions.includes(to.meta.permission)) {

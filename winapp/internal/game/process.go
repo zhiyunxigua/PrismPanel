@@ -51,6 +51,19 @@ func (m *ProcessManager) Running(serverID string) bool {
 	return true
 }
 
+func (m *ProcessManager) AnyRunning() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for serverID, process := range m.processes {
+		if process == nil || process.cmd == nil || process.cmd.ProcessState != nil {
+			delete(m.processes, serverID)
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func (m *ProcessManager) Start(serverID string, request ProcessStartRequest) (GameProcess, error) {
 	m.mu.Lock()
 	if process := m.processes[serverID]; process != nil && process.cmd != nil && process.cmd.ProcessState == nil {
@@ -74,6 +87,7 @@ func (m *ProcessManager) Start(serverID string, request ProcessStartRequest) (Ga
 		return GameProcess{}, err
 	}
 	cmd := exec.Command(request.JavaPath, request.Args...)
+	hideProcessWindow(cmd)
 	cmd.Dir = request.WorkDir
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile

@@ -24,7 +24,10 @@ export async function updateSavedPasswordWinApp(username, password) { return cal
 
 export async function netEaseAccount() { return callWinApp("NetEaseAccount"); }
 export async function loginNetEaseAccount(email, password) { return callWinApp("LoginNetEaseAccount", email, password); }
+export async function reloginNetEaseAccount() { return callWinApp("ReloginNetEaseAccount"); }
 export async function deleteNetEaseAccount() { return callWinApp("DeleteNetEaseAccount"); }
+export async function checkWinAppUpdate() { return callWinApp("CheckWinAppUpdate"); }
+export async function installWinAppUpdate(version) { return callWinApp("InstallWinAppUpdate", version); }
 export async function gameVersions() { return callWinApp("GameVersions"); }
 export async function gameServers() { return callWinApp("GameServers"); }
 export async function createGameServer(input) { return callWinApp("CreateGameServer", input); }

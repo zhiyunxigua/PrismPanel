@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"PrismPanel/internal/auth"
+	"PrismPanel/internal/buildinfo"
 	"PrismPanel/internal/config"
 	"PrismPanel/internal/daemon"
 	panelmetrics "PrismPanel/internal/metrics"
@@ -24,6 +25,7 @@ import (
 	panelplugins "PrismPanel/internal/plugins"
 	"PrismPanel/internal/schedule"
 	"PrismPanel/internal/store"
+	"PrismPanel/internal/winappupdates"
 )
 
 type Server struct {
@@ -34,6 +36,7 @@ type Server struct {
 	nodes       *panelnodes.Service
 	metrics     *panelmetrics.Store
 	plugins     *panelplugins.Repository
+	winApp      *winappupdates.Repository
 	netGames    *netgames.Service
 	scheduler   *schedule.Service
 	fileProxies *fileProxyStore
@@ -58,13 +61,14 @@ func NewServer(
 	connectionManager *daemon.Manager,
 	metricStore *panelmetrics.Store,
 	pluginRepository *panelplugins.Repository,
+	winAppRepository *winappupdates.Repository,
 	netGameService *netgames.Service,
 	scheduler *schedule.Service,
 	logger *slog.Logger,
 ) *Server {
 	server := &Server{
 		config: cfg, auth: authService, store: repository, connections: connectionManager,
-		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, netGames: netGameService,
+		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, winApp: winAppRepository, netGames: netGameService,
 		scheduler: scheduler, fileProxies: newFileProxyStore(), logger: logger,
 	}
 	connectionManager.AddStatusCallback(func(_ string, status daemon.RuntimeStatus) {
@@ -117,6 +121,9 @@ func NewServer(
 	mux.HandleFunc("/api/v1/players/transfer", server.requireAuth(server.handlePlayerTransfer))
 	mux.HandleFunc("/api/v1/operators", server.requireSuperAdmin(server.handleOperators))
 	mux.HandleFunc("/api/v1/operators/", server.requireSuperAdmin(server.handleOperator))
+	mux.HandleFunc("/api/v1/winapp/update", server.handleWinAppUpdate)
+	mux.HandleFunc("/api/v1/winapp/releases", server.requireSuperAdmin(server.handleWinAppReleases))
+	mux.HandleFunc("/api/v1/winapp/releases/", server.handleWinAppReleaseDownload)
 	mux.HandleFunc("/api/v1/firewall/nodes", server.requireAuth(server.handleFirewall))
 	mux.HandleFunc("/api/v1/firewall/nodes/", server.requireAuth(server.handleFirewall))
 	mux.HandleFunc("/api/v1/files/authorize", server.requireAuth(server.handleFileAuthorize))
@@ -147,7 +154,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleHealth(writer http.ResponseWriter, _ *http.Request) {
-	writeSuccess(writer, map[string]any{"panel": "ok"})
+	writeSuccess(writer, map[string]any{"panel": "ok", "version": buildinfo.Version})
 }
 
 func frontendHandler(directory string) http.Handler {

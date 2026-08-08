@@ -15,6 +15,7 @@ import {
   loginNetEaseAccount,
   netGameLaunchOptions,
   netEaseAccount,
+  reloginNetEaseAccount,
   selectGameModDirectory,
   updateGameServer,
 } from "../runtime";
@@ -27,6 +28,7 @@ const loginDialogOpen = ref(false);
 const serverDialogOpen = ref(false);
 const progressDialogOpen = ref(false);
 const loginSubmitting = ref(false);
+const reloginSubmitting = ref(false);
 const serverSubmitting = ref(false);
 const account = ref(null);
 const servers = ref([]);
@@ -96,6 +98,19 @@ async function submitLogin() {
     ElMessage.error(error.message || "网易账号登录失败");
   } finally {
     loginSubmitting.value = false;
+  }
+}
+
+async function reloginNetEase() {
+  if (!hasNetEaseAccount.value || reloginSubmitting.value) return;
+  reloginSubmitting.value = true;
+  try {
+    account.value = await reloginNetEaseAccount();
+    ElMessage.success("网易账号已重新登录");
+  } catch (error) {
+    ElMessage.error(error.message || "网易账号重新登录失败");
+  } finally {
+    reloginSubmitting.value = false;
   }
 }
 
@@ -280,7 +295,6 @@ function validateServerForm() {
   if (!requireValue(serverForm.game_id, "请输入网络游戏 ID")) return false;
   if (!requireValue(serverForm.ip, "请输入服务器 IP")) return false;
   if (!requireValue(serverForm.username, "请输入角色用户名")) return false;
-  if (!requireValue(serverForm.mod_dir, "请选择自定义资源目录")) return false;
   if (port < 1 || port > 65535) {
     ElMessage.warning("端口必须在 1-65535 之间");
     return false;
@@ -322,7 +336,12 @@ function formatTime(value) {
         <strong>{{ hasNetEaseAccount ? "网易账号已登录" : "未登录网易账号" }}</strong>
         <span>{{ hasNetEaseAccount ? account.email : "点击顶部按钮登录后才能加入服务器" }}</span>
       </div>
-      <el-button v-if="hasNetEaseAccount" text type="danger" @click="removeNetEaseAccount">删除本地账号</el-button>
+      <div v-if="hasNetEaseAccount" class="account-strip-actions">
+        <el-button :loading="reloginSubmitting" @click="reloginNetEase">
+          <RefreshCw v-if="!reloginSubmitting" :size="15" />重新登录
+        </el-button>
+        <el-button text type="danger" :disabled="reloginSubmitting" @click="removeNetEaseAccount">删除本地账号</el-button>
+      </div>
     </section>
 
     <section class="server-list">
@@ -336,7 +355,7 @@ function formatTime(value) {
               <span>游戏 ID：{{ server.game_id }}</span>
               <span>角色：{{ server.username }}</span>
               <span>版本：{{ server.version_label }}</span>
-              <span>资源：{{ server.mod_dir }}</span>
+              <span v-if="server.mod_dir">资源：{{ server.mod_dir }}</span>
               <span>创建：{{ formatTime(server.created_at) }}</span>
             </div>
           </div>
@@ -411,9 +430,9 @@ function formatTime(value) {
           </el-select>
         </el-form-item>
         <el-form-item label="网易游戏版本"><el-input :model-value="serverForm.version ? String(serverForm.version) : '输入游戏 ID 后自动获取'" disabled /></el-form-item>
-        <el-form-item label="自定义资源目录" class="full-width-form-item">
+        <el-form-item label="自定义资源目录（可选）" class="full-width-form-item">
           <div class="path-input-row">
-            <el-input v-model="serverForm.mod_dir" placeholder="包含 mods/config/resourcepacks/shaderpacks 的目录" />
+            <el-input v-model="serverForm.mod_dir" placeholder="包含 mods/config/resourcepacks/shaderpacks 的目录" clearable />
             <el-button @click="chooseServerResourceDirectory"><FolderOpen :size="16" />浏览</el-button>
           </div>
         </el-form-item>
@@ -434,7 +453,8 @@ function formatTime(value) {
 .account-strip.disabled { color: #884c43; background: #fff7f5; }
 .account-strip strong, .account-strip span { display: block; }
 .account-strip span { margin-top: 3px; color: #68746d; font-size: 12px; }
-.account-strip .el-button { margin-left: auto; }
+.account-strip-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.account-strip-actions .el-button { margin-left: 0; }
 .server-list { display: grid; gap: 12px; }
 .server-card { display: flex; align-items: stretch; justify-content: space-between; gap: 16px; padding: 15px; background: #fff; border: 1px solid #dce2dd; border-radius: 6px; }
 .server-card-main { display: flex; gap: 13px; min-width: 0; }
@@ -456,5 +476,11 @@ function formatTime(value) {
 .launch-progress-message strong, .launch-progress-message span { display: block; }
 .launch-progress-message span { margin-top: 5px; color: #6e7871; font-size: 12px; }
 .launch-error { overflow: auto; margin: 0; padding: 10px; color: #8b2d24; background: #fff4f2; border: 1px solid #f2d0ca; border-radius: 6px; white-space: pre-wrap; }
-@media (max-width: 900px) { .server-card { flex-direction: column; } .server-card-actions { justify-content: flex-end; } .path-input-row { flex-direction: column; } }
+@media (max-width: 900px) {
+  .account-strip { align-items: flex-start; flex-wrap: wrap; }
+  .account-strip-actions { width: 100%; justify-content: flex-end; }
+  .server-card { flex-direction: column; }
+  .server-card-actions { justify-content: flex-end; }
+  .path-input-row { flex-direction: column; }
+}
 </style>

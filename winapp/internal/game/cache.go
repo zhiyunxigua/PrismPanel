@@ -200,6 +200,7 @@ func extractSevenZip(ctx context.Context, source, target string) error {
 
 func runArchiveExtractor(ctx context.Context, tool string, args ...string) error {
 	command := exec.CommandContext(ctx, tool, args...)
+	hideProcessWindow(command)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))

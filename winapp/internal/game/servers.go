@@ -131,7 +131,7 @@ func NewTransientServer(input ServerConfigInput) (ServerConfig, error) {
 }
 
 func NewTransientNetworkGame(input ServerConfigInput) (ServerConfig, error) {
-	server, err := normalizeServerInputForLaunch(input, true)
+	server, err := normalizeServerInputForLaunch(input)
 	if err != nil {
 		return ServerConfig{}, err
 	}
@@ -214,10 +214,10 @@ func (s ServerStore) save(servers []ServerConfig) error {
 }
 
 func normalizeServerInput(input ServerConfigInput) (ServerConfig, error) {
-	return normalizeServerInputForLaunch(input, true)
+	return normalizeServerInputForLaunch(input)
 }
 
-func normalizeServerInputForLaunch(input ServerConfigInput, requireModDir bool) (ServerConfig, error) {
+func normalizeServerInputForLaunch(input ServerConfigInput) (ServerConfig, error) {
 	name := strings.TrimSpace(input.Name)
 	ip := strings.TrimSpace(input.IP)
 	username := strings.TrimSpace(input.Username)
@@ -246,9 +246,6 @@ func normalizeServerInputForLaunch(input ServerConfigInput, requireModDir bool) 
 	}
 	if modDir != "" {
 		modDir = cleanOptionalPath(modDir)
-	}
-	if requireModDir && modDir == "" {
-		return ServerConfig{}, errors.New("custom resource directory is required")
 	}
 	if err := input.Version.Validate(); err != nil || input.Version == VersionBase {
 		return ServerConfig{}, errors.New("game version is required")
