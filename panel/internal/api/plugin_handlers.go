@@ -18,6 +18,14 @@ import (
 )
 
 func (s *Server) deployPluginBundle(request *http.Request, nodeID, serverID, path string, output any) error {
+	return s.deployPluginArchive(request, nodeID, serverID, path, "plugin.deploy", false, output)
+}
+
+func (s *Server) deployPluginConfigBundle(request *http.Request, nodeID, serverID, path string, output any) error {
+	return s.deployPluginArchive(request, nodeID, serverID, path, "plugin.config.deploy", true, output)
+}
+
+func (s *Server) deployPluginArchive(request *http.Request, nodeID, serverID, path, scope string, configOnly bool, output any) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -36,11 +44,14 @@ func (s *Server) deployPluginBundle(request *http.Request, nodeID, serverID, pat
 		Ticket string `json:"ticket"`
 	}
 	err = s.connections.Call(request.Context(), nodeID, "ticket.create", map[string]any{
-		"scope": "plugin.deploy", "instance_id": serverID, "ttl_seconds": 300,
+		"scope": scope, "instance_id": serverID, "ttl_seconds": 300,
 		"sha256": hex.EncodeToString(hash.Sum(nil)), "size": info.Size(),
 	}, &ticket)
 	if err != nil {
 		return err
+	}
+	if configOnly {
+		return s.connections.UploadPluginConfig(request.Context(), nodeID, ticket.Ticket, serverID, path, output)
 	}
 	return s.connections.UploadPlugin(request.Context(), nodeID, ticket.Ticket, serverID, path, output)
 }

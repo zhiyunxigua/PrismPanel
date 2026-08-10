@@ -21,7 +21,8 @@ type fileProxyGrant struct {
 	Scope        string
 	UserID       string
 	ExpiresAt    time.Time
-	used         bool
+	MaxUses      int
+	uses         int
 }
 
 type fileProxyStore struct {
@@ -34,6 +35,9 @@ func newFileProxyStore() *fileProxyStore {
 }
 
 func (s *fileProxyStore) Add(grant fileProxyGrant) (string, error) {
+	if grant.MaxUses <= 0 {
+		grant.MaxUses = 1
+	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -54,15 +58,17 @@ func (s *fileProxyStore) Consume(token, userID, nodeID, scope string) (fileProxy
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	grant := s.grants[token]
-	if grant == nil || grant.used || time.Now().After(grant.ExpiresAt) {
+	if grant == nil || grant.uses >= grant.MaxUses || time.Now().After(grant.ExpiresAt) {
 		delete(s.grants, token)
 		return fileProxyGrant{}, apiError("UNAUTHENTICATED", "文件代理凭证无效或已过期")
 	}
 	if grant.UserID != userID || grant.NodeID != nodeID || grant.Scope != scope {
 		return fileProxyGrant{}, apiError("FORBIDDEN", "文件代理凭证不允许当前操作")
 	}
-	grant.used = true
-	delete(s.grants, token)
+	grant.uses++
+	if grant.uses >= grant.MaxUses {
+		delete(s.grants, token)
+	}
 	return *grant, nil
 }
 
@@ -70,28 +76,30 @@ var fileScopePermissions = map[string]string{
 	"file.list": "file.read", "file.read": "file.read", "file.download": "file.read",
 	"file.edit": "file.write", "file.upload": "file.write", "file.create": "file.write",
 	"file.import": "file.write",
-	"file.move":   "file.write", "file.archive": "file.write", "file.delete": "file.delete",
+	"file.move":   "file.write", "file.copy": "file.write", "file.archive": "file.write", "file.delete": "file.delete",
 }
 
 var fileScopeOperations = map[string]string{
 	"file.list": "list", "file.read": "content", "file.download": "download",
 	"file.edit": "content", "file.upload": "upload", "file.create": "create",
 	"file.import": "import",
-	"file.move":   "move", "file.archive": "archive", "file.delete": "delete",
+	"file.move":   "move", "file.copy": "copy", "file.archive": "archive", "file.delete": "delete",
 }
 
 type fileAuthorizeInput struct {
-	NodeID       string   `json:"node_id"`
-	Scope        string   `json:"scope"`
-	ResourceType string   `json:"resource_type"`
-	ResourceID   string   `json:"resource_id"`
-	Path         string   `json:"path"`
-	Paths        []string `json:"paths,omitempty"`
-	Size         int64    `json:"size,omitempty"`
-	SHA256       string   `json:"sha256,omitempty"`
-	ForceProxy   bool     `json:"force_proxy,omitempty"`
-	Overwrite    bool     `json:"overwrite,omitempty"`
-	Recursive    bool     `json:"recursive,omitempty"`
+	NodeID          string   `json:"node_id"`
+	Scope           string   `json:"scope"`
+	ResourceType    string   `json:"resource_type"`
+	ResourceID      string   `json:"resource_id"`
+	Path            string   `json:"path"`
+	Paths           []string `json:"paths,omitempty"`
+	Size            int64    `json:"size,omitempty"`
+	SHA256          string   `json:"sha256,omitempty"`
+	ExpectedVersion string   `json:"expected_version,omitempty"`
+	ForceProxy      bool     `json:"force_proxy,omitempty"`
+	Overwrite       bool     `json:"overwrite,omitempty"`
+	Recursive       bool     `json:"recursive,omitempty"`
+	Chunked         bool     `json:"chunked,omitempty"`
 }
 
 func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.Request) {
@@ -132,31 +140,42 @@ func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.R
 		publicURL = strings.TrimRight(node.ReportedPublicURL, "/")
 	}
 	operationName := fileScopeOperations[input.Scope]
-	mustProxy := input.Scope == "file.create" || input.Scope == "file.move" || input.Scope == "file.archive" ||
+	mustProxy := input.Scope == "file.create" || input.Scope == "file.move" || input.Scope == "file.copy" || input.Scope == "file.archive" ||
 		input.Scope == "file.delete" || input.Scope == "file.import"
 	directSourceIP, directSourceKnown := s.directAccessSourceIP(request)
 	direct := err == nil && !input.ForceProxy && publicURL != "" && !mustProxy && directSourceKnown
 
 	mutating := input.Scope == "file.edit" || input.Scope == "file.upload" || input.Scope == "file.import" ||
-		input.Scope == "file.create" || input.Scope == "file.move" || input.Scope == "file.archive" || input.Scope == "file.delete"
+		input.Scope == "file.create" || input.Scope == "file.move" || input.Scope == "file.copy" || input.Scope == "file.archive" || input.Scope == "file.delete"
 	var operation store.FileOperation
 	if err == nil && mutating {
 		expiresAt := time.Now().UTC().Add(2 * time.Minute)
+		if input.Chunked && input.Scope == "file.upload" {
+			expiresAt = time.Now().UTC().Add(15 * time.Minute)
+		}
 		operation, err = s.store.CreateFileOperation(request.Context(), newFileOperation(request, input, expiresAt))
 	}
 
 	var issued struct {
-		TicketID string    `json:"ticket_id"`
-		Ticket   string    `json:"ticket"`
-		Expires  time.Time `json:"expires_at"`
-		MaxBytes int64     `json:"max_bytes"`
+		TicketID  string    `json:"ticket_id"`
+		Ticket    string    `json:"ticket"`
+		Expires   time.Time `json:"expires_at"`
+		MaxBytes  int64     `json:"max_bytes"`
+		MaxUses   int       `json:"max_uses"`
+		ChunkSize int64     `json:"chunk_size"`
 	}
 	if err == nil {
+		ttlSeconds := 120
+		if input.Chunked && input.Scope == "file.upload" {
+			ttlSeconds = 900
+		}
 		ticketInput := map[string]any{
 			"scope": input.Scope, "resource_type": input.ResourceType, "resource_id": input.ResourceID,
 			"path": input.Path, "paths": input.Paths, "size": input.Size, "sha256": input.SHA256,
-			"operation_id": operation.ID, "ttl_seconds": 120,
+			"expected_version": input.ExpectedVersion,
+			"operation_id":     operation.ID, "ttl_seconds": ttlSeconds,
 			"overwrite": input.Overwrite, "recursive": input.Recursive,
+			"chunked": input.Chunked,
 		}
 		if direct {
 			ticketInput["source_ip"] = directSourceIP
@@ -201,7 +220,7 @@ func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.R
 	} else {
 		responseTicket, err = s.fileProxies.Add(fileProxyGrant{
 			DaemonTicket: issued.Ticket, NodeID: input.NodeID, Scope: input.Scope,
-			UserID: currentSession(request).User.ID, ExpiresAt: issued.Expires,
+			UserID: currentSession(request).User.ID, ExpiresAt: issued.Expires, MaxUses: issued.MaxUses,
 		})
 		if err != nil {
 			writeRequestError(writer, err)
@@ -212,6 +231,7 @@ func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.R
 		"operation_id": operation.ID, "mode": mode, "endpoint": endpoint,
 		"ticket_id": issued.TicketID, "ticket": responseTicket,
 		"expires_at": issued.Expires, "max_bytes": issued.MaxBytes,
+		"max_uses": issued.MaxUses, "chunk_size": issued.ChunkSize,
 		"resource_type": input.ResourceType, "resource_id": input.ResourceID,
 		"path": input.Path,
 	})
@@ -285,6 +305,7 @@ func (s *Server) handleFileExport(writer http.ResponseWriter, request *http.Requ
 func copyFileResponseHeaders(destination, source http.Header) {
 	for _, name := range []string{
 		"Content-Type", "Content-Length", "Content-Disposition", "Accept-Ranges", "Content-Range",
+		"Last-Modified", "ETag",
 	} {
 		if value := source.Get(name); value != "" {
 			destination.Set(name, value)
@@ -325,7 +346,8 @@ func (s *Server) handleFileProxy(writer http.ResponseWriter, request *http.Reque
 	headers := make(http.Header)
 	for _, name := range []string{
 		"Content-Type", "Range", "X-Prism-Resource-Type",
-		"X-Prism-Resource-ID", "X-Prism-Path", "X-Prism-Overwrite",
+		"X-Prism-Resource-ID", "X-Prism-Path", "X-Prism-Overwrite", "X-Prism-Expected-Version",
+		"X-Prism-Upload-Offset", "X-Prism-Upload-Final",
 	} {
 		if value := request.Header.Get(name); value != "" {
 			headers.Set(name, value)
@@ -377,6 +399,10 @@ func proxyFileScope(operation, method string) string {
 	case "move":
 		if method == http.MethodPost {
 			return "file.move"
+		}
+	case "copy":
+		if method == http.MethodPost {
+			return "file.copy"
 		}
 	case "archive":
 		if method == http.MethodPost {

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -150,13 +151,49 @@ var netEaseMD5Mapping = map[string]md5Pair{
 }
 
 func md5PairForVersion(versionLabel, baseMC string) (md5Pair, error) {
-	pair, ok := netEaseMD5Mapping[versionLabel]
-	if !ok {
-		return md5Pair{}, fmt.Errorf("NetEase join-server MD5 mapping is unavailable for %s", versionLabel)
+	pair := netEaseMD5Mapping[versionLabel]
+	if value := bootstrapMD5ForVersion(versionLabel, baseMC); value != "" {
+		pair.BootstrapMD5 = value
 	}
 	datPath := filepath.Join(baseMC, "versions", versionLabel, versionLabel+".dat")
 	if value := fileMD5(datPath); value != "" {
 		pair.DatFileMD5 = value
 	}
+	if pair.BootstrapMD5 == "" || pair.DatFileMD5 == "" {
+		return md5Pair{}, fmt.Errorf("NetEase join-server MD5 values are unavailable for %s", versionLabel)
+	}
 	return pair, nil
+}
+
+func bootstrapMD5ForVersion(versionLabel, baseMC string) string {
+	metadataPath := filepath.Join(baseMC, "versions", versionLabel, versionLabel+".json")
+	contents, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return ""
+	}
+	var metadata struct {
+		Libraries []struct {
+			Name      string `json:"name"`
+			Downloads struct {
+				Artifact struct {
+					Path string `json:"path"`
+				} `json:"artifact"`
+			} `json:"downloads"`
+		} `json:"libraries"`
+	}
+	if json.Unmarshal(contents, &metadata) != nil {
+		return ""
+	}
+	for _, library := range metadata.Libraries {
+		artifactPath := strings.TrimSpace(library.Downloads.Artifact.Path)
+		if !strings.Contains(strings.ToLower(library.Name+" "+artifactPath), "bootstraplauncher") {
+			continue
+		}
+		cleanPath, err := cleanArchivePath(artifactPath)
+		if err != nil {
+			return ""
+		}
+		return fileMD5(filepath.Join(baseMC, "libraries", filepath.FromSlash(cleanPath)))
+	}
+	return ""
 }

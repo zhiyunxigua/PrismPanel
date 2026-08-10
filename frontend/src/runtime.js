@@ -21,6 +21,8 @@ export async function loginWinApp(username, password, remember) { return callWin
 export async function loginSavedAccountWinApp(accountID) { return callWinApp("LoginSavedAccount", accountID); }
 export async function deleteSavedAccountWinApp(accountID) { return callWinApp("DeleteSavedAccount", accountID); }
 export async function updateSavedPasswordWinApp(username, password) { return callWinApp("UpdateSavedPassword", username, password); }
+export async function openRemoteFileWinApp(input, chooseApplication = false) { return callWinApp("OpenRemoteFile", input, Boolean(chooseApplication)); }
+export async function fileOpenLimitWinApp() { return callWinApp("FileOpenLimit"); }
 
 export async function netEaseAccount() { return callWinApp("NetEaseAccount"); }
 export async function loginNetEaseAccount(email, password) { return callWinApp("LoginNetEaseAccount", email, password); }

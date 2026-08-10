@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestDeployBundleOverlaysConfigAndPreservesExtraFiles(t *testing.T) {
+func TestPluginAndConfigDeployAreSeparate(t *testing.T) {
 	workspace := t.TempDir()
 	pluginDir := filepath.Join(workspace, "plugins")
 	if err := os.MkdirAll(filepath.Join(pluginDir, "Example"), 0o750); err != nil {
@@ -24,20 +24,40 @@ func TestDeployBundleOverlaysConfigAndPreservesExtraFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	oldJAR := pluginJAR(t, "Example", "1.0", "com.example.Main")
+	if err := os.WriteFile(filepath.Join(pluginDir, "Example-1.0.jar"), oldJAR, 0o640); err != nil {
+		t.Fatal(err)
+	}
 	jar := pluginJAR(t, "Example", "2.0", "com.example.Main")
-	bundlePath := pluginBundle(t, jar, "Example-2.0.jar", map[string]string{"config.yml": "new"})
-	bundle, cleanup, err := prepareBundle(bundlePath)
+	pluginBundlePath := pluginBundle(t, jar, "Example-2.0.jar", map[string]string{"config.yml": "from-plugin-bundle"})
+	bundle, cleanup, err := prepareBundle(pluginBundlePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cleanup()
-	if err := deployBundleToWorkspace(workspace, bundle); err != nil {
+	if err := deployPluginToWorkspace(workspace, bundle); err != nil {
 		t.Fatal(err)
 	}
 
-	installed := filepath.Join(pluginDir, "Example-2.0.jar")
+	installed := filepath.Join(pluginDir, "Example-1.0.jar")
 	if hash, err := fileSHA256(installed); err != nil || hash != bundle.plugin.SHA256 {
 		t.Fatalf("unexpected deployed jar: %s, %v", hash, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(pluginDir, "Example", "config.yml")); err != nil || string(data) != "old" {
+		t.Fatalf("plugin deployment changed config: %q, %v", data, err)
+	}
+
+	configBundlePath := configBundle(t, "Example", "2.0", map[string]string{"config.yml": "new"})
+	config, configCleanup, err := prepareBundle(configBundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer configCleanup()
+	if err := deployConfigToWorkspace(workspace, config); err != nil {
+		t.Fatal(err)
+	}
+	if hash, err := fileSHA256(installed); err != nil || hash != bundle.plugin.SHA256 {
+		t.Fatalf("config deployment changed jar: %s, %v", hash, err)
 	}
 	if data, err := os.ReadFile(filepath.Join(pluginDir, "Example", "config.yml")); err != nil || string(data) != "new" {
 		t.Fatalf("config was not overlaid: %q, %v", data, err)
@@ -45,6 +65,38 @@ func TestDeployBundleOverlaysConfigAndPreservesExtraFiles(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(pluginDir, "Example", "extra.yml")); err != nil || string(data) != "keep" {
 		t.Fatalf("extra config was not preserved: %q, %v", data, err)
 	}
+}
+
+func configBundle(t *testing.T, name, version string, config map[string]string) string {
+	t.Helper()
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
+	manifest := "kind: config\nplugin_type: spigot\nname: " + name + "\nversion: " + version + "\nconfig:\n" +
+		"  directory: " + name + "\n  present: true\n"
+	entry, err := archive.Create("manifest.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(entry, manifest); err != nil {
+		t.Fatal(err)
+	}
+	for file, content := range config {
+		entry, err := archive.Create("config/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(entry, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.zip")
+	if err := os.WriteFile(path, buffer.Bytes(), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestPluginEnableDisableAndUninstall(t *testing.T) {

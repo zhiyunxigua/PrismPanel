@@ -46,6 +46,7 @@ type FilesConfig struct {
 	MaxEditFileSize        int64 `yaml:"max_edit_file_size"`
 	MaxUploadFileSize      int64 `yaml:"max_upload_file_size"`
 	MaxExtractedSize       int64 `yaml:"max_extracted_size"`
+	MaxArchiveDownloadSize int64 `yaml:"max_archive_download_size"`
 	MaxConcurrentTransfers int   `yaml:"max_concurrent_transfers"`
 	CopyConcurrency        int   `yaml:"copy_concurrency"`
 }
@@ -64,6 +65,7 @@ func Default() Config {
 			MaxEditFileSize:        5 * 1024 * 1024,
 			MaxUploadFileSize:      2 * 1024 * 1024 * 1024,
 			MaxExtractedSize:       20 * 1024 * 1024 * 1024,
+			MaxArchiveDownloadSize: 1 * 1024 * 1024 * 1024,
 			MaxConcurrentTransfers: 4,
 			CopyConcurrency:        4,
 		},
@@ -137,6 +139,9 @@ func (c Config) Validate() error {
 	}
 	if c.Files.MaxExtractedSize <= 0 {
 		return errors.New("files.max_extracted_size must be positive")
+	}
+	if c.Files.MaxArchiveDownloadSize <= 0 {
+		return errors.New("files.max_archive_download_size must be positive")
 	}
 	if c.Files.MaxConcurrentTransfers < 1 || c.Files.MaxConcurrentTransfers > 64 {
 		return errors.New("files.max_concurrent_transfers must be between 1 and 64")

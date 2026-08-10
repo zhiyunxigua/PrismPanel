@@ -63,3 +63,36 @@ func TestFantnelAuthenticatorBuildsAuthenticatedProfile(t *testing.T) {
 		t.Fatalf("mod info mismatch: %+v", received.Mods)
 	}
 }
+
+func TestMD5PairForUnmappedVersionUsesLocalFiles(t *testing.T) {
+	baseMC := filepath.Join(t.TempDir(), ".minecraft")
+	versionDir := filepath.Join(baseMC, "versions", "1.21.10")
+	bootstrapPath := filepath.Join(baseMC, "libraries", "net", "neoforged", "bootstraplauncher", "1.0.0", "bootstraplauncher-1.0.0.jar")
+	if err := os.MkdirAll(versionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(bootstrapPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(versionDir, "1.21.10.dat"), []byte("dat"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bootstrapPath, []byte("bootstrap"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"libraries":[{"name":"net.neoforged:bootstraplauncher:1.0.0","downloads":{"artifact":{"path":"net/neoforged/bootstraplauncher/1.0.0/bootstraplauncher-1.0.0.jar"}}}]}`
+	if err := os.WriteFile(filepath.Join(versionDir, "1.21.10.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pair, err := md5PairForVersion("1.21.10", baseMC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pair.BootstrapMD5 != fileMD5(bootstrapPath) {
+		t.Fatalf("bootstrap MD5 mismatch: %s", pair.BootstrapMD5)
+	}
+	if pair.DatFileMD5 != fileMD5(filepath.Join(versionDir, "1.21.10.dat")) {
+		t.Fatalf("dat file MD5 mismatch: %s", pair.DatFileMD5)
+	}
+}

@@ -16,6 +16,10 @@ const props = defineProps({
 });
 const emit = defineEmits(["update:modelValue", "submit"]);
 
+const defaultPluginConfigSyncExtensions = [
+  ".yml", ".yaml", ".json", ".toml", ".ini", ".conf", ".properties", ".xml",
+];
+
 const formRef = ref();
 const archiveUploadRef = ref();
 const archiveFile = ref(null);
@@ -36,6 +40,7 @@ const form = reactive({
   imageDirectory: "image",
   instanceCount: 1,
   portsText: "25565",
+  pluginConfigSyncExtensions: [...defaultPluginConfigSyncExtensions],
   startCommand: "java -jar server.jar nogui",
   stopCommand: "stop",
   stopTimeoutSeconds: 60,
@@ -150,6 +155,9 @@ function resetForm() {
     imageDirectory: source?.image_directory || "image",
     instanceCount: source?.instance_count || 1,
     portsText: source?.ports?.join(", ") || "25565",
+    pluginConfigSyncExtensions: source?.plugin_config_sync_extensions?.length
+      ? [...source.plugin_config_sync_extensions]
+      : [...defaultPluginConfigSyncExtensions],
     startCommand: source?.process?.start_command || "java -jar server.jar nogui",
     stopCommand: source?.process?.stop_command || "stop",
     stopTimeoutSeconds: source?.process?.stop_timeout_seconds || 60,
@@ -247,6 +255,10 @@ async function submit() {
       ElMessage.warning("请提供足够数量的有效实例端口");
       return;
     }
+    if (!form.pluginConfigSyncExtensions.length) {
+      ElMessage.warning("请至少保留一个插件配置文件后缀");
+      return;
+    }
   }
   let proxyTargets = null;
   if (!editing.value && form.kind !== "proxy" && canConfigureProxy.value) {
@@ -287,6 +299,7 @@ async function submit() {
       instance_count: form.instanceCount,
       ports: ports.slice(0, form.instanceCount),
       exclude: props.server?.exclude || [],
+      plugin_config_sync_extensions: form.pluginConfigSyncExtensions,
     });
   }
   emit("submit", {
@@ -362,6 +375,22 @@ async function submit() {
         <el-form-item label="实例端口">
           <el-input v-model="form.portsText" placeholder="25565, 25566, 25567" />
         </el-form-item>
+        <el-form-item label="插件配置同步后缀白名单">
+          <el-select
+            v-model="form.pluginConfigSyncExtensions"
+            class="full-control"
+            multiple
+            filterable
+            allow-create
+            default-first-option
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="输入后缀并回车，例如 .yml"
+          >
+            <el-option v-for="extension in defaultPluginConfigSyncExtensions" :key="extension" :label="extension" :value="extension" />
+          </el-select>
+          <small class="form-help">仅同步这些后缀的插件配置文件，不会删除目标中的额外文件；数据库后缀请勿加入白名单。</small>
+        </el-form-item>
       </template>
 
       <el-form-item v-if="!editing && form.kind === 'proxy' && canConfigureProxy" label="初始下游服务器">
@@ -433,3 +462,7 @@ async function submit() {
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.form-help { display: block; margin-top: 6px; color: var(--app-text-muted); font-size: 12px; line-height: 1.5; }
+</style>

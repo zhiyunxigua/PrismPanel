@@ -2,14 +2,15 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import {
-  ArrowUp, ChevronRight, Download, Edit3, File, FileArchive, FileCode2, FilePlus2,
-  FileText, Folder, FolderOpen, FolderPlus, Home, MoreHorizontal, MoveRight,
-  RefreshCw, Save, Trash2, Upload, X,
+  ArrowUp, ChevronRight, ClipboardPaste, Copy, Download, Edit3, File, FileArchive, FileCode2,
+  FilePlus2, FileText, Folder, FolderOpen, FolderPlus, Home, MoreHorizontal, MoveRight,
+  RefreshCw, Save, Scissors, Trash2, Upload, X,
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { hasPermission } from "../../session";
 import { downloadFile, fileExportURL, fileJSON, importArchive, uploadFile } from "../../fileApi";
 import { isExternalFileDrag, plainUploadItems, scanDroppedItems } from "../../fileDrop";
+import { isWinApp, openRemoteFileWinApp, runtimeConfig } from "../../runtime";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
 
 const CodeEditor = defineAsyncComponent(() => import("./CodeEditor.vue"));
@@ -43,9 +44,16 @@ const previewSaving = ref(false);
 const previewRequest = ref(0);
 const preview = ref(emptyPreview());
 const contextMenu = ref({ visible: false, x: 0, y: 0, entry: null });
+const tabs = ref([]);
+const activeTabKey = ref("");
+const selectedEntries = ref([]);
+const pathEditing = ref(false);
+const clipboard = ref({ type: "", entries: [], targetKey: "" });
+const MAX_TABS = 10;
 let longPressTimer = 0;
 let longPressOrigin = null;
 let suppressEntryClick = false;
+let stopFileSyncEvents = null;
 
 const canWrite = computed(() => hasPermission("file.write"));
 const canDelete = computed(() => hasPermission("file.delete"));
@@ -80,6 +88,17 @@ const canImportArchive = computed(() => canWrite.value && rootEmpty.value && cur
 ));
 const previewDirty = computed(() => preview.value.kind === "text" && preview.value.content !== preview.value.original);
 const previewName = computed(() => preview.value.name || preview.value.path.split("/").pop() || "文件");
+const pathSegments = computed(() => {
+  const segments = [{ path: ".", name: "根目录" }];
+  if (activeDirectory.value === ".") return segments;
+  let current = "";
+  for (const part of activeDirectory.value.split("/").filter(Boolean)) {
+    current = current ? `${current}/${part}` : part;
+    segments.push({ path: current, name: part });
+  }
+  return segments;
+});
+const hasClipboard = computed(() => clipboard.value.entries.length > 0);
 
 watch(targetOptions, (options) => {
   if (!options.some((item) => item.key === selectedTargetKey.value)) {
@@ -87,6 +106,10 @@ watch(targetOptions, (options) => {
     resetExplorer();
   }
 }, { immediate: true });
+
+watch(selectedTargetKey, () => {
+  if (selectedTargetKey.value) restoreTabs();
+});
 
 function authorization(scope, path, paths = [], extra = {}, target = currentTarget.value) {
   return {
@@ -133,6 +156,7 @@ async function loadDirectory(path = activeDirectory.value, target = currentTarge
     if (request !== directoryRequest.value || selectedTargetKey.value !== target.key) return false;
     activeDirectory.value = path;
     pathInput.value = path;
+    updateActiveTab(path, target);
     directoryEntries.value = entries;
     if (path === ".") rootEmpty.value = entries.length === 0;
     return true;
@@ -159,12 +183,14 @@ function resetExplorer() {
   previewLoading.value = false;
   activeDirectory.value = ".";
   pathInput.value = ".";
+  selectedEntries.value = [];
+  pathEditing.value = false;
   directoryEntries.value = [];
   preview.value = emptyPreview();
   directoryError.value = "";
   rootEmpty.value = false;
   closeContextMenu();
-  void loadDirectory(".");
+  restoreTabs();
 }
 
 function refreshDirectory() {
@@ -180,6 +206,7 @@ async function navigateDirectory(path) {
 
 function submitPath() {
   const normalized = pathInput.value.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, "") || ".";
+  pathEditing.value = false;
   void navigateDirectory(normalized);
 }
 
@@ -191,8 +218,125 @@ function openEntry(entry) {
   if (suppressEntryClick) return;
   closeContextMenu();
   if (entry.type === "directory") void navigateDirectory(entry.path);
+  else if (isWinApp()) void openNativeFile(entry);
   else void openFile(entry);
 }
+
+async function openNativeFile(entry, chooseApplication = false) {
+  try {
+    await openRemoteFileWinApp({
+      node_id: props.nodeId,
+      resource_type: currentTarget.value.type,
+      resource_id: currentTarget.value.id,
+      path: entry.path,
+      name: entry.name,
+      size: Number(entry.size) || 0,
+    }, chooseApplication);
+    ElMessage.success("文件已在本机打开，保存后将自动回传");
+  } catch (error) {
+    ElMessage.error(error.message || "本机打开失败");
+  }
+}
+
+function selectEntry(entry, event) {
+  if (event?.metaKey || event?.ctrlKey) {
+    const index = selectedEntries.value.findIndex((item) => item.path === entry.path);
+    if (index >= 0) selectedEntries.value.splice(index, 1);
+    else selectedEntries.value.push(entry);
+  } else {
+    selectedEntries.value = [entry];
+  }
+}
+
+function isSelected(entry) {
+  return selectedEntries.value.some((item) => item.path === entry.path);
+}
+
+function targetStorageKey(target = currentTarget.value) {
+  if (!target) return "";
+  const panel = runtimeConfig.panelUrl || runtimeConfig.apiBaseUrl || window.location.origin;
+  return `prism:file-path:v2:${encodeURIComponent(panel)}:${props.nodeId}:${target.key}`;
+}
+
+function restoreTabs() {
+  const target = currentTarget.value;
+  if (!target) return;
+  let stored;
+  try { stored = JSON.parse(window.localStorage.getItem(targetStorageKey(target)) || "null"); } catch { stored = null; }
+  const path = normalizePath(stored?.lastPath || ".");
+  const tab = { key: createTabKey(), path, name: tabName(path), closable: false };
+  tabs.value = [tab];
+  activeTabKey.value = tab.key;
+  activeDirectory.value = path;
+  pathInput.value = path;
+  saveTabs(target);
+  void loadDirectory(path, target);
+}
+
+function saveTabs(target = currentTarget.value) {
+  const key = targetStorageKey(target);
+  if (!key) return;
+  window.localStorage.setItem(key, JSON.stringify({ lastPath: activeDirectory.value }));
+}
+
+function updateActiveTab(path, target = currentTarget.value) {
+  const active = tabs.value.find((item) => item.key === activeTabKey.value);
+  if (active) {
+    active.path = path;
+    active.name = tabName(path);
+  }
+  saveTabs(target);
+}
+
+async function switchTab(key) {
+  if (key === activeTabKey.value) return true;
+  if (explorerBusy.value || !await confirmDiscard()) return false;
+  const tab = tabs.value.find((item) => item.key === key);
+  if (!tab) return false;
+  activeTabKey.value = key;
+  selectedEntries.value = [];
+  preview.value = emptyPreview();
+  saveTabs();
+  return loadDirectory(tab.path);
+}
+
+async function addTab(path = ".") {
+  if (tabs.value.length >= MAX_TABS) {
+    ElMessage.warning(`最多打开 ${MAX_TABS} 个标签`);
+    return;
+  }
+  if (explorerBusy.value || !await confirmDiscard()) return;
+  const tab = { key: createTabKey(), path: normalizePath(path), name: tabName(path), closable: true };
+  tabs.value.push(tab);
+  activeTabKey.value = tab.key;
+  selectedEntries.value = [];
+  preview.value = emptyPreview();
+  saveTabs();
+  await loadDirectory(tab.path);
+}
+
+async function closeTab(key) {
+  if (tabs.value.length <= 1) return;
+  if (!await confirmDiscard()) return;
+  const index = tabs.value.findIndex((item) => item.key === key);
+  if (index < 0) return;
+  tabs.value.splice(index, 1);
+  if (activeTabKey.value === key) {
+    activeTabKey.value = tabs.value[index - 1]?.key || tabs.value[0].key;
+    const tab = tabs.value.find((item) => item.key === activeTabKey.value);
+    preview.value = emptyPreview();
+    await loadDirectory(tab.path);
+  }
+  saveTabs();
+}
+
+function openInNewTab(entry) {
+  void addTab(entry.type === "directory" ? entry.path : parentPath(entry.path));
+}
+
+function createTabKey() { return `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
+function normalizePath(value) { return value?.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, "") || "."; }
+function tabName(value) { return value === "." ? "根目录" : value.split("/").pop() || "根目录"; }
 
 async function openFile(entry) {
   if (entry.path === preview.value.path) return;
@@ -317,6 +461,48 @@ async function moveEntry(entry, destination) {
   });
   if (preview.value.path === entry.path) preview.value = emptyPreview();
   ElMessage.success("文件已移动");
+  selectedEntries.value = [];
+  refreshDirectory();
+}
+
+function setClipboard(type, entry = null) {
+  if (!canWrite.value || writeLocked.value) return;
+  const entries = entry ? [entry] : selectedEntries.value;
+  if (!entries.length) {
+    ElMessage.warning("请先选择文件或文件夹");
+    return;
+  }
+  clipboard.value = {
+    type,
+    targetKey: selectedTargetKey.value,
+    entries: entries.map((item) => ({ path: item.path, name: item.name, type: item.type })),
+  };
+  ElMessage.success(type === "copy" ? "已复制到剪贴板" : "已剪切到剪贴板");
+}
+
+async function pasteClipboard() {
+  if (!hasClipboard.value || !canWrite.value || writeLocked.value) return;
+  if (clipboard.value.targetKey !== selectedTargetKey.value) {
+    ElMessage.warning("只能在同一个文件目标内粘贴");
+    return;
+  }
+  const pending = [...clipboard.value.entries];
+  const failures = [];
+  for (const item of pending) {
+    const destination = joinPath(activeDirectory.value, item.name);
+    try {
+      const scope = clipboard.value.type === "copy" ? "file.copy" : "file.move";
+      await fileJSON(authorization(scope, item.path, [item.path, destination]), "POST", {
+        destination, overwrite: false,
+      });
+    } catch (error) {
+      failures.push(`${item.name}: ${error.message || "失败"}`);
+    }
+  }
+  if (failures.length) ElMessage.warning(`粘贴完成，${failures.length} 项失败`);
+  else ElMessage.success("粘贴完成");
+  if (clipboard.value.type === "move") clipboard.value = { type: "", entries: [], targetKey: "" };
+  selectedEntries.value = [];
   refreshDirectory();
 }
 
@@ -540,6 +726,7 @@ function handleEntryDragStart(event, entry) {
 function showContextMenu(event, entry) {
   event.preventDefault();
   event.stopPropagation();
+  if (!isSelected(entry)) selectEntry(entry, event);
   const menuWidth = 196;
   const menuHeight = entry.type === "directory" ? 278 : 238;
   contextMenu.value = {
@@ -606,7 +793,13 @@ function runContextAction(action) {
   closeContextMenu();
   if (!entry) return;
   if (action === "open") openEntry(entry);
+  if (action === "online-edit") void openFile(entry);
+  if (action === "open-with") void openNativeFile(entry, true);
+  if (action === "new-tab") openInNewTab(entry);
   if (action === "download") void downloadEntry(entry);
+  if (action === "copy") setClipboard("copy", entry);
+  if (action === "cut") setClipboard("move", entry);
+  if (action === "paste") void pasteClipboard();
   if (action === "archive") void archiveEntry(entry);
   if (action === "rename") void renameEntry(entry);
   if (action === "move") void promptMove(entry);
@@ -646,6 +839,7 @@ onMounted(() => {
   document.addEventListener("click", handleDocumentClick);
   window.addEventListener("resize", closeContextMenu);
   window.addEventListener("blur", closeContextMenu);
+  stopFileSyncEvents = window.runtime?.EventsOn?.("prism:file-sync", handleFileSyncEvent) || null;
 });
 onBeforeUnmount(() => {
   cancelLongPress();
@@ -653,7 +847,16 @@ onBeforeUnmount(() => {
   document.removeEventListener("click", handleDocumentClick);
   window.removeEventListener("resize", closeContextMenu);
   window.removeEventListener("blur", closeContextMenu);
+  if (typeof stopFileSyncEvents === "function") stopFileSyncEvents();
+  else window.runtime?.EventsOff?.("prism:file-sync");
+  stopFileSyncEvents = null;
 });
+
+function handleFileSyncEvent(event) {
+  if (event?.type === "synced") ElMessage.success(`已自动回传 ${event.path}`);
+  if (event?.type === "updated") ElMessage.info(`云端文件已更新本地缓存：${event.path}`);
+  if (event?.type === "error") ElMessage.error(event.message || "文件自动回传失败");
+}
 
 function emptyPreview() {
   return { path: "", name: "", content: "", original: "", encoding: "utf-8", version: "", size: 0, modified_at: "", kind: "empty", error: "", errorCode: "" };
@@ -710,12 +913,34 @@ function fileIconClass(entry) {
       <div class="explorer-heading">
         <strong>资源管理器</strong>
         <div class="explorer-actions">
+          <el-tooltip content="新建标签"><button type="button" :disabled="explorerBusy || tabs.length >= MAX_TABS" @click="addTab()"><FilePlus2 :size="15" /></button></el-tooltip>
           <el-tooltip content="新建文件"><button v-if="canWrite" type="button" :disabled="writeDisabled" @click="createEntry('file')"><FilePlus2 :size="15" /></button></el-tooltip>
           <el-tooltip content="新建目录"><button v-if="canWrite" type="button" :disabled="writeDisabled" @click="createEntry('directory')"><FolderPlus :size="15" /></button></el-tooltip>
           <el-tooltip content="上传文件"><button v-if="canWrite" type="button" :disabled="writeDisabled" @click="chooseFiles"><Upload :size="15" /></button></el-tooltip>
           <el-tooltip content="导入 ZIP"><button v-if="canImportArchive" type="button" :disabled="writeDisabled || archiveImporting" @click="chooseArchive"><FileArchive :size="15" /></button></el-tooltip>
+          <el-tooltip content="粘贴"><button v-if="hasClipboard" type="button" :disabled="writeDisabled" @click="pasteClipboard"><ClipboardPaste :size="15" /></button></el-tooltip>
+          <el-tooltip content="复制所选"><button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('copy')"><Copy :size="15" /></button></el-tooltip>
+          <el-tooltip content="剪切所选"><button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('move')"><Scissors :size="15" /></button></el-tooltip>
           <el-tooltip content="刷新"><button type="button" @click="refreshDirectory"><RefreshCw :size="15" /></button></el-tooltip>
         </div>
+      </div>
+
+      <div class="file-tabs" role="tablist">
+        <button
+          v-for="tab in tabs"
+          :key="tab.key"
+          type="button"
+          class="file-tab"
+          :class="{ active: tab.key === activeTabKey }"
+          role="tab"
+          :aria-selected="tab.key === activeTabKey"
+          @click="switchTab(tab.key)"
+        >
+          <Folder :size="13" />
+          <span :title="tab.path">{{ tab.name }}</span>
+          <X v-if="tab.closable" :size="13" @click.stop="closeTab(tab.key)" />
+        </button>
+        <button class="file-tab-add" type="button" aria-label="新建标签" :disabled="tabs.length >= MAX_TABS" @click="addTab()">+</button>
       </div>
 
       <form class="explorer-location" @submit.prevent="submitPath">
@@ -729,8 +954,21 @@ function fileIconClass(entry) {
           <ArrowUp :size="15" />
         </button>
         <Home :size="14" />
-        <input v-model="pathInput" aria-label="当前路径" spellcheck="false" />
-        <button class="location-go" type="submit" aria-label="打开路径"><ChevronRight :size="15" /></button>
+        <div v-if="!pathEditing" class="location-breadcrumbs" @click="pathEditing = true">
+          <button
+            v-for="(segment, index) in pathSegments"
+            :key="segment.path"
+            type="button"
+            class="location-segment"
+            :title="segment.path"
+            @click.stop="navigateDirectory(segment.path)"
+          >
+            <template v-if="index">/</template>{{ segment.name }}
+          </button>
+        </div>
+        <input v-else v-model="pathInput" aria-label="当前路径" spellcheck="false" @blur="submitPath" />
+        <button v-if="pathEditing" class="location-go" type="submit" aria-label="打开路径"><ChevronRight :size="15" /></button>
+        <span v-else class="location-edit-hint" aria-hidden="true">点击编辑</span>
       </form>
 
       <div v-if="directoryError" class="explorer-error">
@@ -750,12 +988,13 @@ function fileIconClass(entry) {
             v-for="entry in directoryEntries"
             :key="entry.path"
             class="file-list-row"
-            :class="{ 'drop-target': dragTargetPath === dropDirectory(entry) }"
+            :class="{ 'drop-target': dragTargetPath === dropDirectory(entry), selected: isSelected(entry) }"
             :title="entry.path"
             role="listitem"
             tabindex="0"
             draggable="true"
-            @click="openEntry(entry)"
+            @click="selectEntry(entry, $event)"
+            @dblclick="openEntry(entry)"
             @keydown.enter.prevent="openEntry(entry)"
             @contextmenu="showContextMenu($event, entry)"
             @pointerdown="beginLongPress($event, entry)"
@@ -854,7 +1093,14 @@ function fileIconClass(entry) {
           <Edit3 v-else :size="16" />
           {{ contextMenu.entry.type === "directory" ? "打开文件夹" : "打开文件" }}
         </button>
+        <button v-if="isWinApp() && contextMenu.entry.type === 'file'" type="button" role="menuitem" @click="runContextAction('open-with')"><FolderOpen :size="16" />选择打开方式</button>
+        <button v-if="isWinApp() && contextMenu.entry.type === 'file'" type="button" role="menuitem" @click="runContextAction('online-edit')"><Edit3 :size="16" />在线编辑</button>
+        <button v-if="contextMenu.entry.type === 'directory'" type="button" role="menuitem" @click="runContextAction('new-tab')"><Folder :size="16" />在新标签中打开</button>
         <button type="button" role="menuitem" @click="runContextAction('download')"><Download :size="16" />下载</button>
+        <div class="file-context-separator" />
+        <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('copy')"><Copy :size="16" />复制</button>
+        <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('cut')"><Scissors :size="16" />剪切</button>
+        <button v-if="hasClipboard" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('paste')"><ClipboardPaste :size="16" />粘贴</button>
         <div class="file-context-separator" />
         <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked || archiveCreating" @click="runContextAction('archive')"><FileArchive :size="16" />压缩为 ZIP</button>
         <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('rename')"><Edit3 :size="16" />重命名</button>
@@ -870,79 +1116,115 @@ function fileIconClass(entry) {
 
 <style scoped>
 .file-manager {
+  --file-accent: #5e8c70;
+  --file-accent-text: #245c45;
+  --file-selected-bg: #dcebe1;
+  --file-drop-bg: #dce9e1;
+  --file-danger: #b83c35;
+  --file-danger-text: #8b3934;
+  --file-danger-bg: #fff5f3;
+  --file-danger-border: #bd4b43;
   display: flex;
   flex-direction: column;
   height: clamp(560px, calc(100vh - 220px), 820px);
   min-height: 560px;
   overflow: hidden;
-  border: 1px solid #cfd7d1;
-  background: #fff;
+  border: 1px solid var(--app-border);
+  color: var(--app-text-secondary);
+  background: var(--app-surface);
 }
-.file-manager.drop-active { border-color: #5e8c70; }
-.explorer-pane { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; background: #fff; }
-.explorer-target { display: flex; min-height: 48px; align-items: center; gap: 8px; border-bottom: 1px solid #dce2dd; padding: 7px 10px; background: #f7f9f8; }
+:global(html.dark) .file-manager {
+  --file-accent: #76b58d;
+  --file-accent-text: #8dcba3;
+  --file-selected-bg: #294032;
+  --file-drop-bg: #294032;
+  --file-danger: #efa49b;
+  --file-danger-text: #efa49b;
+  --file-danger-bg: #3d2421;
+  --file-danger-border: #b65f55;
+}
+.file-manager.drop-active { border-color: var(--file-accent); }
+.explorer-pane { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; background: var(--app-surface); }
+.explorer-target { display: flex; min-height: 48px; align-items: center; gap: 8px; border-bottom: 1px solid var(--app-border); padding: 7px 10px; background: var(--app-surface-muted); }
 .explorer-target .el-select { min-width: 0; flex: 1; }
 .explorer-heading { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 8px 5px 12px; }
-.explorer-heading strong { color: #3d4841; font-size: 12px; font-weight: 700; }
+.explorer-heading strong { color: var(--app-text); font-size: 12px; font-weight: 700; }
 .explorer-actions, .editor-commands { display: flex; align-items: center; gap: 2px; }
 .explorer-actions button, .editor-commands button, .editor-tab button {
-  display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; border-radius: 4px; padding: 0; background: transparent; color: #58645c; cursor: pointer;
+  display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; border-radius: 4px; padding: 0; background: transparent; color: var(--app-text-secondary); cursor: pointer;
 }
-.explorer-actions button:hover, .editor-commands button:hover, .editor-tab button:hover { border-color: #d5ddd7; background: #e9eeeb; color: #27332b; }
+.explorer-actions button:hover, .editor-commands button:hover, .editor-tab button:hover { border-color: var(--app-border); background: var(--app-surface-hover); color: var(--app-text); }
 .explorer-actions button:disabled, .editor-commands button:disabled { cursor: not-allowed; opacity: 0.38; }
-.explorer-location { display: grid; min-height: 38px; grid-template-columns: 28px 16px minmax(0, 1fr) 28px; align-items: center; gap: 5px; border-block: 1px solid #e3e7e4; padding: 4px 8px; color: #727e75; background: #fafbfa; }
-.explorer-location button { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 4px; padding: 0; color: inherit; background: transparent; }
-.explorer-location button:hover:not(:disabled) { color: #245c45; background: #e6ece8; }
+.file-tabs { display: flex; min-height: 36px; align-items: stretch; overflow-x: auto; border-bottom: 1px solid var(--app-border); background: var(--app-surface-muted); }
+.file-tab { display: flex; min-width: 120px; max-width: 220px; align-items: center; gap: 6px; border: 0; border-right: 1px solid var(--app-border); padding: 0 9px; color: var(--app-text-muted); background: transparent; cursor: pointer; font-size: 11px; }
+.file-tab:hover { background: var(--app-surface-hover); }
+.file-tab.active { color: var(--app-text); background: var(--app-surface); box-shadow: inset 0 2px 0 var(--file-accent); }
+.file-tab > span { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.file-tab > svg:last-child { flex: 0 0 auto; opacity: .7; }
+.file-tab-add { width: 34px; flex: 0 0 auto; border: 0; color: var(--app-text-muted); background: transparent; cursor: pointer; font-size: 19px; }
+.file-tab-add:hover:not(:disabled) { background: var(--app-surface-hover); }
+.file-tab-add:disabled { cursor: not-allowed; opacity: .35; }
+.explorer-location { display: grid; min-height: 38px; grid-template-columns: 28px 16px minmax(0, 1fr) auto; align-items: center; gap: 5px; border-block: 1px solid var(--app-border-soft); padding: 4px 8px; color: var(--app-text-muted); background: var(--app-surface-muted); }
+.location-up, .location-go { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 4px; padding: 0; color: inherit; background: transparent; }
+.explorer-location button:hover:not(:disabled) { color: var(--file-accent-text); background: var(--app-surface-hover); }
 .explorer-location button:disabled { cursor: default; opacity: 0.35; }
-.explorer-location input { width: 100%; min-width: 0; height: 28px; border: 1px solid transparent; border-radius: 4px; padding: 0 7px; color: #344039; background: transparent; font: 11px Consolas, monospace; }
-.explorer-location input:hover, .explorer-location input:focus { border-color: #bdc8c0; background: #fff; outline: 0; }
-.explorer-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px; border-left: 3px solid #bd4b43; padding: 9px 10px; color: #8b3934; background: #fff5f3; font-size: 12px; }
+.explorer-location input { width: 100%; min-width: 0; height: 28px; border: 1px solid transparent; border-radius: 4px; padding: 0 7px; color: var(--app-text); background: transparent; font: 11px Consolas, monospace; }
+.explorer-location input:hover, .explorer-location input:focus { border-color: var(--app-border); background: var(--app-surface); outline: 0; }
+.location-breadcrumbs { display: flex; min-width: 0; align-items: center; overflow: hidden; }
+.location-segment { display: block; width: auto; min-width: 0; max-width: min(240px, 40vw); height: 28px; flex: 0 1 auto; overflow: hidden; border: 0; border-radius: 4px; padding: 0 5px; color: var(--app-text-secondary); background: transparent; cursor: pointer; font: 11px/28px Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.location-segment:hover { color: var(--file-accent-text); background: var(--app-surface-hover); }
+.location-edit-hint { padding-right: 4px; color: var(--app-text-subtle); font-size: 10px; white-space: nowrap; }
+.explorer-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px; border-left: 3px solid var(--file-danger-border); padding: 9px 10px; color: var(--file-danger-text); background: var(--file-danger-bg); font-size: 12px; }
 .file-list-shell { position: relative; min-height: 0; flex: 1; overflow: hidden; }
 .file-list-head, .file-list-row { display: grid; grid-template-columns: minmax(240px, 1fr) 110px 170px 38px; align-items: center; gap: 12px; }
-.file-list-head { min-height: 34px; padding: 0 9px 0 14px; color: #737e76; background: #f6f8f6; border-bottom: 1px solid #e1e6e2; font-size: 10px; font-weight: 700; }
+.file-list-head { min-height: 34px; padding: 0 9px 0 14px; color: var(--app-text-muted); background: var(--app-surface-muted); border-bottom: 1px solid var(--app-border-soft); font-size: 10px; font-weight: 700; }
 .file-list { height: calc(100% - 34px); overflow: auto; overscroll-behavior: contain; }
-.file-list-row { min-height: 48px; padding: 4px 9px 4px 14px; border-bottom: 1px solid #edf0ee; color: #3a453e; cursor: default; user-select: none; }
-.file-list-row:hover, .file-list-row:focus-visible { background: #edf3ef; outline: 0; }
-.file-list-row.drop-target { background: #dce9e1; box-shadow: inset 0 0 0 1px #5e8c70; }
+.file-list-row { min-height: 48px; padding: 4px 9px 4px 14px; border-bottom: 1px solid var(--app-border-soft); color: var(--app-text-secondary); cursor: default; user-select: none; }
+.file-list-row:hover, .file-list-row:focus-visible { background: var(--app-surface-hover); outline: 0; }
+.file-list-row.selected { background: var(--file-selected-bg); box-shadow: inset 3px 0 var(--file-accent); }
+.file-list-row.drop-target { background: var(--file-drop-bg); box-shadow: inset 0 0 0 1px var(--file-accent); }
+.file-list-row.selected:hover, .file-list-row.selected:focus-visible { background: var(--file-selected-bg); }
+.file-list-row.drop-target:hover, .file-list-row.drop-target:focus-visible { background: var(--file-drop-bg); }
 .file-list-name { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .file-list-name > svg { flex: 0 0 auto; }
 .file-list-name > span { min-width: 0; }
 .file-list-name strong, .file-list-name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-list-name strong { color: #303b34; font-size: 12px; font-weight: 600; }
-.file-list-name small { display: none; margin-top: 3px; color: #7b867e; font-size: 9px; }
+.file-list-name strong { color: var(--app-text); font-size: 12px; font-weight: 600; }
+.file-list-name small { display: none; margin-top: 3px; color: var(--app-text-muted); font-size: 9px; }
 .folder-icon { color: #b78930; }
 .archive-icon { color: #9a6b32; }
 .code-icon { color: #4774a8; }
 .file-icon { color: #69736d; }
-.file-list-size, .file-list-row time { color: #707b73; font-size: 11px; }
-.file-row-menu { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; border-radius: 4px; padding: 0; color: #68746c; background: transparent; }
-.file-row-menu:hover { border-color: #ced7d0; color: #25332b; background: #fff; }
-.file-list-empty { display: grid; min-height: 220px; place-items: center; align-content: center; gap: 9px; color: #849087; font-size: 12px; }
-.upload-status { border-top: 1px solid #dce2dd; padding: 7px 9px; background: #fff; }
-.upload-status > div { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; color: #647067; font-size: 11px; }
+.file-list-size, .file-list-row time { color: var(--app-text-muted); font-size: 11px; }
+.file-row-menu { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; border-radius: 4px; padding: 0; color: var(--app-text-muted); background: transparent; }
+.file-row-menu:hover { border-color: var(--app-border); color: var(--app-text); background: var(--app-surface-hover); }
+.file-list-empty { display: grid; min-height: 220px; place-items: center; align-content: center; gap: 9px; color: var(--app-text-muted); font-size: 12px; }
+.upload-status { border-top: 1px solid var(--app-border); padding: 7px 9px; background: var(--app-surface); }
+.upload-status > div { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; color: var(--app-text-muted); font-size: 11px; }
 .upload-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editor-pane { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; background: #fff; }
-.editor-tabbar { display: flex; min-height: 36px; align-items: stretch; justify-content: space-between; border-bottom: 1px solid #d8ded9; background: #f1f4f2; }
-.editor-tab { display: flex; min-width: 140px; max-width: 280px; align-items: center; gap: 6px; border-right: 1px solid #d8ded9; padding-left: 10px; background: #fff; color: #344038; font-size: 12px; }
+.editor-pane { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; background: var(--app-surface); }
+.editor-tabbar { display: flex; min-height: 36px; align-items: stretch; justify-content: space-between; border-bottom: 1px solid var(--app-border); background: var(--app-surface-muted); }
+.editor-tab { display: flex; min-width: 140px; max-width: 280px; align-items: center; gap: 6px; border-right: 1px solid var(--app-border); padding-left: 10px; background: var(--app-surface); color: var(--app-text-secondary); font-size: 12px; }
 .editor-tab > span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .editor-tab > i { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #b77723; }
 .editor-commands { padding: 0 7px; }
-.editor-breadcrumb { min-height: 29px; overflow: hidden; border-bottom: 1px solid #e2e6e3; padding: 6px 11px; color: #747f77; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.editor-breadcrumb { min-height: 29px; overflow: hidden; border-bottom: 1px solid var(--app-border-soft); padding: 6px 11px; color: var(--app-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .editor-breadcrumb span { margin-right: 4px; }
 .editor-content { min-height: 0; flex: 1; overflow: hidden; }
 .editor-content :deep(.code-editor), .editor-content :deep(.cm-editor), .editor-content :deep(.cm-scroller) { height: 100%; min-height: 0; }
-.preview-unavailable, .editor-empty { display: grid; height: 100%; place-items: center; align-content: center; gap: 9px; color: #7b867e; text-align: center; }
-.preview-unavailable strong, .editor-empty strong { color: #3d4841; font-size: 14px; }
+.preview-unavailable, .editor-empty { display: grid; height: 100%; place-items: center; align-content: center; gap: 9px; color: var(--app-text-muted); text-align: center; }
+.preview-unavailable strong, .editor-empty strong { color: var(--app-text); font-size: 14px; }
 .preview-unavailable span, .editor-empty span { max-width: 440px; font-size: 12px; }
-.preview-unavailable small { color: #929b95; }
-.editor-statusbar { display: flex; min-height: 24px; align-items: center; justify-content: flex-end; gap: 14px; border-top: 1px solid #d8ded9; padding: 0 9px; background: #f5f7f5; color: #67736b; font-size: 10px; }
-.file-context-menu { position: fixed; z-index: 5000; display: grid; width: 196px; padding: 5px; color: #303a34; background: #fff; border: 1px solid #cfd7d1; border-radius: 6px; box-shadow: 0 9px 28px rgba(27, 39, 31, 0.2); }
+.preview-unavailable small { color: var(--app-text-subtle); }
+.editor-statusbar { display: flex; min-height: 24px; align-items: center; justify-content: flex-end; gap: 14px; border-top: 1px solid var(--app-border); padding: 0 9px; background: var(--app-surface-muted); color: var(--app-text-muted); font-size: 10px; }
+.file-context-menu { --file-menu-danger: #a23f36; position: fixed; z-index: 5000; display: grid; width: 196px; padding: 5px; color: var(--app-text); background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 6px; box-shadow: var(--app-shadow); }
+:global(html.dark) .file-context-menu { --file-menu-danger: #efa49b; }
 .file-context-menu button { display: flex; width: 100%; min-height: 34px; align-items: center; gap: 9px; border: 0; border-radius: 4px; padding: 6px 9px; color: inherit; background: transparent; text-align: left; font-size: 12px; }
-.file-context-menu button:hover:not(:disabled) { color: #234f3d; background: #edf3ef; }
+.file-context-menu button:hover:not(:disabled) { color: var(--app-text); background: var(--app-surface-hover); }
 .file-context-menu button:disabled { cursor: not-allowed; opacity: 0.42; }
-.file-context-menu button.danger { color: #a23f36; }
-.file-context-separator { height: 1px; margin: 4px 5px; background: #e1e6e2; }
-.danger { color: #b83c35; }
+.file-context-menu button.danger { color: var(--file-menu-danger); }
+.file-context-separator { height: 1px; margin: 4px 5px; background: var(--app-border-soft); }
+.danger { color: var(--file-danger); }
 @media (max-width: 780px) {
   .file-manager { height: min(72vh, 680px); min-height: 480px; }
   .explorer-target { flex-wrap: wrap; }

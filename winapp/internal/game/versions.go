@@ -19,6 +19,7 @@ const (
 	Version1_20_6  Version = 1020006
 	Version1_21    Version = 1021000
 	Version1_21_8  Version = 1021008
+	Version1_21_10 Version = 1021010
 )
 
 type VersionOption struct {
@@ -38,6 +39,7 @@ func SupportedVersions() []VersionOption {
 		{Label: "1.20.6", Version: Version1_20_6, Java: "jdk21"},
 		{Label: "1.21", Version: Version1_21, Java: "jdk21"},
 		{Label: "1.21.8", Version: Version1_21_8, Java: "jdk21"},
+		{Label: "1.21.10", Version: Version1_21_10, Java: "jdk21"},
 	}
 }
 

@@ -13,26 +13,27 @@ import (
 )
 
 type Ticket struct {
-	ID             string    `json:"ticket_id"`
-	Token          string    `json:"ticket"`
-	Scope          string    `json:"scope"`
-	InstanceID     string    `json:"instance_id,omitempty"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	MaxUses        int       `json:"max_uses"`
-	SHA256         string    `json:"sha256,omitempty"`
-	MaxBytes       int64     `json:"max_bytes,omitempty"`
-	ResourceType   string    `json:"resource_type,omitempty"`
-	ResourceID     string    `json:"resource_id,omitempty"`
-	Path           string    `json:"path,omitempty"`
-	Paths          []string  `json:"paths,omitempty"`
-	PathPrefix     bool      `json:"path_prefix,omitempty"`
-	Method         string    `json:"method,omitempty"`
-	OperationID    string    `json:"operation_id,omitempty"`
-	AllowOverwrite bool      `json:"allow_overwrite,omitempty"`
-	AllowRecursive bool      `json:"allow_recursive,omitempty"`
-	ClientIP       string    `json:"-"`
-	SessionID      string    `json:"-"`
-	uses           int
+	ID              string    `json:"ticket_id"`
+	Token           string    `json:"ticket"`
+	Scope           string    `json:"scope"`
+	InstanceID      string    `json:"instance_id,omitempty"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	MaxUses         int       `json:"max_uses"`
+	SHA256          string    `json:"sha256,omitempty"`
+	ExpectedVersion string    `json:"expected_version,omitempty"`
+	MaxBytes        int64     `json:"max_bytes,omitempty"`
+	ResourceType    string    `json:"resource_type,omitempty"`
+	ResourceID      string    `json:"resource_id,omitempty"`
+	Path            string    `json:"path,omitempty"`
+	Paths           []string  `json:"paths,omitempty"`
+	PathPrefix      bool      `json:"path_prefix,omitempty"`
+	Method          string    `json:"method,omitempty"`
+	OperationID     string    `json:"operation_id,omitempty"`
+	AllowOverwrite  bool      `json:"allow_overwrite,omitempty"`
+	AllowRecursive  bool      `json:"allow_recursive,omitempty"`
+	ClientIP        string    `json:"-"`
+	SessionID       string    `json:"-"`
+	uses            int
 }
 
 type TicketOptions struct {
@@ -41,22 +42,23 @@ type TicketOptions struct {
 }
 
 type RestrictedOptions struct {
-	Scope          string
-	ResourceType   string
-	ResourceID     string
-	Path           string
-	Paths          []string
-	PathPrefix     bool
-	Method         string
-	OperationID    string
-	AllowOverwrite bool
-	AllowRecursive bool
-	MaxBytes       int64
-	SHA256         string
-	TTL            time.Duration
-	MaxUses        int
-	ClientIP       string
-	SessionID      string
+	Scope           string
+	ResourceType    string
+	ResourceID      string
+	Path            string
+	Paths           []string
+	PathPrefix      bool
+	Method          string
+	OperationID     string
+	AllowOverwrite  bool
+	AllowRecursive  bool
+	MaxBytes        int64
+	SHA256          string
+	ExpectedVersion string
+	TTL             time.Duration
+	MaxUses         int
+	ClientIP        string
+	SessionID       string
 }
 
 func (m *Manager) CreateRestricted(options RestrictedOptions) (Ticket, error) {
@@ -100,6 +102,7 @@ func (m *Manager) CreateRestricted(options RestrictedOptions) (Ticket, error) {
 	stored.AllowRecursive = options.AllowRecursive
 	stored.MaxBytes = options.MaxBytes
 	stored.SHA256 = strings.ToLower(options.SHA256)
+	stored.ExpectedVersion = strings.ToLower(strings.TrimSpace(options.ExpectedVersion))
 	item = *stored
 	m.mu.Unlock()
 	return item, nil

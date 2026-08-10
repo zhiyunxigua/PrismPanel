@@ -39,12 +39,30 @@ func TestFileLifecycleAndVersionConflict(t *testing.T) {
 	if err := service.Create(target, "plugins", "directory"); err != nil {
 		t.Fatal(err)
 	}
-	uploaded, err := service.Upload(target, "plugins/example.jar", bytes.NewReader([]byte("jar")), 3, "", false)
+	uploaded, err := service.Upload(target, "plugins/example.jar", bytes.NewReader([]byte("jar")), 3, "", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if uploaded.Path != "plugins/example.jar" || uploaded.Size != 3 {
 		t.Fatalf("unexpected upload result: %#v", uploaded)
+	}
+	uploadPath := filepath.Join(root, "plugins", "example.jar")
+	baseVersion, err := fileVersion(uploadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(uploadPath, []byte("changed"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Upload(target, uploaded.Path, bytes.NewReader([]byte("local")), 5, "", true, baseVersion); err == nil {
+		t.Fatal("expected stale upload version to be rejected")
+	}
+	currentVersion, err := fileVersion(uploadPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Upload(target, uploaded.Path, bytes.NewReader([]byte("local")), 5, "", true, currentVersion); err != nil {
+		t.Fatal(err)
 	}
 	if err := service.Move(target, uploaded.Path, "plugins/renamed.jar", false); err != nil {
 		t.Fatal(err)
@@ -313,6 +331,6 @@ func newTestService(t *testing.T) (*Service, Target, string) {
 	}
 	serverService := serverservice.NewService(store.NewServerStore(t.TempDir()), manager, []model.ServerConfig{serverConfig})
 	deployments := deployment.NewManager(serverService, manager, cfg.Files.CopyConcurrency)
-	service := NewService(serverService, manager, deployments, cfg.Files.MaxEditFileSize, cfg.Files.MaxUploadFileSize, cfg.Files.MaxExtractedSize, 2)
+	service := NewService(serverService, manager, deployments, cfg.Files.MaxEditFileSize, cfg.Files.MaxUploadFileSize, cfg.Files.MaxExtractedSize, cfg.Files.MaxArchiveDownloadSize, 2)
 	return service, Target{Type: "instance", ID: "test"}, root
 }

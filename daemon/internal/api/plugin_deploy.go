@@ -14,6 +14,14 @@ import (
 )
 
 func (s *Server) handlePluginDeploy(writer http.ResponseWriter, request *http.Request) {
+	s.handlePluginBundleDeploy(writer, request, "plugin.deploy", false)
+}
+
+func (s *Server) handlePluginConfigDeploy(writer http.ResponseWriter, request *http.Request) {
+	s.handlePluginBundleDeploy(writer, request, "plugin.config.deploy", true)
+}
+
+func (s *Server) handlePluginBundleDeploy(writer http.ResponseWriter, request *http.Request, scope string, configOnly bool) {
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", "POST")
 		writeJSON(writer, http.StatusMethodNotAllowed, map[string]any{"success": false,
@@ -22,7 +30,7 @@ func (s *Server) handlePluginDeploy(writer http.ResponseWriter, request *http.Re
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
 	serverID := strings.TrimSpace(request.URL.Query().Get("server_id"))
-	created, err := s.tickets.Consume(token, "plugin.deploy", serverID)
+	created, err := s.tickets.Consume(token, scope, serverID)
 	if err != nil {
 		writeJSON(writer, http.StatusUnauthorized, map[string]any{"success": false, "error": apperr.From(err)})
 		return
@@ -52,7 +60,12 @@ func (s *Server) handlePluginDeploy(writer http.ResponseWriter, request *http.Re
 			"error": apperr.New("PLUGIN_HASH_MISMATCH", "plugin bundle sha256 does not match ticket")})
 		return
 	}
-	result, err := s.plugins.Deploy(serverID, path)
+	var result any
+	if configOnly {
+		result, err = s.plugins.DeployConfig(serverID, path)
+	} else {
+		result, err = s.plugins.Deploy(serverID, path)
+	}
 	if err != nil {
 		writePluginDeployError(writer, err)
 		return

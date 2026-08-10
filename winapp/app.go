@@ -10,6 +10,7 @@ import (
 	"PrismPanel-winapp/internal/application"
 	"PrismPanel-winapp/internal/client"
 	"PrismPanel-winapp/internal/credentials"
+	"PrismPanel-winapp/internal/fileopen"
 	"PrismPanel-winapp/internal/game"
 	"PrismPanel-winapp/internal/settings"
 	"PrismPanel-winapp/internal/updater"
@@ -20,6 +21,7 @@ type App struct {
 	service   *application.Service
 	joins     *game.JoinManager
 	processes *game.ProcessManager
+	files     *fileopen.Service
 
 	netEaseMu      sync.Mutex
 	netEaseClient  *game.Client
@@ -37,12 +39,18 @@ func newApp() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &App{
+	cachePath, err := fileopen.DefaultCacheDir()
+	if err != nil {
+		return nil, err
+	}
+	app := &App{
 		service:     application.New(settings.NewStore(settingsPath), credentials.NewStore()),
 		joins:       game.NewJoinManager(),
 		processes:   game.NewProcessManager(),
 		startupDone: make(chan struct{}),
-	}, nil
+	}
+	app.files = fileopen.New(cachePath, app.emitFileSyncEvent)
+	return app, nil
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -50,12 +58,33 @@ func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
 	a.ctx = ctx
 	a.mu.Unlock()
+	a.files.Start(ctx)
 	runtimeErr := game.InstallNetEaseRuntime(ctx)
 	serviceErr := a.service.Start(ctx)
 	if err := errors.Join(runtimeErr, serviceErr); err != nil {
 		a.mu.Lock()
 		a.startErr = err.Error()
 		a.mu.Unlock()
+	}
+}
+
+func (a *App) OpenRemoteFile(input fileopen.Input, chooseApplication bool) (fileopen.OpenedFile, error) {
+	runtime := a.service.RuntimeConfig()
+	ctx, cancel := a.operationContext(30 * time.Minute)
+	defer cancel()
+	return a.files.Open(ctx, fileopen.Runtime{
+		APIBaseURL: runtime.APIBaseURL, ProxySession: runtime.ProxySession,
+	}, input, chooseApplication)
+}
+
+func (a *App) FileOpenLimit() int64 { return fileopen.MaxOpenFileSize }
+
+func (a *App) emitFileSyncEvent(event fileopen.Event) {
+	a.mu.Lock()
+	ctx := a.ctx
+	a.mu.Unlock()
+	if ctx != nil {
+		wailsRuntime.EventsEmit(ctx, "prism:file-sync", event)
 	}
 }
 

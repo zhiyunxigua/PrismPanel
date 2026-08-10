@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -28,6 +29,8 @@ import (
 const (
 	maxDirectoriesPerList = 32
 	maxEntriesPerList     = 5000
+	UploadChunkSize       = 2 * 1024 * 1024
+	uploadSessionTTL      = 20 * time.Minute
 )
 
 type Target struct {
@@ -68,20 +71,34 @@ type Content struct {
 }
 
 type Service struct {
-	servers     *serverservice.Service
-	supervisor  *supervisor.Manager
-	deployments *deployment.Manager
-	maxEdit     int64
-	maxUpload   int64
-	maxExtract  int64
-	transfers   chan struct{}
+	servers            *serverservice.Service
+	supervisor         *supervisor.Manager
+	deployments        *deployment.Manager
+	maxEdit            int64
+	maxUpload          int64
+	maxExtract         int64
+	maxArchiveDownload int64
+	transfers          chan struct{}
+	uploadMu           sync.Mutex
+	uploads            map[string]*uploadState
 }
 
-func NewService(servers *serverservice.Service, processManager *supervisor.Manager, deployments *deployment.Manager, maxEdit, maxUpload, maxExtract int64, concurrentTransfers int) *Service {
+type uploadState struct {
+	path        string
+	lastUsed    time.Time
+	mu          sync.Mutex
+	timer       *time.Timer
+	published   bool
+	entry       Entry
+	finalOffset int64
+}
+
+func NewService(servers *serverservice.Service, processManager *supervisor.Manager, deployments *deployment.Manager, maxEdit, maxUpload, maxExtract, maxArchiveDownload int64, concurrentTransfers int) *Service {
 	return &Service{
 		servers: servers, supervisor: processManager, deployments: deployments,
-		maxEdit: maxEdit, maxUpload: maxUpload, maxExtract: maxExtract,
+		maxEdit: maxEdit, maxUpload: maxUpload, maxExtract: maxExtract, maxArchiveDownload: maxArchiveDownload,
 		transfers: make(chan struct{}, concurrentTransfers),
+		uploads:   make(map[string]*uploadState),
 	}
 }
 
@@ -305,7 +322,7 @@ func (s *Service) Create(target Target, relative, kind string) error {
 	})
 }
 
-func (s *Service) Upload(target Target, relative string, source io.Reader, expectedSize int64, expectedSHA string, overwrite bool) (Entry, error) {
+func (s *Service) Upload(target Target, relative string, source io.Reader, expectedSize int64, expectedSHA string, overwrite bool, expectedVersion string) (Entry, error) {
 	if expectedSize < 0 || expectedSize > s.maxUpload {
 		return Entry{}, apperr.New("FILE_TOO_LARGE", "上传文件超过节点限制")
 	}
@@ -329,6 +346,15 @@ func (s *Service) Upload(target Target, relative string, source io.Reader, expec
 			}
 			if !overwrite {
 				return apperr.New("FILE_EXISTS", "目标文件已存在")
+			}
+			if expectedVersion != "" {
+				currentVersion, versionErr := fileVersion(targetPath)
+				if versionErr != nil {
+					return fileError(versionErr, "无法校验上传目标版本")
+				}
+				if !strings.EqualFold(currentVersion, expectedVersion) {
+					return apperr.New("FILE_CHANGED", "文件已被其他程序修改")
+				}
 			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return fileError(statErr, "无法检查上传目标")
@@ -373,11 +399,248 @@ func (s *Service) Upload(target Target, relative string, source io.Reader, expec
 	return result, err
 }
 
+func (s *Service) UploadChunk(target Target, relative string, source io.Reader, expectedSize int64, expectedSHA string, overwrite bool, expectedVersion, sessionID string, offset int64, final bool) (Entry, int64, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return Entry{}, 0, apperr.New("INVALID_REQUEST", "上传会话无效")
+	}
+	if expectedSize < 0 || expectedSize > s.maxUpload || offset < 0 || offset > expectedSize {
+		return Entry{}, 0, apperr.New("FILE_SIZE_MISMATCH", "上传大小或偏移无效")
+	}
+	if !s.acquireTransfer() {
+		return Entry{}, 0, apperr.New("TOO_MANY_REQUESTS", "文件传输并发数已达到上限")
+	}
+	defer s.releaseTransfer()
+
+	chunk, err := io.ReadAll(io.LimitReader(source, UploadChunkSize+1))
+	if err != nil {
+		return Entry{}, 0, apperr.Wrap("FILE_WRITE_FAILED", "上传分块读取失败", err)
+	}
+	if int64(len(chunk)) > UploadChunkSize || int64(len(chunk)) > expectedSize-offset {
+		return Entry{}, 0, apperr.New("FILE_SIZE_MISMATCH", "上传分块大小无效")
+	}
+	nextOffset := offset + int64(len(chunk))
+	if final != (nextOffset == expectedSize) {
+		return Entry{}, 0, apperr.New("FILE_SIZE_MISMATCH", "上传最终分块标记无效")
+	}
+
+	s.cleanupUploadSessions()
+	var result Entry
+	err = s.mutate(target, func(root string) error {
+		clean, normalizeErr := normalizeRelative(relative)
+		if normalizeErr != nil || clean == "." {
+			return apperr.New("INVALID_REQUEST", "上传目标路径无效")
+		}
+		targetPath, pathErr := securePath(root, clean, true)
+		if pathErr != nil {
+			return pathErr
+		}
+		tempPath := filepath.Join(filepath.Dir(targetPath), ".prism-upload-"+safeUploadSessionID(sessionID))
+		if !pathWithin(root, tempPath) {
+			return apperr.New("PATH_ESCAPE", "上传临时文件超出工作目录")
+		}
+		s.uploadMu.Lock()
+		state := s.uploads[sessionID]
+		if state != nil && state.path != tempPath {
+			s.uploadMu.Unlock()
+			return apperr.New("PERMISSION_DENIED", "上传会话与目标路径不匹配")
+		}
+		if state == nil {
+			state = &uploadState{path: tempPath}
+			s.uploads[sessionID] = state
+			state.timer = time.AfterFunc(uploadSessionTTL, func() {
+				s.expireUploadSession(sessionID, state)
+			})
+		} else if state.timer != nil {
+			state.timer.Reset(uploadSessionTTL)
+		}
+		state.lastUsed = time.Now()
+		s.uploadMu.Unlock()
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if state.published {
+			if final && offset == state.finalOffset {
+				returnEntry := state.entry
+				result = returnEntry
+				return nil
+			}
+			return apperr.New("UPLOAD_OFFSET_MISMATCH", "上传会话已经完成")
+		}
+		published := false
+		defer func() {
+			if final && !published {
+				if state.timer != nil {
+					state.timer.Stop()
+				}
+				_ = os.Remove(tempPath)
+				s.uploadMu.Lock()
+				delete(s.uploads, sessionID)
+				s.uploadMu.Unlock()
+			}
+		}()
+
+		file, openErr := os.OpenFile(tempPath, os.O_RDWR|os.O_CREATE, 0o640)
+		if openErr != nil {
+			return apperr.Wrap("FILE_WRITE_FAILED", "无法打开上传临时文件", openErr)
+		}
+		defer file.Close()
+		stat, statErr := file.Stat()
+		if statErr != nil {
+			return apperr.Wrap("FILE_WRITE_FAILED", "无法读取上传临时文件", statErr)
+		}
+		if stat.Size() < offset {
+			return apperr.New("UPLOAD_OFFSET_MISMATCH", "上传分块偏移与已接收数据不一致")
+		}
+		if stat.Size() > offset {
+			existing := make([]byte, len(chunk))
+			if _, readErr := file.ReadAt(existing, offset); readErr != nil && !errors.Is(readErr, io.EOF) {
+				return apperr.Wrap("FILE_WRITE_FAILED", "无法校验上传分块", readErr)
+			}
+			if !bytes.Equal(existing, chunk) {
+				return apperr.New("UPLOAD_OFFSET_MISMATCH", "重试分块与已接收数据不一致")
+			}
+		} else if len(chunk) > 0 {
+			if _, seekErr := file.Seek(offset, io.SeekStart); seekErr != nil {
+				return apperr.Wrap("FILE_WRITE_FAILED", "无法定位上传临时文件", seekErr)
+			}
+			if _, writeErr := file.Write(chunk); writeErr != nil {
+				return apperr.Wrap("FILE_WRITE_FAILED", "上传分块写入失败", writeErr)
+			}
+			if syncErr := file.Sync(); syncErr != nil {
+				return apperr.Wrap("FILE_WRITE_FAILED", "上传分块同步失败", syncErr)
+			}
+		}
+		if !final {
+			return nil
+		}
+		stat, statErr = file.Stat()
+		if statErr != nil {
+			return apperr.Wrap("FILE_WRITE_FAILED", "无法读取上传结果", statErr)
+		}
+		if stat.Size() != expectedSize {
+			return apperr.New("FILE_SIZE_MISMATCH", "上传文件大小与授权不一致")
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return apperr.Wrap("FILE_WRITE_FAILED", "上传临时文件关闭失败", closeErr)
+		}
+		digest, hashErr := fileVersion(tempPath)
+		if hashErr != nil {
+			return apperr.Wrap("FILE_WRITE_FAILED", "无法校验上传文件摘要", hashErr)
+		}
+		if expectedSHA != "" && !strings.EqualFold(expectedSHA, digest) {
+			return apperr.New("FILE_HASH_MISMATCH", "上传文件摘要与授权不一致")
+		}
+		if info, targetErr := os.Lstat(targetPath); targetErr == nil {
+			if info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return apperr.New("INVALID_REQUEST", "上传目标不是普通文件")
+			}
+			if !overwrite {
+				return apperr.New("FILE_EXISTS", "上传目标文件已存在")
+			}
+			if expectedVersion != "" {
+				currentVersion, versionErr := fileVersion(targetPath)
+				if versionErr != nil {
+					return apperr.Wrap("FILE_WRITE_FAILED", "无法校验上传目标版本", versionErr)
+				}
+				if !strings.EqualFold(currentVersion, expectedVersion) {
+					return apperr.New("FILE_CHANGED", "文件已被其他程序修改")
+				}
+			}
+		} else if !errors.Is(targetErr, os.ErrNotExist) {
+			return fileError(targetErr, "无法检查上传目标")
+		}
+		if publishErr := atomicfile.Publish(tempPath, targetPath, overwrite); publishErr != nil {
+			if errors.Is(publishErr, os.ErrExist) {
+				return apperr.New("FILE_EXISTS", "上传目标文件已存在")
+			}
+			return apperr.Wrap("FILE_WRITE_FAILED", "上传文件发布失败", publishErr)
+		}
+		info, statErr := os.Stat(targetPath)
+		if statErr != nil {
+			return fileError(statErr, "无法读取上传结果")
+		}
+		result = Entry{Name: path.Base(clean), Path: clean, Type: "file", Size: info.Size(), ModifiedAt: info.ModTime().UTC(), Mode: uint32(info.Mode().Perm())}
+		state.published = true
+		state.entry = result
+		state.finalOffset = offset
+		published = true
+		return nil
+	})
+	if err != nil {
+		return Entry{}, 0, err
+	}
+	return result, nextOffset, nil
+}
+
+func safeUploadSessionID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "invalid"
+	}
+	return strings.Map(func(char rune) rune {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '-' || char == '_' {
+			return char
+		}
+		return '_'
+	}, value)
+}
+
+func (s *Service) cleanupUploadSessions() {
+	now := time.Now()
+	var expired []*uploadState
+	s.uploadMu.Lock()
+	for id, state := range s.uploads {
+		if now.Sub(state.lastUsed) > uploadSessionTTL {
+			delete(s.uploads, id)
+			expired = append(expired, state)
+		}
+	}
+	s.uploadMu.Unlock()
+	for _, state := range expired {
+		state.mu.Lock()
+		_ = os.Remove(state.path)
+		state.mu.Unlock()
+	}
+}
+
+func (s *Service) expireUploadSession(id string, state *uploadState) {
+	s.uploadMu.Lock()
+	current := s.uploads[id]
+	if current != state {
+		s.uploadMu.Unlock()
+		return
+	}
+	if remaining := uploadSessionTTL - time.Since(state.lastUsed); remaining > 0 {
+		state.timer.Reset(remaining)
+		s.uploadMu.Unlock()
+		return
+	}
+	delete(s.uploads, id)
+	s.uploadMu.Unlock()
+	state.mu.Lock()
+	_ = os.Remove(state.path)
+	state.mu.Unlock()
+}
+
+func fileVersion(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if err := errors.Join(copyErr, closeErr); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
 type Download struct {
 	File    *os.File
 	Name    string
 	Size    int64
 	Mode    time.Time
+	ETag    string
 	cleanup func()
 	release func()
 }
@@ -424,7 +687,7 @@ func (s *Service) OpenDownload(target Target, relative string) (*Download, error
 		return nil, apperr.New("PATH_ESCAPE", "下载目标不能是符号链接")
 	}
 	if info.IsDir() {
-		download, archiveErr := createDirectoryDownload(filePath, path.Base(clean))
+		download, archiveErr := createDirectoryDownload(filePath, path.Base(clean), s.maxArchiveDownload)
 		if archiveErr != nil {
 			s.releaseTransfer()
 			return nil, archiveErr
@@ -441,7 +704,8 @@ func (s *Service) OpenDownload(target Target, relative string) (*Download, error
 		s.releaseTransfer()
 		return nil, fileError(err, "文件打开失败")
 	}
-	return &Download{File: file, Name: path.Base(clean), Size: info.Size(), Mode: info.ModTime().UTC(), release: s.releaseTransfer}, nil
+	etag := `W/"` + strconv.FormatInt(info.Size(), 16) + "-" + strconv.FormatInt(info.ModTime().UnixNano(), 16) + `"`
+	return &Download{File: file, Name: path.Base(clean), Size: info.Size(), Mode: info.ModTime().UTC(), ETag: etag, release: s.releaseTransfer}, nil
 }
 
 func (s *Service) Move(target Target, source, destination string, overwrite bool) error {

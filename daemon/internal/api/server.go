@@ -28,6 +28,7 @@ import (
 )
 
 var Version = "0.0.1"
+
 const ProtocolVersion = "1"
 
 type Server struct {
@@ -74,6 +75,7 @@ func NewServer(
 	mux.HandleFunc("/api/v1/ws/console", api.handleConsole)
 	mux.HandleFunc("/api/v1/ws/plugin", api.handlePlugin)
 	mux.HandleFunc("/api/v1/plugins/deploy", api.handlePluginDeploy)
+	mux.HandleFunc("/api/v1/plugins/config/deploy", api.handlePluginConfigDeploy)
 	mux.HandleFunc("/api/v1/plugins/upload", api.handlePluginUpload)
 	mux.HandleFunc("/api/v1/files/", api.handleFiles)
 	api.http = &http.Server{
@@ -510,6 +512,15 @@ func (s *Server) executeFrom(callerSource, messageType string, raw json.RawMessa
 			return nil, invalidJSON(err)
 		}
 		return s.deployments.Start(input.ServerID, input.Targets)
+	case "deployment.plugin_config_sync.start":
+		var input struct {
+			ServerID string `json:"server_id"`
+			Targets  []int  `json:"targets,omitempty"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		return s.deployments.StartPluginConfigSync(input.ServerID, input.Targets)
 	case "deployment.get":
 		var input struct {
 			TaskID string `json:"task_id"`
@@ -541,22 +552,24 @@ func (s *Server) executeFrom(callerSource, messageType string, raw json.RawMessa
 
 func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 	var input struct {
-		Scope        string   `json:"scope"`
-		InstanceID   string   `json:"instance_id"`
-		TTLSeconds   int      `json:"ttl_seconds"`
-		SHA256       string   `json:"sha256,omitempty"`
-		Size         int64    `json:"size,omitempty"`
-		ResourceType string   `json:"resource_type,omitempty"`
-		ResourceID   string   `json:"resource_id,omitempty"`
-		Path         string   `json:"path,omitempty"`
-		Paths        []string `json:"paths,omitempty"`
-		PathPrefix   bool     `json:"path_prefix,omitempty"`
-		Method       string   `json:"method,omitempty"`
-		OperationID  string   `json:"operation_id,omitempty"`
-		Overwrite    bool     `json:"overwrite,omitempty"`
-		Recursive    bool     `json:"recursive,omitempty"`
-		SourceIP     string   `json:"source_ip,omitempty"`
-		SessionID    string   `json:"session_id,omitempty"`
+		Scope           string   `json:"scope"`
+		InstanceID      string   `json:"instance_id"`
+		TTLSeconds      int      `json:"ttl_seconds"`
+		SHA256          string   `json:"sha256,omitempty"`
+		ExpectedVersion string   `json:"expected_version,omitempty"`
+		Size            int64    `json:"size,omitempty"`
+		ResourceType    string   `json:"resource_type,omitempty"`
+		ResourceID      string   `json:"resource_id,omitempty"`
+		Path            string   `json:"path,omitempty"`
+		Paths           []string `json:"paths,omitempty"`
+		PathPrefix      bool     `json:"path_prefix,omitempty"`
+		Method          string   `json:"method,omitempty"`
+		OperationID     string   `json:"operation_id,omitempty"`
+		Overwrite       bool     `json:"overwrite,omitempty"`
+		Recursive       bool     `json:"recursive,omitempty"`
+		Chunked         bool     `json:"chunked,omitempty"`
+		SourceIP        string   `json:"source_ip,omitempty"`
+		SessionID       string   `json:"session_id,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, invalidJSON(err)
@@ -592,7 +605,7 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			"public_url": s.config.Server.PublicURL, "upload_path": "/api/v1/plugins/upload",
 		}, nil
 	}
-	if input.Scope == "plugin.deploy" {
+	if input.Scope == "plugin.deploy" || input.Scope == "plugin.config.deploy" {
 		if _, err := s.servers.Get(input.InstanceID); err != nil {
 			return nil, err
 		}
@@ -604,10 +617,14 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		uploadPath := "/api/v1/plugins/deploy"
+		if input.Scope == "plugin.config.deploy" {
+			uploadPath = "/api/v1/plugins/config/deploy"
+		}
 		return map[string]any{
 			"ticket_id": created.ID, "ticket": created.Token, "expires_at": created.ExpiresAt,
 			"scope": created.Scope, "instance_id": created.InstanceID,
-			"public_url": s.config.Server.PublicURL, "upload_path": "/api/v1/plugins/deploy",
+			"public_url": s.config.Server.PublicURL, "upload_path": uploadPath,
 		}, nil
 	}
 	if strings.HasPrefix(input.Scope, "file.") {
@@ -616,7 +633,8 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			"file.edit": http.MethodPut, "file.upload": http.MethodPost,
 			"file.import":   http.MethodPost,
 			"file.download": http.MethodGet, "file.create": http.MethodPost,
-			"file.move": http.MethodPost, "file.archive": http.MethodPost, "file.delete": http.MethodPost,
+			"file.move": http.MethodPost, "file.copy": http.MethodPost,
+			"file.archive": http.MethodPost, "file.delete": http.MethodPost,
 		}
 		method, exists := allowed[input.Scope]
 		if !exists || (input.Method != "" && !strings.EqualFold(input.Method, method)) {
@@ -645,6 +663,13 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			maxUses = 64
 			input.PathPrefix = true
 		}
+		if input.Scope == "file.upload" && input.Chunked {
+			chunks := (input.Size + fileservice.UploadChunkSize - 1) / fileservice.UploadChunkSize
+			if chunks < 1 {
+				chunks = 1
+			}
+			maxUses = int(chunks*4 + 1)
+		}
 		maxBytes := input.Size
 		if input.Scope == "file.edit" || input.Scope == "file.read" {
 			maxBytes = s.config.Files.MaxEditFileSize
@@ -658,7 +683,8 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			Scope: input.Scope, ResourceType: input.ResourceType, ResourceID: input.ResourceID,
 			Path: input.Path, Paths: input.Paths, PathPrefix: input.PathPrefix, Method: method,
 			OperationID: input.OperationID, MaxBytes: maxBytes, SHA256: input.SHA256,
-			AllowOverwrite: input.Overwrite, AllowRecursive: input.Recursive,
+			ExpectedVersion: input.ExpectedVersion,
+			AllowOverwrite:  input.Overwrite, AllowRecursive: input.Recursive,
 			TTL: time.Duration(input.TTLSeconds) * time.Second, MaxUses: maxUses,
 			ClientIP: input.SourceIP, SessionID: input.SessionID,
 		})
@@ -673,6 +699,7 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			"scope": created.Scope, "resource_type": created.ResourceType,
 			"resource_id": created.ResourceID, "path": created.Path, "paths": created.Paths,
 			"public_url": s.config.Server.PublicURL, "max_bytes": created.MaxBytes,
+			"max_uses": created.MaxUses, "chunk_size": fileservice.UploadChunkSize,
 		}, nil
 	}
 	if input.Scope != "console.read" {

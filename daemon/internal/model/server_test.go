@@ -57,3 +57,41 @@ func TestUnsupportedConsoleEncodingIsRejected(t *testing.T) {
 		t.Fatal("expected unsupported console encoding to be rejected")
 	}
 }
+
+func TestPluginConfigSyncExtensionsNormalization(t *testing.T) {
+	cfg := ServerConfig{Type: "mirror", PluginConfigSyncExtensions: []string{"YML", ".Json", ".yml", "  .toml  "}}
+	cfg.Normalize()
+	expected := []string{".yml", ".json", ".toml"}
+	if len(cfg.PluginConfigSyncExtensions) != len(expected) {
+		t.Fatalf("unexpected normalized extensions: %#v", cfg.PluginConfigSyncExtensions)
+	}
+	for index := range expected {
+		if cfg.PluginConfigSyncExtensions[index] != expected[index] {
+			t.Fatalf("unexpected normalized extensions: %#v", cfg.PluginConfigSyncExtensions)
+		}
+	}
+	if !cfg.AllowsPluginConfigSync("config.YML") || cfg.AllowsPluginConfigSync("data.db") {
+		t.Fatal("plugin config suffix matching did not use the normalized whitelist")
+	}
+}
+
+func TestPluginConfigSyncExtensionsDefault(t *testing.T) {
+	cfg := ServerConfig{Type: "mirror"}
+	cfg.Normalize()
+	if len(cfg.PluginConfigSyncExtensions) == 0 || !cfg.AllowsPluginConfigSync("config.yml") {
+		t.Fatalf("expected a conservative default whitelist, got %#v", cfg.PluginConfigSyncExtensions)
+	}
+}
+
+func TestPluginConfigSyncExtensionsDefaultPassValidation(t *testing.T) {
+	cfg := ServerConfig{
+		SchemaVersion: SchemaVersion, Type: "mirror", Platform: "paper", ServerID: "default-suffixes",
+		Name: "Default suffixes", RootPath: t.TempDir(), ImageDirectory: "image", InstanceCount: 1,
+		Ports: []int{25571}, Process: ProcessConfig{StartCommand: "java -jar server.jar", StopCommand: "stop"},
+		Console: ConsoleConfig{Encoding: "utf-8"},
+	}
+	cfg.Normalize()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default plugin config suffixes should be valid: %v", err)
+	}
+}

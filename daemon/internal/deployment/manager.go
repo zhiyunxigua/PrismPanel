@@ -31,6 +31,11 @@ const (
 	StatusFailed              Status = "failed"
 )
 
+const (
+	TaskKindMirrorDeploy     = "mirror_deploy"
+	TaskKindPluginConfigSync = "plugin_config_sync"
+)
+
 type Log struct {
 	Sequence   uint64    `json:"sequence"`
 	Timestamp  time.Time `json:"timestamp"`
@@ -43,6 +48,7 @@ type Log struct {
 type Snapshot struct {
 	TaskID          string     `json:"task_id"`
 	ServerID        string     `json:"server_id"`
+	Kind            string     `json:"kind"`
 	Targets         []int      `json:"targets"`
 	Status          Status     `json:"status"`
 	CurrentInstance string     `json:"current_instance,omitempty"`
@@ -88,6 +94,14 @@ func NewManager(servers *serverservice.Service, processManager *supervisor.Manag
 }
 
 func (m *Manager) Start(serverID string, requested []int) (Snapshot, error) {
+	return m.start(serverID, requested, TaskKindMirrorDeploy)
+}
+
+func (m *Manager) StartPluginConfigSync(serverID string, requested []int) (Snapshot, error) {
+	return m.start(serverID, requested, TaskKindPluginConfigSync)
+}
+
+func (m *Manager) start(serverID string, requested []int, kind string) (Snapshot, error) {
 	cfg, err := m.servers.Get(serverID)
 	if err != nil {
 		return Snapshot{}, err
@@ -141,7 +155,7 @@ func (m *Manager) Start(serverID string, requested []int) (Snapshot, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	item := &task{
 		Snapshot: Snapshot{
-			TaskID: taskID, ServerID: serverID, Targets: targets,
+			TaskID: taskID, ServerID: serverID, Kind: kind, Targets: targets,
 			Status: StatusQueued, CopyConcurrency: m.copyConcurrency,
 			CreatedAt: time.Now().UTC(), Logs: make([]Log, 0, 64),
 		},
@@ -153,7 +167,11 @@ func (m *Manager) Start(serverID string, requested []int) (Snapshot, error) {
 	imageLocked = false
 	m.tasks[taskID] = item
 	m.active[serverID] = taskID
-	m.appendLogLocked(item, "info", "queued", "", "部署任务已进入队列")
+	message := "部署任务已进入队列"
+	if kind == TaskKindPluginConfigSync {
+		message = "插件配置同步任务已进入队列"
+	}
+	m.appendLogLocked(item, "info", "queued", "", message)
 	snapshot := cloneSnapshot(item.Snapshot)
 	m.mu.Unlock()
 	go m.run(item, cfg)
@@ -214,10 +232,18 @@ func (m *Manager) Cancel(taskID string, force bool) (Snapshot, error) {
 	item.force = force
 	if force {
 		item.Status = StatusForceStopRequested
-		m.appendLogLocked(item, "warn", "force_stop_requested", item.CurrentInstance, "已请求强制结束部署")
+		message := "已请求强制结束部署"
+		if item.Kind == TaskKindPluginConfigSync {
+			message = "已请求强制结束插件配置同步"
+		}
+		m.appendLogLocked(item, "warn", "force_stop_requested", item.CurrentInstance, message)
 	} else {
 		item.Status = StatusCancelRequested
-		m.appendLogLocked(item, "warn", "cancel_requested", item.CurrentInstance, "已请求在安全点取消部署")
+		message := "已请求在安全点取消部署"
+		if item.Kind == TaskKindPluginConfigSync {
+			message = "已请求在安全点取消插件配置同步"
+		}
+		m.appendLogLocked(item, "warn", "cancel_requested", item.CurrentInstance, message)
 	}
 	item.cancel()
 	snapshot := cloneSnapshot(item.Snapshot)
@@ -231,7 +257,11 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 	m.mu.Lock()
 	item.Status = StatusRunning
 	item.StartedAt = &now
-	m.appendLogLocked(item, "info", "prechecking", "", "部署预检查完成")
+	message := "部署预检查完成"
+	if item.Kind == TaskKindPluginConfigSync {
+		message = "插件配置同步预检查完成"
+	}
+	m.appendLogLocked(item, "info", "prechecking", "", message)
 	m.mu.Unlock()
 
 	for _, slot := range item.Targets {
@@ -247,17 +277,33 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 		item.CopyFilesDone = 0
 		item.CopyBytesTotal = 0
 		item.CopyBytesDone = 0
-		m.appendLogLocked(item, "info", "stopping", instanceID, "正在准备目标实例")
+		stage := "stopping"
+		message := "正在准备目标实例"
+		if item.Kind == TaskKindPluginConfigSync {
+			stage = "syncing_plugin_config"
+			message = "正在准备插件配置同步"
+		}
+		m.appendLogLocked(item, "info", stage, instanceID, message)
 		m.mu.Unlock()
 
-		err := m.supervisor.DeployInstance(
-			instanceID,
-			func(target supervisor.DeploymentTarget) error {
-				return m.deployFiles(item, cfg, target)
-			},
-			func() bool { return !m.isForce(item) },
-			func() bool { return item.context.Err() != nil },
-		)
+		var err error
+		if item.Kind == TaskKindPluginConfigSync {
+			snapshot, snapshotErr := m.supervisor.Get(instanceID)
+			if snapshotErr != nil {
+				err = snapshotErr
+			} else {
+				err = m.syncPluginConfigFiles(item, cfg, instanceID, snapshot.Workspace)
+			}
+		} else {
+			err = m.supervisor.DeployInstance(
+				instanceID,
+				func(target supervisor.DeploymentTarget) error {
+					return m.deployFiles(item, cfg, target)
+				},
+				func() bool { return !m.isForce(item) },
+				func() bool { return item.context.Err() != nil },
+			)
+		}
 		if err != nil {
 			if item.context.Err() != nil {
 				m.finishCancelled(item)
@@ -270,7 +316,11 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 			m.mu.Unlock()
 		} else {
 			m.mu.Lock()
-			m.appendLogLocked(item, "info", "completed", instanceID, "目标实例部署完成")
+			message := "目标实例部署完成"
+			if item.Kind == TaskKindPluginConfigSync {
+				message = "目标实例插件配置同步完成"
+			}
+			m.appendLogLocked(item, "info", "completed", instanceID, message)
 			m.mu.Unlock()
 		}
 		m.mu.Lock()
@@ -284,11 +334,19 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 	item.FinishedAt = &finished
 	if item.Failed > 0 {
 		item.Status = StatusCompletedWithErrors
-		m.appendLogLocked(item, "warn", "completed", "", "部署完成，但部分实例失败")
+		message := "部署完成，但部分实例失败"
+		if item.Kind == TaskKindPluginConfigSync {
+			message = "插件配置同步完成，但部分实例失败"
+		}
+		m.appendLogLocked(item, "warn", "completed", "", message)
 	} else {
 		item.Status = StatusCompleted
 		item.Error = ""
-		m.appendLogLocked(item, "info", "completed", "", "全部目标实例部署完成")
+		message := "全部目标实例部署完成"
+		if item.Kind == TaskKindPluginConfigSync {
+			message = "全部目标实例插件配置同步完成"
+		}
+		m.appendLogLocked(item, "info", "completed", "", message)
 	}
 	delete(m.active, item.ServerID)
 	m.mu.Unlock()
@@ -302,11 +360,21 @@ func (m *Manager) finishCancelled(item *task) {
 	if item.force {
 		item.Status = StatusForceStopped
 		item.Error = "deployment force stopped"
-		m.appendLogLocked(item, "warn", "force_stopped", "", "部署已强制结束，实例保持停止")
+		message := "部署已强制结束，实例保持停止"
+		if item.Kind == TaskKindPluginConfigSync {
+			item.Error = "plugin config sync force stopped"
+			message = "插件配置同步已强制结束，已完成目标不会回滚"
+		}
+		m.appendLogLocked(item, "warn", "force_stopped", "", message)
 	} else {
 		item.Status = StatusCancelled
 		item.Error = "deployment cancelled"
-		m.appendLogLocked(item, "warn", "cancelled", "", "部署已在安全点取消")
+		message := "部署已在安全点取消"
+		if item.Kind == TaskKindPluginConfigSync {
+			item.Error = "plugin config sync cancelled"
+			message = "插件配置同步已在安全点取消"
+		}
+		m.appendLogLocked(item, "warn", "cancelled", "", message)
 	}
 	delete(m.active, item.ServerID)
 	m.mu.Unlock()

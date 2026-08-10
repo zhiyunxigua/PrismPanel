@@ -72,6 +72,62 @@ func TestMirrorDeploymentTransaction(t *testing.T) {
 	}
 }
 
+func TestPluginConfigSyncUsesWhitelistAndPreservesTargetFiles(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "image")
+	instancePath := filepath.Join(root, "bedwars_1")
+	mustWrite(t, filepath.Join(image, "plugins", "Example", "config.yml"), "new config")
+	mustWrite(t, filepath.Join(image, "plugins", "Example", "messages.JSON"), "new messages")
+	mustWrite(t, filepath.Join(image, "plugins", "Example", "data.db"), "image database")
+	mustWrite(t, filepath.Join(image, "plugins", "Example", "excluded.yml"), "image excluded")
+	mustWrite(t, filepath.Join(image, "plugins", "top-level.yml"), "top level")
+	mustWrite(t, filepath.Join(image, "plugins", "Example.jar"), "jar")
+	mustWrite(t, filepath.Join(instancePath, "plugins", "Example", "config.yml"), "old config")
+	mustWrite(t, filepath.Join(instancePath, "plugins", "Example", "data.db"), "instance database")
+	mustWrite(t, filepath.Join(instancePath, "plugins", "Example", "excluded.yml"), "instance excluded")
+	mustWrite(t, filepath.Join(instancePath, "plugins", "Example", "target-only.yml"), "target only")
+
+	serverConfig := model.ServerConfig{
+		SchemaVersion: model.SchemaVersion, Type: "mirror", ServerID: "bedwars", Name: "BedWars",
+		RootPath: root, ImageDirectory: "image", InstanceCount: 1, Ports: []int{25571},
+		Exclude:                    []model.ExcludeEntry{{Path: filepath.Join("plugins", "Example", "excluded.yml"), Type: "file"}},
+		PluginConfigSyncExtensions: []string{".yml", ".json"},
+		Process: model.ProcessConfig{
+			StartCommand: "java -jar server.jar", StopCommand: "stop", StopTimeoutSeconds: 5,
+		},
+		Console: model.ConsoleConfig{Encoding: "utf-8"},
+	}
+	processManager, err := supervisor.NewManager(config.Default(), &eventbus.Bus{}, []model.ServerConfig{serverConfig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverService := serverservice.NewService(
+		store.NewServerStore(t.TempDir()), processManager, []model.ServerConfig{serverConfig},
+	)
+	manager := NewManager(serverService, processManager, 2)
+	started, err := manager.StartPluginConfigSync("bedwars", []int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := waitForDeployment(t, manager, started.TaskID)
+	if result.Status != StatusCompleted || result.Kind != TaskKindPluginConfigSync {
+		t.Fatalf("config sync failed: %#v", result)
+	}
+	assertContents(t, filepath.Join(instancePath, "plugins", "Example", "config.yml"), "new config")
+	assertContents(t, filepath.Join(instancePath, "plugins", "Example", "messages.JSON"), "new messages")
+	assertContents(t, filepath.Join(instancePath, "plugins", "Example", "data.db"), "instance database")
+	assertContents(t, filepath.Join(instancePath, "plugins", "Example", "excluded.yml"), "instance excluded")
+	assertContents(t, filepath.Join(instancePath, "plugins", "Example", "target-only.yml"), "target only")
+	for _, path := range []string{
+		filepath.Join(instancePath, "plugins", "top-level.yml"),
+		filepath.Join(instancePath, "plugins", "Example.jar"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("unexpected top-level plugin file sync at %s: %v", path, err)
+		}
+	}
+}
+
 func waitForDeployment(t *testing.T, manager *Manager, taskID string) Snapshot {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

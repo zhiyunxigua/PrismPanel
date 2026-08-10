@@ -393,6 +393,14 @@ func (c *Client) ConsoleURL() (string, error) {
 }
 
 func (c *Client) UploadPlugin(ctx context.Context, ticket, serverID, path string, output any) error {
+	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/deploy", output)
+}
+
+func (c *Client) UploadPluginConfig(ctx context.Context, ticket, serverID, path string, output any) error {
+	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/config/deploy", output)
+}
+
+func (c *Client) uploadPluginBundle(ctx context.Context, ticket, serverID, path, endpointPath string, output any) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -406,7 +414,7 @@ func (c *Client) UploadPlugin(ctx context.Context, ticket, serverID, path string
 	if err != nil {
 		return err
 	}
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/v1/plugins/deploy"
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + endpointPath
 	query := endpoint.Query()
 	query.Set("server_id", serverID)
 	endpoint.RawQuery = query.Encode()

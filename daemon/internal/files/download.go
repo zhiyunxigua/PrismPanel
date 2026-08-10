@@ -11,7 +11,7 @@ import (
 	"PrismPanel-daemon/internal/apperr"
 )
 
-func createDirectoryDownload(directory, name string) (*Download, error) {
+func createDirectoryDownload(directory, name string, maxBytes int64) (*Download, error) {
 	temp, err := os.CreateTemp("", ".prism-download-*.zip")
 	if err != nil {
 		return nil, apperr.Wrap("FILE_WRITE_FAILED", "无法创建目录压缩临时文件", err)
@@ -20,6 +20,7 @@ func createDirectoryDownload(directory, name string) (*Download, error) {
 	cleanup := func() { _ = os.Remove(tempPath) }
 	archive := zip.NewWriter(temp)
 	entryCount := 0
+	var totalBytes int64
 
 	walkErr := filepath.WalkDir(directory, func(filePath string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -32,18 +33,24 @@ func createDirectoryDownload(directory, name string) (*Download, error) {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return apperr.New("PATH_ESCAPE", "目录包含不支持的符号链接")
 		}
-		return addDirectoryArchiveEntry(archive, directory, name, filePath, entry)
+		return addDirectoryArchiveEntry(archive, directory, name, filePath, entry, maxBytes, &totalBytes)
 	})
 	return finishDirectoryDownload(temp, tempPath, name, cleanup, archive, walkErr)
 }
 
-func addDirectoryArchiveEntry(archive *zip.Writer, directory, name, filePath string, entry os.DirEntry) error {
+func addDirectoryArchiveEntry(archive *zip.Writer, directory, name, filePath string, entry os.DirEntry, maxBytes int64, totalBytes *int64) error {
 	info, err := entry.Info()
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() && !info.Mode().IsRegular() {
 		return apperr.New("INVALID_REQUEST", "目录包含不支持的文件类型")
+	}
+	if !info.IsDir() {
+		if maxBytes >= 0 && (info.Size() > maxBytes-*totalBytes) {
+			return apperr.New("FILE_TOO_LARGE", "目录文件总大小超过压缩下载限制")
+		}
+		*totalBytes += info.Size()
 	}
 	relative, err := filepath.Rel(directory, filePath)
 	if err != nil {

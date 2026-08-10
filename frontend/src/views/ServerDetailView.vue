@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import {
-  Activity, ArrowLeft, ArrowRightLeft, Cpu, Edit3, MemoryStick, OctagonX, Play,
+  Activity, ArrowLeft, ArrowRightLeft, Cpu, Edit3, FileCode2, MemoryStick, OctagonX, Play,
   PlugZap, Puzzle, RefreshCw, RotateCw, Server, Square, Terminal, Trash2, Upload, Users,
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -51,6 +51,7 @@ const transferOpen = ref(false);
 const transferSubmitting = ref(false);
 const transferForm = ref({ player: null, targetServerId: "" });
 const deploymentOpen = ref(false);
+const deploymentMode = ref("mirror_deploy");
 const deploymentTargets = ref([]);
 const deploymentTask = ref(null);
 const deploymentSubmitting = ref(false);
@@ -112,6 +113,7 @@ const tpsHistory = computed(() => metricPoints("tps"));
 const deploymentActive = computed(() => deploymentTask.value && ![
   "cancelled", "force_stopped", "completed", "completed_with_errors", "failed",
 ].includes(deploymentTask.value.status));
+const pluginConfigSyncMode = computed(() => deploymentMode.value === "plugin_config_sync");
 const deploymentProgress = computed(() => {
   const total = deploymentTask.value?.targets?.length || 0;
   if (!total) return 0;
@@ -147,7 +149,19 @@ const deploymentStatusLabels = {
   force_stop_requested: "正在强制结束", cancelled: "已取消", force_stopped: "已强制结束",
   completed: "部署完成", completed_with_errors: "部分失败", failed: "部署失败",
 };
+const pluginConfigSyncStatusLabels = {
+  queued: "等待同步", running: "同步中", cancel_requested: "正在取消",
+  force_stop_requested: "正在强制结束", cancelled: "已取消", force_stopped: "已强制结束",
+  completed: "同步完成", completed_with_errors: "同步完成，部分失败", failed: "同步失败",
+};
+const deploymentStatusText = computed(() => {
+  const status = deploymentTask.value?.status;
+  if (!status) return "";
+  return (pluginConfigSyncMode.value ? pluginConfigSyncStatusLabels : deploymentStatusLabels)[status] || status;
+});
 const deploymentCopyStageLabels = {
+  scanning_plugin_config: "扫描插件配置",
+  copying_plugin_config: "复制插件配置",
   preparing: "准备目标",
   scanning_image: "扫描镜像文件",
   copying_image: "复制镜像文件",
@@ -695,6 +709,12 @@ function startDeploymentPolling() {
   deploymentTimer = window.setInterval(refreshDeployment, 1000);
 }
 
+function applyDeploymentMode(task) {
+  if (task?.kind === "plugin_config_sync" || task?.kind === "mirror_deploy") {
+    deploymentMode.value = task.kind;
+  }
+}
+
 async function refreshDeployment() {
   const taskID = deploymentTask.value?.task_id;
   if (!taskID || deploymentRefreshing.value) return;
@@ -703,6 +723,7 @@ async function refreshDeployment() {
     const path = "/api/v1/deployments/" + encodeURIComponent(taskID) +
       "?node_id=" + encodeURIComponent(nodeId.value);
     deploymentTask.value = await request(path);
+    applyDeploymentMode(deploymentTask.value);
     if (!deploymentActive.value) {
       stopDeploymentPolling();
       await load(true);
@@ -722,6 +743,7 @@ async function recoverActiveDeployment() {
     const path = "/api/v1/servers/" + encodeURIComponent(serverId.value) +
       "/deployment?node_id=" + encodeURIComponent(nodeId.value);
     deploymentTask.value = await request(path);
+    applyDeploymentMode(deploymentTask.value);
     startDeploymentPolling();
   } catch (error) {
     if (error.code !== "DEPLOYMENT_NOT_FOUND") ElMessage.error(error.message);
@@ -731,8 +753,27 @@ async function recoverActiveDeployment() {
 }
 
 async function openDeployment() {
+  deploymentMode.value = "mirror_deploy";
   deploymentOpen.value = true;
-  if (deploymentActive.value) return;
+  if (deploymentActive.value) {
+    applyDeploymentMode(deploymentTask.value);
+    return;
+  }
+  deploymentTask.value = null;
+  if (instances.value.some((item) => item.deployment_locked || item.state === "deploying")) {
+    await recoverActiveDeployment();
+    if (deploymentTask.value) return;
+  }
+  resetDeployment();
+}
+
+async function openPluginConfigSync() {
+  deploymentMode.value = "plugin_config_sync";
+  deploymentOpen.value = true;
+  if (deploymentActive.value) {
+    applyDeploymentMode(deploymentTask.value);
+    return;
+  }
   deploymentTask.value = null;
   if (instances.value.some((item) => item.deployment_locked || item.state === "deploying")) {
     await recoverActiveDeployment();
@@ -746,6 +787,7 @@ function deployableInstance(instance) {
 }
 
 function resetDeployment() {
+  deploymentMode.value = deploymentMode.value || "mirror_deploy";
   stopDeploymentPolling();
   deploymentTask.value = null;
   deploymentTargets.value = instances.value
@@ -755,6 +797,10 @@ function resetDeployment() {
 }
 
 async function startDeployment() {
+  if (pluginConfigSyncMode.value) {
+    await startPluginConfigSync();
+    return;
+  }
   if (!deploymentTargets.value.length) {
     ElMessage.warning("请至少选择一个部署目标");
     return;
@@ -791,8 +837,45 @@ async function startDeployment() {
   }
 }
 
+async function startPluginConfigSync() {
+  if (!deploymentTargets.value.length) {
+    ElMessage.warning("请至少选择一个同步目标");
+    return;
+  }
+  const targetSet = new Set(deploymentTargets.value);
+  const targets = instances.value.filter((item) => targetSet.has(Number(item.slot)));
+  try {
+    await ElMessageBox.confirm(
+      "将镜像源 plugins 目录中白名单后缀的文件覆盖到 " + targets.length + " 个实例，不会停止或重启服务器，也不会删除目标中的额外文件。同步完成后请按需执行插件重载命令。",
+      "同步插件配置",
+      { type: "warning", confirmButtonText: "开始同步", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  deploymentSubmitting.value = true;
+  try {
+    const path = "/api/v1/servers/" + encodeURIComponent(serverId.value) +
+      "/plugin-config-sync?node_id=" + encodeURIComponent(nodeId.value);
+    deploymentTask.value = await request(path, {
+      method: "POST", body: JSON.stringify({ targets: deploymentTargets.value }),
+    });
+    ElMessage.success("插件配置同步任务已创建");
+    startDeploymentPolling();
+    await load(true);
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    deploymentSubmitting.value = false;
+  }
+}
+
 async function stopDeployment(force) {
   if (!deploymentTask.value || !deploymentActive.value) return;
+  if (pluginConfigSyncMode.value) {
+    await stopPluginConfigSync(force);
+    return;
+  }
   try {
     await ElMessageBox.confirm(
       force
@@ -802,6 +885,34 @@ async function stopDeployment(force) {
       {
         type: force ? "error" : "warning",
         confirmButtonText: force ? "强制结束" : "取消部署",
+        cancelButtonText: "返回",
+      },
+    );
+  } catch {
+    return;
+  }
+  deploymentSubmitting.value = true;
+  try {
+    const action = force ? "force-stop" : "cancel";
+    const path = "/api/v1/deployments/" + encodeURIComponent(deploymentTask.value.task_id) +
+      "/" + action + "?node_id=" + encodeURIComponent(nodeId.value);
+    deploymentTask.value = await request(path, { method: "POST", body: "{}" });
+    startDeploymentPolling();
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    deploymentSubmitting.value = false;
+  }
+}
+
+async function stopPluginConfigSync(force) {
+  try {
+    await ElMessageBox.confirm(
+      force ? "强制结束会停止后续配置文件同步，已经完成的目标不会回滚。" : "取消会在当前文件安全边界停止后续同步。",
+      force ? "强制结束配置同步" : "取消配置同步",
+      {
+        type: force ? "error" : "warning",
+        confirmButtonText: force ? "强制结束" : "取消同步",
         cancelButtonText: "返回",
       },
     );
@@ -921,6 +1032,11 @@ onBeforeRouteLeave(async () => {
           :plain="!deploymentActive"
           @click="openDeployment"
         ><Upload :size="16" />{{ deploymentActive || deploymentGroupLocked ? "查看部署" : "部署镜像" }}</el-button>
+        <el-button
+          v-if="server?.type === 'mirror' && canDeploy"
+          plain
+          @click="openPluginConfigSync"
+        ><FileCode2 :size="16" />{{ deploymentActive && deploymentTask?.kind === 'plugin_config_sync' ? '查看配置同步' : '同步插件配置' }}</el-button>
         <el-button v-if="canConfigure" :disabled="groupBusy || deploymentGroupLocked" @click="editorOpen = true"><Edit3 :size="16" />编辑配置</el-button>
         <el-button v-if="canDelete" type="danger" plain :disabled="!allStopped" @click="removeServer">
           <Trash2 :size="16" />删除
@@ -1273,7 +1389,7 @@ onBeforeRouteLeave(async () => {
 
   <el-dialog
     v-model="deploymentOpen"
-    title="部署镜像服务器组"
+    :title="pluginConfigSyncMode ? '同步插件配置' : '部署镜像服务器组'"
     width="min(820px, 94vw)"
     :close-on-click-modal="false"
   >
@@ -1282,8 +1398,16 @@ onBeforeRouteLeave(async () => {
         <span>镜像目录</span>
         <code>{{ server?.root_path }} / {{ server?.image_directory }}</code>
       </div>
+      <div v-if="pluginConfigSyncMode" class="deployment-source">
+        <span>同步后缀</span>
+        <code>{{ (server?.plugin_config_sync_extensions || []).join(', ') }}</code>
+      </div>
       <div class="section-title">
-        <div><h3>部署目标</h3><p>选中的子服在任务结束前会被锁定，运行中的子服完成后自动恢复</p></div>
+        <div>
+          <h3>{{ pluginConfigSyncMode ? '同步目标' : '部署目标' }}</h3>
+          <p v-if="pluginConfigSyncMode">仅覆盖镜像源 plugins 目录中符合白名单的文件，不会停止或重启服务器，也不会删除目标中的额外文件。</p>
+          <p v-else>选中的子服在任务结束前会被锁定，运行中的子服完成后自动恢复</p>
+        </div>
         <el-checkbox
           :model-value="deploymentTargets.length === instances.filter(deployableInstance).length"
           :indeterminate="deploymentTargets.length > 0 && deploymentTargets.length < instances.filter(deployableInstance).length"
@@ -1308,7 +1432,7 @@ onBeforeRouteLeave(async () => {
       <div class="deployment-task-head">
         <div>
           <span>任务状态</span>
-          <strong>{{ deploymentStatusLabels[deploymentTask.status] || deploymentTask.status }}</strong>
+            <strong>{{ deploymentStatusText }}</strong>
         </div>
         <div>
           <span>当前目标</span>
@@ -1367,17 +1491,19 @@ onBeforeRouteLeave(async () => {
       <template v-if="!deploymentTask">
         <el-button @click="deploymentOpen = false">取消</el-button>
         <el-button type="primary" :loading="deploymentSubmitting" :disabled="!deploymentTargets.length" @click="startDeployment">
-          <Upload :size="15" />开始部署
+          <FileCode2 v-if="pluginConfigSyncMode" :size="15" />
+          <Upload v-else :size="15" />
+          {{ pluginConfigSyncMode ? '开始同步' : '开始部署' }}
         </el-button>
       </template>
       <template v-else-if="deploymentActive">
         <el-button @click="deploymentOpen = false">后台运行</el-button>
-        <el-button v-if="canCancelTasks" :loading="deploymentSubmitting" @click="stopDeployment(false)">取消部署</el-button>
+        <el-button v-if="canCancelTasks" :loading="deploymentSubmitting" @click="stopDeployment(false)">{{ pluginConfigSyncMode ? '取消同步' : '取消部署' }}</el-button>
         <el-button v-if="canCancelTasks" type="danger" plain :loading="deploymentSubmitting" @click="stopDeployment(true)">强制结束</el-button>
       </template>
       <template v-else>
         <el-button @click="deploymentOpen = false">关闭</el-button>
-        <el-button type="primary" plain @click="resetDeployment">再次部署</el-button>
+        <el-button type="primary" plain @click="resetDeployment">{{ pluginConfigSyncMode ? '再次同步' : '再次部署' }}</el-button>
       </template>
     </template>
   </el-dialog>

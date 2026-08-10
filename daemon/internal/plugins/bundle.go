@@ -17,6 +17,7 @@ import (
 const maxBundleSize = int64(800 * 1024 * 1024)
 
 type bundleManifest struct {
+	Kind       string `yaml:"kind"`
 	PluginType string `yaml:"plugin_type"`
 	Name       string `yaml:"name"`
 	Version    string `yaml:"version"`
@@ -123,20 +124,12 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 		cleanup()
 		return nil, nil, errors.New("plugin bundle type is invalid")
 	}
-	jarInfo, err := os.Stat(jarPath)
-	if err != nil {
-		cleanup()
-		return nil, nil, errors.New("plugin bundle has no jar")
+	if manifest.Kind == "" {
+		manifest.Kind = "plugin"
 	}
-	plugin, err := scanFile(jarPath, "plugin.jar", true, jarInfo, manifest.PluginType)
-	if err != nil {
+	if manifest.Kind != "plugin" && manifest.Kind != "config" {
 		cleanup()
-		return nil, nil, err
-	}
-	if !strings.EqualFold(manifest.Name, plugin.Name) || manifest.Version != plugin.Version ||
-		manifest.Artifact.SHA256 != plugin.SHA256 {
-		cleanup()
-		return nil, nil, errors.New("plugin bundle manifest does not match jar")
+		return nil, nil, errors.New("plugin bundle kind is invalid")
 	}
 	if manifest.Config.Present && !validDirectoryName(manifest.Config.Directory) {
 		cleanup()
@@ -146,6 +139,30 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 		if info, err := os.Stat(filepath.Join(root, "config")); err != nil || !info.IsDir() {
 			cleanup()
 			return nil, nil, errors.New("plugin bundle config snapshot is missing")
+		}
+	}
+	var plugin FilePlugin
+	if manifest.Kind == "config" {
+		if !manifest.Config.Present || strings.TrimSpace(manifest.Name) == "" {
+			cleanup()
+			return nil, nil, errors.New("plugin config bundle is invalid")
+		}
+		plugin = FilePlugin{PluginType: manifest.PluginType, Name: manifest.Name, Version: manifest.Version, Main: manifest.Main}
+	} else {
+		jarInfo, err := os.Stat(jarPath)
+		if err != nil {
+			cleanup()
+			return nil, nil, errors.New("plugin bundle has no jar")
+		}
+		plugin, err = scanFile(jarPath, "plugin.jar", true, jarInfo, manifest.PluginType)
+		if err != nil {
+			cleanup()
+			return nil, nil, err
+		}
+		if !strings.EqualFold(manifest.Name, plugin.Name) || manifest.Version != plugin.Version ||
+			manifest.Artifact.SHA256 != plugin.SHA256 {
+			cleanup()
+			return nil, nil, errors.New("plugin bundle manifest does not match jar")
 		}
 	}
 	return &preparedBundle{

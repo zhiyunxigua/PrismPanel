@@ -99,7 +99,7 @@ func run() error {
 	}
 	fileManager := fileservice.NewService(
 		serverService, manager, deploymentManager, cfg.Files.MaxEditFileSize,
-		cfg.Files.MaxUploadFileSize, cfg.Files.MaxExtractedSize, cfg.Files.MaxConcurrentTransfers,
+		cfg.Files.MaxUploadFileSize, cfg.Files.MaxExtractedSize, cfg.Files.MaxArchiveDownloadSize, cfg.Files.MaxConcurrentTransfers,
 	)
 	firewallManager, err := firewallservice.New(dataDir, cfg.Server.Port, slog.Default())
 	if err != nil {

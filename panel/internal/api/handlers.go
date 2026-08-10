@@ -228,6 +228,10 @@ func (s *Server) handleServer(writer http.ResponseWriter, request *http.Request)
 		s.handleServerDeployment(writer, request, parts[0])
 		return
 	}
+	if len(parts) == 2 && parts[1] == "plugin-config-sync" {
+		s.handlePluginConfigSync(writer, request, parts[0])
+		return
+	}
 	if len(parts) == 2 && parts[1] == "deployment" {
 		s.handleActiveServerDeployment(writer, request, parts[0])
 		return
@@ -371,6 +375,38 @@ func (s *Server) handleServerDeployment(writer http.ResponseWriter, request *htt
 		}, &result)
 	}
 	s.record(request, "deployment.start", serverID, input, err)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeSuccess(writer, result)
+}
+
+func (s *Server) handlePluginConfigSync(writer http.ResponseWriter, request *http.Request, serverID string) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", "POST")
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizeServerRequest(writer, request, "server.deploy") {
+		return
+	}
+	var input struct {
+		Targets []int `json:"targets,omitempty"`
+	}
+	body, err := readBody(request)
+	if err == nil {
+		if decodeErr := json.Unmarshal(body, &input); decodeErr != nil {
+			err = &daemon.APIError{Code: "INVALID_REQUEST", Message: "同步目标格式无效"}
+		}
+	}
+	var result json.RawMessage
+	if err == nil {
+		err = s.callNode(request, "deployment.plugin_config_sync.start", map[string]any{
+			"server_id": serverID, "targets": input.Targets,
+		}, &result)
+	}
+	s.record(request, "deployment.plugin_config_sync.start", serverID, input, err)
 	if err != nil {
 		writeError(writer, err)
 		return

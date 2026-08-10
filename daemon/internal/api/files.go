@@ -18,6 +18,8 @@ const (
 	resourceTypeHeader = "X-Prism-Resource-Type"
 	resourceIDHeader   = "X-Prism-Resource-ID"
 	filePathHeader     = "X-Prism-Path"
+	uploadOffsetHeader = "X-Prism-Upload-Offset"
+	uploadFinalHeader  = "X-Prism-Upload-Final"
 )
 
 func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) {
@@ -42,6 +44,8 @@ func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) 
 		s.handleFileCreate(writer, request)
 	case "move":
 		s.handleFileMove(writer, request)
+	case "copy":
+		s.handleFileCopy(writer, request)
 	case "archive":
 		s.handleFileArchive(writer, request)
 	case "delete":
@@ -168,12 +172,43 @@ func (s *Server) handleFileUpload(writer http.ResponseWriter, request *http.Requ
 	}
 	overwrite := strings.EqualFold(request.Header.Get("X-Prism-Overwrite"), "true")
 	if overwrite && !created.AllowOverwrite {
+		err = apperr.New("PERMISSION_DENIED", "upload ticket does not allow overwrite")
+		s.publishFileResult(created, target, []string{relative}, err)
+		writeFileError(writer, err)
+		return
+	}
+	if rawOffset := strings.TrimSpace(request.Header.Get(uploadOffsetHeader)); rawOffset != "" {
+		offset, offsetErr := strconv.ParseInt(rawOffset, 10, 64)
+		final, finalErr := strconv.ParseBool(strings.TrimSpace(request.Header.Get(uploadFinalHeader)))
+		if offsetErr != nil || finalErr != nil || request.ContentLength < 0 || request.ContentLength > fileservice.UploadChunkSize || request.ContentLength > created.MaxBytes {
+			err = apperr.New("INVALID_REQUEST", "invalid chunked upload request")
+		} else {
+			var entry fileservice.Entry
+			var nextOffset int64
+			entry, nextOffset, err = s.files.UploadChunk(target, relative, request.Body, created.MaxBytes, created.SHA256, overwrite, created.ExpectedVersion, created.ID, offset, final)
+			if err == nil {
+				if final {
+					s.publishFileResult(created, target, []string{relative}, nil)
+					writeFileSuccess(writer, entry)
+				} else {
+					writeFileSuccess(writer, map[string]any{"offset": nextOffset, "complete": false})
+				}
+				return
+			}
+		}
+		if final {
+			s.publishFileResult(created, target, []string{relative}, err)
+		}
+		writeFileError(writer, err)
+		return
+	}
+	if overwrite && !created.AllowOverwrite {
 		err = apperr.New("PERMISSION_DENIED", "临时凭证不允许覆盖现有文件")
 	} else if request.ContentLength > created.MaxBytes {
 		err = apperr.New("FILE_TOO_LARGE", "上传请求超过票据限制")
 	} else {
 		entry := fileservice.Entry{}
-		entry, err = s.files.Upload(target, relative, request.Body, created.MaxBytes, created.SHA256, overwrite)
+		entry, err = s.files.Upload(target, relative, request.Body, created.MaxBytes, created.SHA256, overwrite, created.ExpectedVersion)
 		if err == nil {
 			s.publishFileResult(created, target, []string{relative}, nil)
 			writeFileSuccess(writer, entry)
@@ -203,6 +238,9 @@ func (s *Server) handleFileDownload(writer http.ResponseWriter, request *http.Re
 	disposition := mime.FormatMediaType("attachment", map[string]string{"filename": download.Name})
 	writer.Header().Set("Content-Disposition", disposition)
 	writer.Header().Set("Content-Length", strconv.FormatInt(download.Size, 10))
+	if download.ETag != "" {
+		writer.Header().Set("ETag", download.ETag)
+	}
 	http.ServeContent(writer, request, download.Name, download.Mode, download.File)
 }
 
@@ -258,6 +296,35 @@ func (s *Server) handleFileMove(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	writeFileSuccess(writer, map[string]any{})
+}
+
+func (s *Server) handleFileCopy(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	target, source := fileTarget(request)
+	var input struct {
+		Destination string `json:"destination"`
+	}
+	if err := decodeFileJSON(request, &input, 64*1024); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	created, err := s.consumeFileTicket(request, "file.copy", target, source)
+	if err == nil && !created.AllowsPath(input.Destination) {
+		err = apperr.New("PERMISSION_DENIED", "临时凭证不允许复制目标路径")
+	}
+	var result fileservice.Entry
+	if err == nil {
+		result, err = s.files.Copy(target, source, input.Destination)
+	}
+	s.publishFileResult(created, target, []string{source, input.Destination}, err)
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, result)
 }
 
 func (s *Server) handleFileArchive(writer http.ResponseWriter, request *http.Request) {
@@ -415,6 +482,6 @@ func setFileCORS(writer http.ResponseWriter, request *http.Request) {
 	}
 	writer.Header().Set("Access-Control-Allow-Origin", "*")
 	writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
-	writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Prism-Resource-Type, X-Prism-Resource-ID, X-Prism-Path, X-Prism-Overwrite")
+	writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Prism-Resource-Type, X-Prism-Resource-ID, X-Prism-Path, X-Prism-Overwrite, X-Prism-Expected-Version, X-Prism-Upload-Offset, X-Prism-Upload-Final")
 	writer.Header().Set("Access-Control-Expose-Headers", "Content-Disposition, Content-Length")
 }

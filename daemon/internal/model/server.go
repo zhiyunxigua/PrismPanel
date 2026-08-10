@@ -12,21 +12,26 @@ const SchemaVersion = 2
 
 var serverIDPattern = regexp.MustCompile("^[a-z0-9_-]+$")
 
+var DefaultPluginConfigSyncExtensions = []string{
+	".yml", ".yaml", ".json", ".toml", ".ini", ".conf", ".properties", ".xml",
+}
+
 type ServerConfig struct {
-	SchemaVersion  int            `json:"schema_version"`
-	Type           string         `json:"type"`
-	Platform       string         `json:"platform"`
-	ServerID       string         `json:"server_id"`
-	Name           string         `json:"name"`
-	Workspace      string         `json:"workspace,omitempty"`
-	Port           int            `json:"port,omitempty"`
-	RootPath       string         `json:"root_path,omitempty"`
-	ImageDirectory string         `json:"image_directory,omitempty"`
-	InstanceCount  int            `json:"instance_count,omitempty"`
-	Ports          []int          `json:"ports,omitempty"`
-	Exclude        []ExcludeEntry `json:"exclude,omitempty"`
-	Process        ProcessConfig  `json:"process"`
-	Console        ConsoleConfig  `json:"console"`
+	SchemaVersion              int            `json:"schema_version"`
+	Type                       string         `json:"type"`
+	Platform                   string         `json:"platform"`
+	ServerID                   string         `json:"server_id"`
+	Name                       string         `json:"name"`
+	Workspace                  string         `json:"workspace,omitempty"`
+	Port                       int            `json:"port,omitempty"`
+	RootPath                   string         `json:"root_path,omitempty"`
+	ImageDirectory             string         `json:"image_directory,omitempty"`
+	InstanceCount              int            `json:"instance_count,omitempty"`
+	Ports                      []int          `json:"ports,omitempty"`
+	Exclude                    []ExcludeEntry `json:"exclude,omitempty"`
+	PluginConfigSyncExtensions []string       `json:"plugin_config_sync_extensions,omitempty"`
+	Process                    ProcessConfig  `json:"process"`
+	Console                    ConsoleConfig  `json:"console"`
 }
 
 type ProcessConfig struct {
@@ -70,6 +75,11 @@ func (s *ServerConfig) Normalize() {
 		s.Process.StopTimeoutSeconds = 60
 	}
 	s.Console.Encoding = normalizeConsoleEncoding(s.Console.Encoding)
+	if s.Type == "mirror" {
+		s.PluginConfigSyncExtensions = normalizePluginConfigSyncExtensions(s.PluginConfigSyncExtensions)
+	} else {
+		s.PluginConfigSyncExtensions = nil
+	}
 }
 
 func (s ServerConfig) Validate() error {
@@ -140,7 +150,63 @@ func (s ServerConfig) Validate() error {
 			return fmt.Errorf("exclude path %q: %w", entry.Path, err)
 		}
 	}
+	if s.Type == "mirror" {
+		for _, extension := range s.PluginConfigSyncExtensions {
+			if err := validatePluginConfigSyncExtension(extension); err != nil {
+				return fmt.Errorf("plugin_config_sync_extensions: %w", err)
+			}
+		}
+	}
 	return nil
+}
+
+func normalizePluginConfigSyncExtensions(extensions []string) []string {
+	if len(extensions) == 0 {
+		return append([]string(nil), DefaultPluginConfigSyncExtensions...)
+	}
+	seen := make(map[string]struct{}, len(extensions))
+	result := make([]string, 0, len(extensions))
+	for _, extension := range extensions {
+		extension = strings.ToLower(strings.TrimSpace(extension))
+		if extension == "" {
+			continue
+		}
+		if !strings.HasPrefix(extension, ".") {
+			extension = "." + extension
+		}
+		if _, exists := seen[extension]; exists {
+			continue
+		}
+		seen[extension] = struct{}{}
+		result = append(result, extension)
+	}
+	if len(result) == 0 {
+		return append([]string(nil), DefaultPluginConfigSyncExtensions...)
+	}
+	return result
+}
+
+func validatePluginConfigSyncExtension(extension string) error {
+	if extension == "" || extension[0] != '.' || extension == "." || extension == ".." {
+		return errors.New("extension must start with a dot")
+	}
+	if strings.ContainsAny(extension, "/\\\x00\r\n") {
+		return errors.New("extension contains invalid characters")
+	}
+	return nil
+}
+
+func (s ServerConfig) AllowsPluginConfigSync(name string) bool {
+	extension := strings.ToLower(filepath.Ext(name))
+	if extension == "" {
+		return false
+	}
+	for _, allowed := range s.PluginConfigSyncExtensions {
+		if strings.EqualFold(extension, allowed) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeConsoleEncoding(value string) string {

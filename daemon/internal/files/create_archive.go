@@ -101,7 +101,7 @@ func (s *Service) Archive(target Target, source, destination string) (Entry, err
 
 func addPathToArchive(writer *zip.Writer, sourcePath, archiveName string, info os.FileInfo) error {
 	if !info.IsDir() {
-		return addDirectoryArchiveEntry(writer, filepath.Dir(sourcePath), "", sourcePath, fs.FileInfoToDirEntry(info))
+		return addDirectoryArchiveEntry(writer, filepath.Dir(sourcePath), "", sourcePath, fs.FileInfoToDirEntry(info), -1, new(int64))
 	}
 	entryCount := 0
 	return filepath.WalkDir(sourcePath, func(filePath string, entry os.DirEntry, walkErr error) error {
@@ -115,6 +115,6 @@ func addPathToArchive(writer *zip.Writer, sourcePath, archiveName string, info o
 		if entry.Type()&os.ModeSymlink != 0 {
 			return apperr.New("PATH_ESCAPE", "目录包含不支持的符号链接")
 		}
-		return addDirectoryArchiveEntry(writer, sourcePath, archiveName, filePath, entry)
+		return addDirectoryArchiveEntry(writer, sourcePath, archiveName, filePath, entry, -1, new(int64))
 	})
 }

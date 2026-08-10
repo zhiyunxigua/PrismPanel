@@ -27,6 +27,25 @@ func TestFileProxyGrantIsBoundAndSingleUse(t *testing.T) {
 	}
 }
 
+func TestFileProxyGrantSupportsBoundedChunkRequests(t *testing.T) {
+	store := newFileProxyStore()
+	token, err := store.Add(fileProxyGrant{
+		DaemonTicket: "daemon-secret", NodeID: "node-a", Scope: "file.upload",
+		UserID: "user-a", ExpiresAt: time.Now().Add(time.Minute), MaxUses: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := store.Consume(token, "user-a", "node-a", "file.upload"); err != nil {
+			t.Fatalf("consume chunk %d: %v", attempt, err)
+		}
+	}
+	if _, err := store.Consume(token, "user-a", "node-a", "file.upload"); err == nil {
+		t.Fatal("expected bounded proxy grant rejection")
+	}
+}
+
 func TestProxyFileScopeRequiresExpectedMethod(t *testing.T) {
 	if got := proxyFileScope("content", "GET"); got != "file.read" {
 		t.Fatalf("content GET scope = %q", got)

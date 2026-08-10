@@ -68,6 +68,70 @@ func TestConfigZIPRejectsPathEscape(t *testing.T) {
 	}
 }
 
+func TestRepositoryUpdatesConfigWithoutChangingPluginArtifact(t *testing.T) {
+	repository, err := NewRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := repository.Upload(UploadInput{
+		JARFilename: "Example.jar", JAR: testJAR(t, "Example", "1.0", "com.example.Main"),
+		ConfigZIP: testZIP(t, map[string]string{"config.yml": "enabled: true\n"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jarPath := filepath.Join(repository.Root(), "example", "1", "plugin.jar")
+	jarBefore, err := os.ReadFile(jarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := repository.UpdateConfig("example", result.Artifact.ArtifactID, "config.yml", []byte("enabled: false\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ArtifactID != result.Artifact.ArtifactID || updated.Artifact.SHA256 != result.Artifact.Artifact.SHA256 {
+		t.Fatalf("plugin artifact changed after config update: %#v", updated)
+	}
+	contents, err := repository.ReadConfig("example", result.Artifact.ArtifactID, "config.yml")
+	if err != nil || string(contents) != "enabled: false\n" {
+		t.Fatalf("unexpected updated config: %q, %v", contents, err)
+	}
+	jarAfter, err := os.ReadFile(jarPath)
+	if err != nil || string(jarAfter) != string(jarBefore) {
+		t.Fatalf("plugin jar changed after config update: %v", err)
+	}
+}
+
+func TestRepositoryBuildsSeparatePluginAndConfigBundles(t *testing.T) {
+	repository, err := NewRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := repository.Upload(UploadInput{
+		JARFilename: "Example.jar", JAR: testJAR(t, "Example", "1.0", "com.example.Main"),
+		ConfigZIP: testZIP(t, map[string]string{"config.yml": "enabled: true\n"}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pluginBundle, _, err := repository.BuildBundle("example", result.Artifact.ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(pluginBundle)
+	if entries := zipEntries(t, pluginBundle); len(entries) != 2 || entries["plugin.jar"] == false || entries["manifest.yaml"] == false {
+		t.Fatalf("unexpected plugin bundle entries: %#v", entries)
+	}
+	configBundle, _, err := repository.BuildConfigBundle("example", result.Artifact.ArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(configBundle)
+	if entries := zipEntries(t, configBundle); len(entries) != 2 || entries["plugin.jar"] || !entries["manifest.yaml"] || !entries["config/config.yml"] {
+		t.Fatalf("unexpected config bundle entries: %#v", entries)
+	}
+}
+
 func TestRepositoryRescanImportsLocalJAR(t *testing.T) {
 	repository, _ := NewRepository(t.TempDir())
 	jarPath := filepath.Join(repository.Root(), "import", "Example.jar")
@@ -157,4 +221,18 @@ func testZIP(t *testing.T, files map[string]string) []byte {
 		t.Fatal(err)
 	}
 	return buffer.Bytes()
+}
+
+func zipEntries(t *testing.T, path string) map[string]bool {
+	t.Helper()
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	entries := make(map[string]bool, len(reader.File))
+	for _, entry := range reader.File {
+		entries[entry.Name] = true
+	}
+	return entries
 }
