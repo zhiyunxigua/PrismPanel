@@ -14,7 +14,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const maxBundleSize = int64(800 * 1024 * 1024)
+const (
+	maxBundleSize            = int64(800 * 1024 * 1024)
+	maxExpandedContentSize   = int64(4 * 1024 * 1024 * 1024)
+	maxBundleManifestSize    = int64(1 * 1024 * 1024)
+	maxContentBundleEntries  = 65536
+	maxRegularBundleEntries  = 4098
+)
 
 type bundleManifest struct {
 	Kind       string `yaml:"kind"`
@@ -30,12 +36,17 @@ type bundleManifest struct {
 		Directory string `yaml:"directory"`
 		Present   bool   `yaml:"present"`
 	} `yaml:"config"`
+	Content struct {
+		Type    string `yaml:"type"`
+		Present bool   `yaml:"present"`
+	} `yaml:"content"`
 }
 
 type preparedBundle struct {
 	root       string
 	jarPath    string
 	configPath string
+	contentPath string
 	manifest   bundleManifest
 	plugin     FilePlugin
 }
@@ -50,7 +61,78 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 		return nil, nil, fmt.Errorf("open plugin bundle: %w", err)
 	}
 	defer reader.Close()
-	if len(reader.File) > 4098 {
+
+	// 先读 manifest.yaml 确定 kind：内容包 bundle 允许任意相对结构条目，
+	// 与 plugin/config bundle 的白名单校验不同。
+	var manifestData []byte
+	manifestEntries := 0
+	for _, entry := range reader.File {
+		name, cleanErr := cleanBundlePath(entry.Name)
+		if cleanErr != nil {
+			return nil, nil, cleanErr
+		}
+		if name != "manifest.yaml" {
+			continue
+		}
+		manifestEntries++
+		if manifestEntries > 1 {
+			return nil, nil, errors.New("plugin bundle has multiple manifest.yaml entries")
+		}
+		if entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() ||
+			entry.UncompressedSize64 == 0 || int64(entry.UncompressedSize64) > maxBundleManifestSize {
+			return nil, nil, errors.New("plugin bundle manifest is invalid")
+		}
+		source, openErr := entry.Open()
+		if openErr != nil {
+			return nil, nil, openErr
+		}
+		manifestData, err = io.ReadAll(io.LimitReader(source, maxBundleManifestSize+1))
+		source.Close()
+		if err != nil || int64(len(manifestData)) > maxBundleManifestSize {
+			return nil, nil, errors.New("plugin bundle manifest is invalid")
+		}
+	}
+	if manifestEntries == 0 {
+		return nil, nil, errors.New("plugin bundle has no manifest")
+	}
+	var manifest bundleManifest
+	if err := yaml.Unmarshal(manifestData, &manifest); err != nil {
+		return nil, nil, fmt.Errorf("decode plugin bundle manifest: %w", err)
+	}
+	if manifest.PluginType == "" {
+		manifest.PluginType = PluginTypeSpigot
+	}
+	if !validPluginType(manifest.PluginType) {
+		return nil, nil, errors.New("plugin bundle type is invalid")
+	}
+	if manifest.Kind == "" {
+		manifest.Kind = "plugin"
+	}
+	if manifest.Kind != "plugin" && manifest.Kind != "config" && manifest.Kind != "content" {
+		return nil, nil, errors.New("plugin bundle kind is invalid")
+	}
+	if manifest.Kind == "content" {
+		if manifest.Content.Type != "config" && manifest.Content.Type != "full" {
+			return nil, nil, errors.New("plugin content bundle type must be config or full")
+		}
+		if !manifest.Content.Present || strings.TrimSpace(manifest.Name) == "" {
+			return nil, nil, errors.New("plugin content bundle is invalid")
+		}
+	}
+	if manifest.Kind == "config" && (!manifest.Config.Present || strings.TrimSpace(manifest.Name) == "") {
+		return nil, nil, errors.New("plugin config bundle is invalid")
+	}
+	if manifest.Config.Present && !validDirectoryName(manifest.Config.Directory) {
+		return nil, nil, errors.New("plugin config directory is invalid")
+	}
+
+	maxEntries := maxRegularBundleEntries
+	expandedCap := maxBundleSize
+	if manifest.Kind == "content" {
+		maxEntries = maxContentBundleEntries
+		expandedCap = maxExpandedContentSize
+	}
+	if len(reader.File) > maxEntries {
 		return nil, nil, errors.New("plugin bundle has too many entries")
 	}
 	root, err := os.MkdirTemp("", "prism-plugin-bundle-*")
@@ -65,19 +147,21 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 			cleanup()
 			return nil, nil, cleanErr
 		}
-		if name == "" || entry.FileInfo().IsDir() {
+		if name == "" || entry.FileInfo().IsDir() || name == "manifest.yaml" {
 			continue
 		}
-		if name != "plugin.jar" && name != "manifest.yaml" && !strings.HasPrefix(name, "config/") {
-			cleanup()
-			return nil, nil, fmt.Errorf("unsupported plugin bundle entry: %s", name)
+		if manifest.Kind != "content" {
+			if name != "plugin.jar" && !strings.HasPrefix(name, "config/") {
+				cleanup()
+				return nil, nil, fmt.Errorf("unsupported plugin bundle entry: %s", name)
+			}
 		}
 		if entry.Mode()&os.ModeSymlink != 0 || !entry.Mode().IsRegular() {
 			cleanup()
 			return nil, nil, fmt.Errorf("unsupported plugin bundle file: %s", name)
 		}
 		total += int64(entry.UncompressedSize64)
-		if total > maxBundleSize {
+		if total > expandedCap {
 			cleanup()
 			return nil, nil, errors.New("expanded plugin bundle is too large")
 		}
@@ -106,46 +190,14 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 		}
 	}
 	jarPath := filepath.Join(root, "plugin.jar")
-	manifestPath := filepath.Join(root, "manifest.yaml")
-	manifestData, err := os.ReadFile(manifestPath)
-	if err != nil {
-		cleanup()
-		return nil, nil, errors.New("plugin bundle has no manifest")
-	}
-	var manifest bundleManifest
-	if err := yaml.Unmarshal(manifestData, &manifest); err != nil {
-		cleanup()
-		return nil, nil, fmt.Errorf("decode plugin bundle manifest: %w", err)
-	}
-	if manifest.PluginType == "" {
-		manifest.PluginType = PluginTypeSpigot
-	}
-	if !validPluginType(manifest.PluginType) {
-		cleanup()
-		return nil, nil, errors.New("plugin bundle type is invalid")
-	}
-	if manifest.Kind == "" {
-		manifest.Kind = "plugin"
-	}
-	if manifest.Kind != "plugin" && manifest.Kind != "config" {
-		cleanup()
-		return nil, nil, errors.New("plugin bundle kind is invalid")
-	}
-	if manifest.Config.Present && !validDirectoryName(manifest.Config.Directory) {
-		cleanup()
-		return nil, nil, errors.New("plugin config directory is invalid")
-	}
-	if manifest.Config.Present {
-		if info, err := os.Stat(filepath.Join(root, "config")); err != nil || !info.IsDir() {
+	var plugin FilePlugin
+	if manifest.Kind == "content" {
+		plugin = FilePlugin{PluginType: manifest.PluginType, Name: manifest.Name, Version: manifest.Version, Main: manifest.Main}
+	} else if manifest.Kind == "config" {
+		configInfo, err := os.Stat(filepath.Join(root, "config"))
+		if err != nil || !configInfo.IsDir() {
 			cleanup()
 			return nil, nil, errors.New("plugin bundle config snapshot is missing")
-		}
-	}
-	var plugin FilePlugin
-	if manifest.Kind == "config" {
-		if !manifest.Config.Present || strings.TrimSpace(manifest.Name) == "" {
-			cleanup()
-			return nil, nil, errors.New("plugin config bundle is invalid")
 		}
 		plugin = FilePlugin{PluginType: manifest.PluginType, Name: manifest.Name, Version: manifest.Version, Main: manifest.Main}
 	} else {
@@ -167,7 +219,7 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 	}
 	return &preparedBundle{
 		root: root, jarPath: jarPath, configPath: filepath.Join(root, "config"),
-		manifest: manifest, plugin: plugin,
+		contentPath: root, manifest: manifest, plugin: plugin,
 	}, cleanup, nil
 }
 

@@ -20,6 +20,7 @@ type Service struct {
 	servers    *serverservice.Service
 	cache      *scanCache
 	pending    *pendingStore
+	backupDir  string
 	baselineMu sync.RWMutex
 	baselines  map[string]map[string]string
 	changes    map[string]map[string]struct{}
@@ -30,8 +31,13 @@ func NewService(manager *supervisor.Manager, servers *serverservice.Service, dat
 	if err != nil {
 		return nil, err
 	}
+	backupDir := filepath.Join(dataDir, "plugin-backups")
+	if err := os.MkdirAll(backupDir, 0o750); err != nil {
+		return nil, err
+	}
 	service := &Service{
 		supervisor: manager, servers: servers, cache: newScanCache(), pending: pending,
+		backupDir: backupDir,
 		baselines: make(map[string]map[string]string), changes: make(map[string]map[string]struct{}),
 	}
 	manager.SetBeforeStart(service.beforeStart)
@@ -63,9 +69,10 @@ func (s *Service) List(instanceID string) (ListResult, error) {
 	var files []FilePlugin
 	var warnings []string
 	if model.IsModPlatform(snapshot.Platform) {
-		// mods 目录可能混合 fabric/forge 模组，按 jar 内容自动识别类型。
+		// mods 目录可能混合 fabric/forge/neoforge 模组，按平台 mod 类型扫描，
+		// 保证 neoforge 模组被标记为 neoforge 而非 forge。
 		kind = "mod"
-		files, warnings = s.cache.scanMods(snapshot.Workspace)
+		files, warnings = s.cache.scanMods(snapshot.Workspace, model.ModTypeForPlatform(snapshot.Platform))
 	} else {
 		files, warnings = s.cache.scan(snapshot.Workspace, model.PluginTypeForPlatform(snapshot.Platform))
 	}

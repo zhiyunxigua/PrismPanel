@@ -393,14 +393,20 @@ func (c *Client) ConsoleURL() (string, error) {
 }
 
 func (c *Client) UploadPlugin(ctx context.Context, ticket, serverID, path string, output any) error {
-	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/deploy", output)
+	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/deploy", false, output)
 }
 
 func (c *Client) UploadPluginConfig(ctx context.Context, ticket, serverID, path string, output any) error {
-	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/config/deploy", output)
+	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/config/deploy", false, output)
 }
 
-func (c *Client) uploadPluginBundle(ctx context.Context, ticket, serverID, path, endpointPath string, output any) error {
+// UploadPluginContent 上传通用内容包 bundle；backupSnapshot 为完全配置高风险标记，
+// daemon 在部署前做整目录快照备份（经 query 参数传给 /api/v1/plugins/content/deploy）。
+func (c *Client) UploadPluginContent(ctx context.Context, ticket, serverID, path string, backupSnapshot bool, output any) error {
+	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/content/deploy", backupSnapshot, output)
+}
+
+func (c *Client) uploadPluginBundle(ctx context.Context, ticket, serverID, path, endpointPath string, backupSnapshot bool, output any) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -417,6 +423,9 @@ func (c *Client) uploadPluginBundle(ctx context.Context, ticket, serverID, path,
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + endpointPath
 	query := endpoint.Query()
 	query.Set("server_id", serverID)
+	if backupSnapshot {
+		query.Set("backup_snapshot", "true")
+	}
 	endpoint.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), file)
 	if err != nil {

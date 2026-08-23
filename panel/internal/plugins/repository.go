@@ -31,7 +31,12 @@ type Repository struct {
 }
 
 // repositoryTypes 是插件仓库支持的制品类型（插件 + mod）。
-var repositoryTypes = []string{PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee, PluginTypeFabric, PluginTypeForge}
+// 顺序与前端「仓库」页 7 平台 tab 显示顺序一致：
+// fabric / forge / neoforge / spigot / paper / velocity / bungee。
+var repositoryTypes = []string{
+	PluginTypeFabric, PluginTypeForge, PluginTypeNeoForge,
+	PluginTypeSpigot, PluginTypePaper, PluginTypeVelocity, PluginTypeBungee,
+}
 
 func NewRepository(root string) (*Repository, error) {
 	root = filepath.Clean(root)
@@ -57,23 +62,58 @@ func (r *Repository) typeRoot(pluginType string) string {
 }
 
 func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
-	if len(input.JAR) == 0 || len(input.JAR) > maxPluginJARSize {
-		return UploadResult{}, fmt.Errorf("plugin jar must be between 1 byte and %d bytes", maxPluginJARSize)
-	}
 	input.PluginType = normalizePluginType([]string{input.PluginType})
 	if !ValidPluginType(input.PluginType) {
-		return UploadResult{}, errors.New("plugin type must be spigot, velocity, bungee, fabric or forge")
+		return UploadResult{}, errors.New("plugin type must be spigot, paper, velocity, bungee, fabric, forge or neoforge")
 	}
-	descriptors, primary, err := ParseModJAR(input.JAR, input.JARFilename, input.PluginType)
-	if err != nil {
-		return UploadResult{}, err
+	hasJAR := len(input.JAR) > 0
+	hasContent := len(input.ContentZIP) > 0
+	hasLegacyConfig := len(input.ConfigZIP) > 0
+	if !hasJAR && !hasContent {
+		return UploadResult{}, errors.New("plugin upload requires a jar or a content bundle")
 	}
-	if strings.TrimSpace(input.JARFilename) == "" {
-		input.JARFilename = primary.Name + "-" + primary.Version + ".jar"
+	if hasJAR && len(input.JAR) > maxPluginJARSize {
+		return UploadResult{}, fmt.Errorf("plugin jar must be between 1 byte and %d bytes", maxPluginJARSize)
 	}
-	input.JARFilename = filepath.Base(input.JARFilename)
-	if !strings.HasSuffix(strings.ToLower(input.JARFilename), ".jar") {
-		return UploadResult{}, errors.New("plugin upload must use a .jar filename")
+	if hasLegacyConfig && hasContent {
+		return UploadResult{}, errors.New("config zip and content zip cannot be combined")
+	}
+	if hasContent {
+		input.ContentType = strings.ToLower(strings.TrimSpace(input.ContentType))
+		if !validContentType(input.ContentType) {
+			return UploadResult{}, errors.New("content type must be config or full")
+		}
+	}
+
+	var descriptors map[string]Descriptor
+	var primary Descriptor
+	var err error
+	if hasJAR {
+		descriptors, primary, err = ParseModJAR(input.JAR, input.JARFilename, input.PluginType)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		if strings.TrimSpace(input.JARFilename) == "" {
+			input.JARFilename = primary.Name + "-" + primary.Version + ".jar"
+		}
+		input.JARFilename = filepath.Base(input.JARFilename)
+		if !strings.HasSuffix(strings.ToLower(input.JARFilename), ".jar") {
+			return UploadResult{}, errors.New("plugin upload must use a .jar filename")
+		}
+	} else {
+		// 仅内容包上传：身份来自表单 name/version；full 类型缺省时扫描 zip 内嵌 jar。
+		name, version := strings.TrimSpace(input.ContentName), strings.TrimSpace(input.ContentVersion)
+		if name != "" && version != "" {
+			primary = Descriptor{Name: name, Version: version}
+		} else if input.ContentType == ContentTypeFull {
+			var found bool
+			descriptors, primary, found = findJARInZIP(input.ContentZIP, input.PluginType)
+			if !found {
+				return UploadResult{}, errors.New("content bundle requires a name and version, or a recognizable jar inside")
+			}
+		} else {
+			return UploadResult{}, errors.New("content bundle requires a name and version")
+		}
 	}
 
 	r.mu.Lock()
@@ -116,41 +156,76 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 		return UploadResult{}, err
 	}
 	defer os.RemoveAll(staging)
-	jarPath := filepath.Join(staging, "plugin.jar")
-	if err := os.WriteFile(jarPath, input.JAR, 0o640); err != nil {
-		return UploadResult{}, err
+	jarHashText := ""
+	if hasJAR {
+		jarPath := filepath.Join(staging, "plugin.jar")
+		if err := os.WriteFile(jarPath, input.JAR, 0o640); err != nil {
+			return UploadResult{}, err
+		}
+		jarHash := sha256.Sum256(input.JAR)
+		jarHashText = hex.EncodeToString(jarHash[:])
 	}
-	jarHash := sha256.Sum256(input.JAR)
 	config := ConfigSnapshot{Directory: configDirectory}
-	configPath := filepath.Join(staging, "config")
-	if len(input.ConfigZIP) > 0 {
-		if err := os.MkdirAll(configPath, 0o750); err != nil {
-			return UploadResult{}, err
+	if !hasContent {
+		configPath := filepath.Join(staging, "config")
+		if hasLegacyConfig {
+			if err := os.MkdirAll(configPath, 0o750); err != nil {
+				return UploadResult{}, err
+			}
+			if _, _, err := extractConfigZIP(input.ConfigZIP, configPath); err != nil {
+				return UploadResult{}, err
+			}
+			config.Present = true
+		} else if current.Config.Present {
+			source := filepath.Join(pluginDir, strconv.FormatInt(current.ArtifactID, 10), "config")
+			if err := os.MkdirAll(configPath, 0o750); err != nil {
+				return UploadResult{}, err
+			}
+			if _, _, err := copyTree(source, configPath); err != nil {
+				return UploadResult{}, fmt.Errorf("inherit previous config: %w", err)
+			}
+			config.Present = true
+			config.Inherited = true
 		}
-		if _, _, err := extractConfigZIP(input.ConfigZIP, configPath); err != nil {
-			return UploadResult{}, err
+		if config.Present {
+			config.SHA256, config.Files, config.Size, err = treeHash(configPath)
+			if err != nil {
+				return UploadResult{}, err
+			}
+			if config.Files == 0 {
+				config.Present = false
+				config.Inherited = false
+				_ = os.RemoveAll(configPath)
+			}
 		}
-		config.Present = true
-	} else if current.Config.Present {
-		source := filepath.Join(pluginDir, strconv.FormatInt(current.ArtifactID, 10), "config")
-		if err := os.MkdirAll(configPath, 0o750); err != nil {
-			return UploadResult{}, err
-		}
-		if _, _, err := copyTree(source, configPath); err != nil {
-			return UploadResult{}, fmt.Errorf("inherit previous config: %w", err)
-		}
-		config.Present = true
-		config.Inherited = true
 	}
-	if config.Present {
-		config.SHA256, config.Files, config.Size, err = treeHash(configPath)
+	var content *ContentSnapshot
+	if hasContent {
+		contentID := int64(1)
+		contentRoot := contentVersionDir(staging, contentID)
+		if err := os.MkdirAll(contentRoot, 0o750); err != nil {
+			return UploadResult{}, err
+		}
+		if _, _, err := extractContentZIP(input.ContentZIP, contentRoot); err != nil {
+			return UploadResult{}, err
+		}
+		snapshot := ContentSnapshot{ContentID: contentID, Type: input.ContentType, Present: true}
+		snapshot.SHA256, snapshot.Files, snapshot.Size, err = treeHash(contentRoot)
 		if err != nil {
 			return UploadResult{}, err
 		}
-		if config.Files == 0 {
-			config.Present = false
-			config.Inherited = false
-			_ = os.RemoveAll(configPath)
+		if snapshot.Files == 0 {
+			return UploadResult{}, errors.New("content bundle contains no files")
+		}
+		snapshot.Tree, err = contentTopLevelTree(contentRoot)
+		if err != nil {
+			return UploadResult{}, err
+		}
+		content = &snapshot
+		if err := saveContentIndex(staging, ContentIndex{
+			SchemaVersion: contentIndexSchemaVersion, Current: contentID, Versions: []ContentSnapshot{snapshot},
+		}); err != nil {
+			return UploadResult{}, err
 		}
 	}
 
@@ -158,10 +233,9 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 	if err != nil {
 		return UploadResult{}, err
 	}
-	jarHashText := hex.EncodeToString(jarHash[:])
 	for _, artifact := range artifacts {
 		if artifact.Artifact.SHA256 == jarHashText && artifact.Config.SHA256 == config.SHA256 &&
-			artifact.Config.Directory == config.Directory {
+			artifact.Config.Directory == config.Directory && contentMatches(artifact.Content, content) {
 			if err := atomicYAML(filepath.Join(pluginDir, "index.yaml"), index); err != nil {
 				return UploadResult{}, err
 			}
@@ -181,11 +255,13 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 		Main: primary.Main, Authors: append([]string(nil), primary.Authors...),
 		Description: primary.Description, Website: primary.Website,
 		ModMetadata: primary.ModMetadata, Descriptors: descriptors,
-		Artifact: ArtifactFile{
+		Config: config, Content: content, UploadedBy: input.Uploader, UploadedAt: time.Now().UTC(),
+	}
+	if hasJAR {
+		manifest.Artifact = ArtifactFile{
 			File: "plugin.jar", OriginalFilename: input.JARFilename,
 			SHA256: jarHashText, Size: int64(len(input.JAR)),
-		},
-		Config: config, UploadedBy: input.Uploader, UploadedAt: time.Now().UTC(),
+		}
 	}
 	if manifest.Main == "" {
 		manifest.Main = primary.Bootstrapper
@@ -205,6 +281,14 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 	}
 	artifacts = append(artifacts, manifest)
 	return UploadResult{Plugin: buildPlugin(index, artifacts), Artifact: manifest}, nil
+}
+
+// contentMatches 判断两个内容包快照是否一致（同类型同内容）；两者都为空视为一致。
+func contentMatches(stored, current *ContentSnapshot) bool {
+	if stored == nil || current == nil {
+		return stored == nil && current == nil
+	}
+	return stored.Type == current.Type && stored.SHA256 == current.SHA256
 }
 
 func (r *Repository) List() ([]Plugin, error) {

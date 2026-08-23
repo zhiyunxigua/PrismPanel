@@ -53,7 +53,7 @@ const navigation = computed(() => [
   { label: "服务器监控", route: "net-games", icon: Activity, permission: "dashboard.view" },
   { label: "服务器", route: "servers", icon: Server, permission: "server.view" },
   { label: "定时任务", route: "scheduled-tasks", icon: CalendarClock, permission: "schedule.view" },
-  { label: "插件", route: "plugins", icon: Package, permission: "plugin.view" },
+  { label: "仓库", route: "plugins", icon: Package, permission: "plugin.view" },
   { label: "用户", route: "users", icon: Users, permission: "user.view" },
   { label: "网络白名单", route: "firewall", icon: ShieldCheck, permission: "firewall.view" },
   { label: "节点", route: "nodes", icon: Network, permission: "node.view" },

@@ -71,7 +71,7 @@ const routes = [
         path: "plugins",
         name: "plugins",
         component: PluginsView,
-        meta: { title: "插件", permission: "plugin.view" },
+        meta: { title: "仓库", permission: "plugin.view" },
       },
       {
         path: "net-games",

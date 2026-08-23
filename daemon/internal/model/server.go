@@ -20,7 +20,7 @@ var DefaultPluginConfigSyncExtensions = []string{
 // 旧配置没有 config_sync_directories 字段时只同步 plugins，保持向后兼容。
 var DefaultConfigSyncDirectories = []string{"plugins"}
 
-// ModConfigSyncDirectories 是 mod 平台（Fabric/Forge）的默认配置同步根目录。
+// ModConfigSyncDirectories 是 mod 平台（Fabric/Forge/NeoForge）的默认配置同步根目录。
 var ModConfigSyncDirectories = []string{"config", "plugins"}
 
 type ServerConfig struct {
@@ -106,10 +106,10 @@ func (s ServerConfig) Validate() error {
 		return errors.New("type must be standalone or mirror")
 	}
 	if !IsSupportedPlatform(s.Platform) {
-		return errors.New("platform must be paper, spigot, fabric, forge, velocity or bungee")
+		return errors.New("platform must be paper, spigot, fabric, forge, neoforge, velocity or bungee")
 	}
 	if s.Type == "mirror" && IsProxyPlatform(s.Platform) {
-		return errors.New("mirror servers only support paper, spigot, fabric or forge")
+		return errors.New("mirror servers only support paper, spigot, fabric, forge or neoforge")
 	}
 	if strings.TrimSpace(s.Process.StartCommand) == "" {
 		return errors.New("process.start_command cannot be empty")
@@ -286,7 +286,7 @@ func (s ServerConfig) Instances() []InstanceConfig {
 
 func IsSupportedPlatform(platform string) bool {
 	switch platform {
-	case "paper", "spigot", "fabric", "forge", "velocity", "bungee":
+	case "paper", "spigot", "fabric", "forge", "neoforge", "velocity", "bungee":
 		return true
 	default:
 		return false
@@ -297,9 +297,9 @@ func IsProxyPlatform(platform string) bool {
 	return platform == "velocity" || platform == "bungee"
 }
 
-// IsModPlatform 判断平台是否为 mod 加载器平台（Fabric/Forge）。
+// IsModPlatform 判断平台是否为 mod 加载器平台（Fabric/Forge/NeoForge）。
 func IsModPlatform(platform string) bool {
-	return platform == "fabric" || platform == "forge"
+	return platform == "fabric" || platform == "forge" || platform == "neoforge"
 }
 
 // ModTypeForPlatform 返回平台对应的 mod 加载器类型；非 mod 平台返回空字符串。
@@ -318,9 +318,9 @@ func ArtifactDirectory(platform string) string {
 	return "plugins"
 }
 
-// IsModArtifact 判断制品类型（fabric/forge）是否属于 mod 平台。
+// IsModArtifact 判断制品类型（fabric/forge/neoforge）是否属于 mod 平台。
 func IsModArtifact(artifactType string) bool {
-	return artifactType == "fabric" || artifactType == "forge"
+	return artifactType == "fabric" || artifactType == "forge" || artifactType == "neoforge"
 }
 
 func PluginTypeForPlatform(platform string) string {
@@ -329,6 +329,10 @@ func PluginTypeForPlatform(platform string) string {
 	}
 	if IsModPlatform(platform) {
 		return platform
+	}
+	// paper 是独立插件类型（仓库制品标记为 "paper"），但部署目录仍是 plugins/。
+	if platform == "paper" {
+		return "paper"
 	}
 	return "spigot"
 }

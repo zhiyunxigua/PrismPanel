@@ -72,10 +72,6 @@ func (s *Service) DeployConfig(serverID, bundlePath string) (OperationResult, er
 	if bundle.plugin.PluginType != model.PluginTypeForPlatform(server.Platform) {
 		return OperationResult{}, apperr.New("PLUGIN_TYPE_MISMATCH", "plugin type does not match target server platform")
 	}
-	if model.IsModPlatform(server.Platform) {
-		return OperationResult{}, apperr.New("PLUGIN_TYPE_MISMATCH",
-			"config deployment for mod servers is not supported; use config sync instead")
-	}
 	targets, release, err := s.targets(serverID)
 	if err != nil {
 		return OperationResult{}, err
@@ -96,6 +92,62 @@ func (s *Service) DeployConfig(serverID, bundlePath string) (OperationResult, er
 	}
 	if len(targetErrors) > 0 {
 		return result, apperr.Wrap("PLUGIN_DEPLOY_FAILED", "plugin config deployment failed", errors.Join(targetErrors...))
+	}
+	return result, nil
+}
+
+// DeployContent 部署通用内容包（kind = content，zip 顶层即服务端工作目录结构）。
+// 覆盖策略：覆盖同名 + 保留额外（不删除目标额外文件）；逐文件事务式覆盖，失败回滚。
+// backupSnapshot 为完全配置（full）高风险标记：部署前对目标工作目录做整目录 zip 快照，
+// 备份路径写入操作结果供回滚。
+func (s *Service) DeployContent(serverID, bundlePath string, backupSnapshot bool) (OperationResult, error) {
+	server, err := s.servers.Get(serverID)
+	if err != nil {
+		return OperationResult{}, err
+	}
+	bundle, cleanup, err := prepareBundle(bundlePath)
+	if err != nil {
+		return OperationResult{}, apperr.Wrap("INVALID_PLUGIN_BUNDLE", "plugin content bundle is invalid", err)
+	}
+	defer cleanup()
+	if bundle.manifest.Kind != "content" {
+		return OperationResult{}, apperr.New("INVALID_PLUGIN_BUNDLE", "content deployment requires a content bundle")
+	}
+	if bundle.plugin.PluginType != model.PluginTypeForPlatform(server.Platform) {
+		return OperationResult{}, apperr.New("PLUGIN_TYPE_MISMATCH", "plugin type does not match target server platform")
+	}
+	targets, release, err := s.targets(serverID)
+	if err != nil {
+		return OperationResult{}, err
+	}
+	defer release()
+	result := OperationResult{ServerID: serverID, PluginName: bundle.plugin.Name, Version: bundle.plugin.Version}
+	var targetErrors []error
+	for _, target := range targets {
+		var stats ContentDeployStats
+		item, applyErr := s.applyOrQueue(target, pendingOperation{
+			Type: "deploy_content", PluginType: bundle.plugin.PluginType, PluginName: bundle.plugin.Name,
+			BackupSnapshot: backupSnapshot,
+		}, bundlePath,
+			func() error {
+				var err error
+				stats, err = deployContentToWorkspace(target.Workspace, bundle, deployContentOptions{
+					BackupSnapshot: backupSnapshot, BackupDir: s.backupDir,
+				})
+				return err
+			})
+		item.Applied = stats.Applied
+		item.Overwritten = stats.Overwritten
+		item.Added = stats.Added
+		item.BackupPath = stats.BackupPath
+		result.Targets = append(result.Targets, item)
+		result.PendingRestart = result.PendingRestart || item.PendingRestart
+		if applyErr != nil {
+			targetErrors = append(targetErrors, fmt.Errorf("%s: %w", target.ID, applyErr))
+		}
+	}
+	if len(targetErrors) > 0 {
+		return result, apperr.Wrap("PLUGIN_DEPLOY_FAILED", "plugin content deployment failed", errors.Join(targetErrors...))
 	}
 	return result, nil
 }
@@ -303,6 +355,16 @@ func (s *Service) applyPending(instanceID, workspace string) error {
 			}
 			defer cleanup()
 			return deployConfigToWorkspace(workspace, bundle)
+		case "deploy_content":
+			bundle, cleanup, err := prepareBundle(bundlePath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+			_, err = deployContentToWorkspace(workspace, bundle, deployContentOptions{
+				BackupSnapshot: operation.BackupSnapshot, BackupDir: s.backupDir,
+			})
+			return err
 		case "upload":
 			bundle, err := prepareUploadedJAR(bundlePath, operation.OriginalFilename, operation.PluginType)
 			if err != nil {

@@ -14,14 +14,19 @@ import (
 )
 
 func (s *Server) handlePluginDeploy(writer http.ResponseWriter, request *http.Request) {
-	s.handlePluginBundleDeploy(writer, request, "plugin.deploy", false)
+	s.handlePluginBundleDeploy(writer, request, "plugin.deploy", "plugin", false)
 }
 
 func (s *Server) handlePluginConfigDeploy(writer http.ResponseWriter, request *http.Request) {
-	s.handlePluginBundleDeploy(writer, request, "plugin.config.deploy", true)
+	s.handlePluginBundleDeploy(writer, request, "plugin.config.deploy", "config", false)
 }
 
-func (s *Server) handlePluginBundleDeploy(writer http.ResponseWriter, request *http.Request, scope string, configOnly bool) {
+func (s *Server) handlePluginContentDeploy(writer http.ResponseWriter, request *http.Request) {
+	backupSnapshot := strings.EqualFold(strings.TrimSpace(request.URL.Query().Get("backup_snapshot")), "true")
+	s.handlePluginBundleDeploy(writer, request, "plugin.content.deploy", "content", backupSnapshot)
+}
+
+func (s *Server) handlePluginBundleDeploy(writer http.ResponseWriter, request *http.Request, scope, kind string, backupSnapshot bool) {
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", "POST")
 		writeJSON(writer, http.StatusMethodNotAllowed, map[string]any{"success": false,
@@ -61,9 +66,12 @@ func (s *Server) handlePluginBundleDeploy(writer http.ResponseWriter, request *h
 		return
 	}
 	var result any
-	if configOnly {
+	switch kind {
+	case "config":
 		result, err = s.plugins.DeployConfig(serverID, path)
-	} else {
+	case "content":
+		result, err = s.plugins.DeployContent(serverID, path, backupSnapshot)
+	default:
 		result, err = s.plugins.Deploy(serverID, path)
 	}
 	if err != nil {

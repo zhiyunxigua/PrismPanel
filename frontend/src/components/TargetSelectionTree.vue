@@ -12,9 +12,11 @@ const props = defineProps({
 });
 const emit = defineEmits(["update:modelValue"]);
 
+// 服务器平台 → 仓库插件类型映射（7 平台决策）：
+// velocity/bungee 代理平台、fabric/forge/neoforge mod 平台、paper 独立平台各归自身；
+// 其余 Bukkit 系（spigot 等）统一归 spigot。
 function platformPluginType(platform) {
-  if (platform === "velocity" || platform === "bungee") return platform;
-  if (platform === "fabric" || platform === "forge") return platform;
+  if (["velocity", "bungee", "fabric", "forge", "neoforge", "paper"].includes(platform)) return platform;
   return "spigot";
 }
 

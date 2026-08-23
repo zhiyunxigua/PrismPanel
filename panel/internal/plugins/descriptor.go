@@ -35,7 +35,7 @@ func ParseJAR(contents []byte, pluginTypes ...string) (map[string]Descriptor, De
 	return ParseModJAR(contents, "", pluginTypes...)
 }
 
-// ParseModJAR 解析插件/模组 jar；filename 用于 Forge 缺少 mods.toml 时的文件名回退。
+// ParseModJAR 解析插件/模组 jar；filename 用于 Forge/NeoForge 缺少 mods.toml 时的文件名回退。
 func ParseModJAR(contents []byte, filename string, pluginTypes ...string) (map[string]Descriptor, Descriptor, error) {
 	pluginType := normalizePluginType(pluginTypes)
 	if pluginType == PluginTypeVelocity {
@@ -47,12 +47,31 @@ func ParseModJAR(contents []byte, filename string, pluginTypes ...string) (map[s
 	if pluginType == PluginTypeFabric {
 		return parseFabricModJAR(contents)
 	}
-	if pluginType == PluginTypeForge {
-		return parseForgeModJAR(contents, filename)
+	if pluginType == PluginTypeForge || pluginType == PluginTypeNeoForge {
+		// neoforge 与 forge 共用 mods.toml 解析，仅平台标记不同。
+		descriptors, primary, err := parseForgeModJAR(contents, filename)
+		if err != nil {
+			return nil, Descriptor{}, err
+		}
+		if pluginType == PluginTypeNeoForge {
+			for key, descriptor := range descriptors {
+				descriptor.PluginType = PluginTypeNeoForge
+				descriptors[key] = descriptor
+			}
+			primary.PluginType = PluginTypeNeoForge
+		}
+		return descriptors, primary, nil
 	}
-	if pluginType != PluginTypeSpigot {
-		return nil, Descriptor{}, fmt.Errorf("unsupported plugin type %q", pluginType)
+	if pluginType == PluginTypeSpigot || pluginType == PluginTypePaper {
+		// paper 与 spigot 共用 plugin.yml/paper-plugin.yml 解析，仅平台标记不同。
+		return parseBukkitJAR(contents, pluginType)
 	}
+	return nil, Descriptor{}, fmt.Errorf("unsupported plugin type %q", pluginType)
+}
+
+// parseBukkitJAR 解析 Bukkit 系 jar（plugin.yml / paper-plugin.yml），
+// 并按 pluginType（spigot/paper）标记制品平台类型。
+func parseBukkitJAR(contents []byte, pluginType string) (map[string]Descriptor, Descriptor, error) {
 	reader, err := zip.NewReader(bytes.NewReader(contents), int64(len(contents)))
 	if err != nil {
 		return nil, Descriptor{}, fmt.Errorf("open plugin jar: %w", err)
@@ -101,10 +120,10 @@ func ParseModJAR(contents []byte, filename string, pluginTypes ...string) (map[s
 		}
 	}
 	for key, descriptor := range descriptors {
-		descriptor.PluginType = PluginTypeSpigot
+		descriptor.PluginType = pluginType
 		descriptors[key] = descriptor
 	}
-	primary.PluginType = PluginTypeSpigot
+	primary.PluginType = pluginType
 	return descriptors, primary, nil
 }
 
@@ -129,13 +148,15 @@ func decodeDescriptor(filename string, data []byte) (Descriptor, error) {
 }
 
 const (
-	PluginTypeSpigot   = "spigot"
-	PluginTypeVelocity = "velocity"
-	PluginTypeBungee   = "bungee"
-	// PluginTypeFabric / PluginTypeForge 标记 mod 平台的服务端与仓库 mod 制品；
+	PluginTypeSpigot    = "spigot"
+	PluginTypePaper     = "paper"
+	PluginTypeVelocity  = "velocity"
+	PluginTypeBungee    = "bungee"
+	// PluginTypeFabric / PluginTypeForge / PluginTypeNeoForge 标记 mod 平台的服务端与仓库 mod 制品；
 	// 与 daemon model 的平台枚举保持同一套取值（两任务共用约定）。
-	PluginTypeFabric = "fabric"
-	PluginTypeForge  = "forge"
+	PluginTypeFabric   = "fabric"
+	PluginTypeForge    = "forge"
+	PluginTypeNeoForge = "neoforge"
 )
 
 type velocityDescriptor struct {
@@ -157,7 +178,8 @@ func normalizePluginType(values []string) string {
 
 func ValidPluginType(value string) bool {
 	switch value {
-	case PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee, PluginTypeFabric, PluginTypeForge:
+	case PluginTypeSpigot, PluginTypePaper, PluginTypeVelocity, PluginTypeBungee,
+		PluginTypeFabric, PluginTypeForge, PluginTypeNeoForge:
 		return true
 	default:
 		return false

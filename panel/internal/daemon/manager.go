@@ -180,6 +180,16 @@ func (m *Manager) UploadPluginConfig(ctx context.Context, panelNodeID, ticket, s
 	return connection.client.UploadPluginConfig(ctx, ticket, serverID, path, output)
 }
 
+func (m *Manager) UploadPluginContent(ctx context.Context, panelNodeID, ticket, serverID, path string, backupSnapshot bool, output any) error {
+	m.mu.RLock()
+	connection, exists := m.connections[panelNodeID]
+	m.mu.RUnlock()
+	if !exists {
+		return ErrDisconnected
+	}
+	return connection.client.UploadPluginContent(ctx, ticket, serverID, path, backupSnapshot, output)
+}
+
 func (m *Manager) UploadInstancePlugin(
 	ctx context.Context,
 	panelNodeID string,

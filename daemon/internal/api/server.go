@@ -76,6 +76,7 @@ func NewServer(
 	mux.HandleFunc("/api/v1/ws/plugin", api.handlePlugin)
 	mux.HandleFunc("/api/v1/plugins/deploy", api.handlePluginDeploy)
 	mux.HandleFunc("/api/v1/plugins/config/deploy", api.handlePluginConfigDeploy)
+	mux.HandleFunc("/api/v1/plugins/content/deploy", api.handlePluginContentDeploy)
 	mux.HandleFunc("/api/v1/plugins/upload", api.handlePluginUpload)
 	mux.HandleFunc("/api/v1/files/", api.handleFiles)
 	api.http = &http.Server{
@@ -614,7 +615,7 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			"public_url": s.config.Server.PublicURL, "upload_path": "/api/v1/plugins/upload",
 		}, nil
 	}
-	if input.Scope == "plugin.deploy" || input.Scope == "plugin.config.deploy" {
+	if input.Scope == "plugin.deploy" || input.Scope == "plugin.config.deploy" || input.Scope == "plugin.content.deploy" {
 		if _, err := s.servers.Get(input.InstanceID); err != nil {
 			return nil, err
 		}
@@ -629,6 +630,9 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 		uploadPath := "/api/v1/plugins/deploy"
 		if input.Scope == "plugin.config.deploy" {
 			uploadPath = "/api/v1/plugins/config/deploy"
+		}
+		if input.Scope == "plugin.content.deploy" {
+			uploadPath = "/api/v1/plugins/content/deploy"
 		}
 		return map[string]any{
 			"ticket_id": created.ID, "ticket": created.Token, "expires_at": created.ExpiresAt,

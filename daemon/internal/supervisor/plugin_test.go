@@ -34,10 +34,12 @@ func TestPluginConnectionIsBoundToRunningInstance(t *testing.T) {
 	current.pluginTokenSet = true
 	current.mu.Unlock()
 
-	if _, err := manager.RegisterPlugin("test", "session", "wrong", os.Getpid(), "spigot", nil); err == nil {
+	// 默认配置 Normalize 后平台为 paper，RegisterPlugin 的平台必须与
+	// PluginTypeForPlatform("paper") = "paper" 一致。
+	if _, err := manager.RegisterPlugin("test", "session", "wrong", os.Getpid(), "paper", nil); err == nil {
 		t.Fatal("expected invalid plugin token to be rejected")
 	}
-	connection, err := manager.RegisterPlugin("test", "session", token, os.Getpid(), "spigot", []string{"telemetry"})
+	connection, err := manager.RegisterPlugin("test", "session", token, os.Getpid(), "paper", []string{"telemetry"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +147,7 @@ func TestPluginReportValidationRejectsInvalidPlayers(t *testing.T) {
 	current.pluginTokenHash = sha256.Sum256([]byte(token))
 	current.pluginTokenSet = true
 	current.mu.Unlock()
-	connection, err := manager.RegisterPlugin("valid", "session", token, os.Getpid(), "spigot", nil)
+	connection, err := manager.RegisterPlugin("valid", "session", token, os.Getpid(), "paper", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

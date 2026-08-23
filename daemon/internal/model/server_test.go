@@ -153,7 +153,7 @@ func TestConfigSyncDirectoriesValidation(t *testing.T) {
 }
 
 func TestModPlatformSupport(t *testing.T) {
-	for _, platform := range []string{"paper", "spigot", "fabric", "forge", "velocity", "bungee"} {
+	for _, platform := range []string{"paper", "spigot", "fabric", "forge", "neoforge", "velocity", "bungee"} {
 		if !IsSupportedPlatform(platform) {
 			t.Fatalf("platform %q should be supported", platform)
 		}
@@ -161,19 +161,34 @@ func TestModPlatformSupport(t *testing.T) {
 	if IsSupportedPlatform("vanilla") {
 		t.Fatal("vanilla should not be supported")
 	}
-	for _, platform := range []string{"fabric", "forge"} {
+	for _, platform := range []string{"fabric", "forge", "neoforge"} {
 		if !IsModPlatform(platform) || ModTypeForPlatform(platform) != platform {
 			t.Fatalf("platform %q should be a mod platform", platform)
+		}
+		if ArtifactDirectory(platform) != "mods" {
+			t.Fatalf("mod platform %q should deploy to mods", platform)
+		}
+		if !IsModArtifact(platform) {
+			t.Fatalf("artifact type %q should be a mod artifact", platform)
 		}
 	}
 	if IsModPlatform("paper") || ModTypeForPlatform("paper") != "" {
 		t.Fatal("paper should not be a mod platform")
 	}
-	if PluginTypeForPlatform("fabric") != "fabric" || PluginTypeForPlatform("forge") != "forge" {
+	if PluginTypeForPlatform("fabric") != "fabric" || PluginTypeForPlatform("forge") != "forge" ||
+		PluginTypeForPlatform("neoforge") != "neoforge" {
 		t.Fatal("mod platforms should map to their own plugin type")
 	}
-	if PluginTypeForPlatform("paper") != "spigot" || PluginTypeForPlatform("velocity") != "velocity" {
-		t.Fatal("plugin type mapping for paper/velocity is wrong")
+	if PluginTypeForPlatform("paper") != "paper" || PluginTypeForPlatform("spigot") != "spigot" ||
+		PluginTypeForPlatform("velocity") != "velocity" || PluginTypeForPlatform("bungee") != "bungee" {
+		t.Fatal("plugin type mapping for paper/spigot/proxy platforms is wrong")
+	}
+	// paper 独立插件类型，但部署目录仍为 plugins/。
+	if ArtifactDirectory("paper") != "plugins" || ArtifactDirectory("spigot") != "plugins" {
+		t.Fatal("paper/spigot should deploy to plugins")
+	}
+	if IsModArtifact("paper") || IsModArtifact("spigot") {
+		t.Fatal("paper/spigot artifacts are plugins, not mods")
 	}
 }
 

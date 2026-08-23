@@ -68,6 +68,38 @@ type ConfigSnapshot struct {
 	Size      int64  `yaml:"size,omitempty" json:"size,omitempty"`
 }
 
+// ContentTreeEntry 是内容包快照树的一个条目（zip 顶层结构的一项）。
+// Type 取 "dir" 或 "file"；文件条目携带 Size。
+type ContentTreeEntry struct {
+	Path string `yaml:"path" json:"path"`
+	Type string `yaml:"type" json:"type"`
+	Size int64  `yaml:"size,omitempty" json:"size,omitempty"`
+}
+
+// ContentSnapshot 是通用内容包快照：zip 顶层即服务端工作目录结构
+// （config/ → 服务端 config/，其他文件/文件夹按相对结构映射，不自动剥离外层）。
+// Type 取 "config"（单独配置）或 "full"（完全配置：含 mod/config/world 等整包）。
+// Tree 记录 zip 顶层目录树，供前端结构预览。
+// ContentID 是内容包版本号（制品内递增，类似 artifactID；内容包可独立版本化）。
+type ContentSnapshot struct {
+	ContentID int64             `yaml:"content_id,omitempty" json:"content_id,omitempty"`
+	Type      string            `yaml:"type" json:"type"`
+	Present   bool              `yaml:"present" json:"present"`
+	Tree      []ContentTreeEntry `yaml:"tree,omitempty" json:"tree,omitempty"`
+	SHA256    string            `yaml:"sha256,omitempty" json:"sha256,omitempty"`
+	Files     int               `yaml:"files,omitempty" json:"files,omitempty"`
+	Size      int64             `yaml:"size,omitempty" json:"size,omitempty"`
+}
+
+// ContentIndex 是制品下内容包版本索引（持久化在 <artifactDir>/content.yaml）：
+// 内容包独立版本化，ContentID 类似 artifactID 在制品内递增；
+// Manifest.Content 始终指向 Current 版本（前端展示多版本时用 Versions）。
+type ContentIndex struct {
+	SchemaVersion int               `yaml:"schema_version" json:"schema_version"`
+	Current       int64             `yaml:"current" json:"current"`
+	Versions      []ContentSnapshot `yaml:"versions" json:"versions"`
+}
+
 type Manifest struct {
 	SchemaVersion int                   `yaml:"schema_version" json:"schema_version"`
 	ArtifactID    int64                 `yaml:"artifact_id" json:"artifact_id"`
@@ -83,8 +115,25 @@ type Manifest struct {
 	Descriptors   map[string]Descriptor `yaml:"descriptors" json:"descriptors"`
 	Artifact      ArtifactFile          `yaml:"artifact" json:"artifact"`
 	Config        ConfigSnapshot        `yaml:"config" json:"config"`
+	Content       *ContentSnapshot      `yaml:"content,omitempty" json:"content,omitempty"`
 	UploadedBy    Uploader              `yaml:"uploaded_by" json:"uploaded_by"`
 	UploadedAt    time.Time             `yaml:"uploaded_at" json:"uploaded_at"`
+}
+
+// ContentType 返回内容包类型（"config" 单独配置 / "full" 完全配置）；无内容包返回空串。
+func (m Manifest) ContentType() string {
+	if m.Content == nil || !m.Content.Present {
+		return ""
+	}
+	return m.Content.Type
+}
+
+// ContentID 返回当前内容包版本号（contentID）；无内容包返回 0。
+func (m Manifest) ContentID() int64 {
+	if m.Content == nil || !m.Content.Present {
+		return 0
+	}
+	return m.Content.ContentID
 }
 
 type Index struct {
@@ -113,7 +162,13 @@ type UploadInput struct {
 	JAR             []byte
 	ConfigZIP       []byte
 	ConfigDirectory string
-	Uploader        Uploader
+	// ContentZIP / ContentType 是通用内容包上传：zip 顶层即服务端工作目录结构。
+	// ContentType 取 "config"（单独配置）或 "full"（完全配置）；与旧 ConfigZIP 二选一。
+	ContentZIP   []byte
+	ContentType  string
+	ContentName  string
+	ContentVersion string
+	Uploader     Uploader
 }
 
 type UploadResult struct {

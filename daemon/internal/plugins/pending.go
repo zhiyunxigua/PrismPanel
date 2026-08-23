@@ -23,6 +23,7 @@ type pendingOperation struct {
 	DeleteConfig     bool      `json:"delete_config,omitempty"`
 	Directory        string    `json:"directory,omitempty"`
 	BundleFile       string    `json:"bundle_file,omitempty"`
+	BackupSnapshot   bool      `json:"backup_snapshot,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 

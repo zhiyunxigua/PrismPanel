@@ -95,6 +95,11 @@ type TargetResult struct {
 	Status         string `json:"status"`
 	PendingRestart bool   `json:"pending_restart"`
 	Message        string `json:"message,omitempty"`
+	// 内容包部署统计（仅 plugin.content.deploy 使用）。
+	Applied     int    `json:"applied,omitempty"`
+	Overwritten int    `json:"overwritten,omitempty"`
+	Added       int    `json:"added,omitempty"`
+	BackupPath  string `json:"backup_path,omitempty"`
 }
 
 type OperationResult struct {

@@ -77,30 +77,43 @@ func TestPlatformDescriptorsAreSeparated(t *testing.T) {
 		descriptor string
 		contents   string
 		expected   string
+		wrongType  string
 	}{
 		{
 			name: "velocity", pluginType: PluginTypeVelocity,
 			descriptor: "velocity-plugin.json",
 			contents:   `{"id":"prism","name":"Prism","version":"1.2.0","main":"example.Main","authors":["Tester"]}`,
-			expected:   "prism",
+			expected:   "prism", wrongType: PluginTypeBungee,
 		},
 		{
 			name: "bungee", pluginType: PluginTypeBungee,
 			descriptor: "bungee.yml",
 			contents:   "name: Prism\nversion: 1.2.0\nmain: example.Main\nauthor: Tester\n",
-			expected:   "Prism",
+			expected:   "Prism", wrongType: PluginTypeSpigot,
 		},
 		{
 			name: "fabric", pluginType: PluginTypeFabric,
 			descriptor: "fabric.mod.json",
 			contents:   `{"schemaVersion":1,"id":"prism","name":"Prism","version":"1.2.0","authors":["Tester"],"description":"fabric mod"}`,
-			expected:   "Prism",
+			expected:   "Prism", wrongType: PluginTypeSpigot,
 		},
 		{
 			name: "forge", pluginType: PluginTypeForge,
 			descriptor: "META-INF/mods.toml",
 			contents:   "modLoader=\"javafml\"\nloaderVersion=\"[39,)\"\n\n[[mods]]\nmodId=\"prism\"\nversion=\"1.2.0\"\ndisplayName=\"Prism\"\nauthors=\"Tester\"\ndisplayURL=\"https://example.com\"\n",
-			expected:   "Prism",
+			expected:   "Prism", wrongType: PluginTypeSpigot,
+		},
+		{
+			name: "neoforge", pluginType: PluginTypeNeoForge,
+			descriptor: "META-INF/mods.toml",
+			contents:   "modLoader=\"javafml\"\nloaderVersion=\"[49,)\"\n\n[[mods]]\nmodId=\"neo\"\nversion=\"1.2.0\"\ndisplayName=\"Prism\"\n",
+			expected:   "Prism", wrongType: PluginTypeFabric,
+		},
+		{
+			name: "paper", pluginType: PluginTypePaper,
+			descriptor: "plugin.yml",
+			contents:   "name: Prism\nversion: 1.2.0\nmain: example.Main\nauthor: Tester\n",
+			expected:   "Prism", wrongType: PluginTypeVelocity,
 		},
 	}
 	for _, test := range tests {
@@ -122,11 +135,7 @@ func TestPlatformDescriptorsAreSeparated(t *testing.T) {
 			if plugin.PluginType != test.pluginType || plugin.Name != test.expected || plugin.Version != "1.2.0" {
 				t.Fatalf("unexpected plugin descriptor: %#v", plugin)
 			}
-			wrongType := PluginTypeSpigot
-			if test.pluginType == PluginTypeVelocity {
-				wrongType = PluginTypeBungee
-			}
-			if _, err := scanFile(path, filepath.Base(path), true, info, wrongType); err == nil {
+			if _, err := scanFile(path, filepath.Base(path), true, info, test.wrongType); err == nil {
 				t.Fatal("expected a cross-platform descriptor mismatch")
 			}
 		})

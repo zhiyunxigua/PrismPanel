@@ -13,16 +13,23 @@ import (
 )
 
 const (
-	PluginTypeSpigot   = "spigot"
-	PluginTypeVelocity = "velocity"
-	PluginTypeBungee   = "bungee"
-	PluginTypeFabric   = "fabric"
-	PluginTypeForge    = "forge"
+	PluginTypeSpigot    = "spigot"
+	PluginTypePaper     = "paper"
+	PluginTypeVelocity  = "velocity"
+	PluginTypeBungee    = "bungee"
+	PluginTypeFabric    = "fabric"
+	PluginTypeForge     = "forge"
+	PluginTypeNeoForge  = "neoforge"
 )
 
 // allPluginTypes 是 auto 探测时的候选顺序。插件描述符优先，mod 描述符在后，
 // 避免包含 fabric.mod.json 的混合 jar 被误判。
-var allPluginTypes = []string{PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee, PluginTypeFabric, PluginTypeForge}
+// paper/neoforge 与 spigot/forge 共用同一描述符解析（plugin.yml / mods.toml），
+// 顺序在各自共用解析器之后，作为兜底候选。
+var allPluginTypes = []string{
+	PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee, PluginTypeFabric, PluginTypeForge,
+	PluginTypeNeoForge, PluginTypePaper,
+}
 
 type velocityDescriptor struct {
 	ID           string          `json:"id"`
@@ -44,7 +51,8 @@ func requestedPluginType(values []string) string {
 
 func validPluginType(value string) bool {
 	switch value {
-	case PluginTypeSpigot, PluginTypeVelocity, PluginTypeBungee, PluginTypeFabric, PluginTypeForge:
+	case PluginTypeSpigot, PluginTypePaper, PluginTypeVelocity, PluginTypeBungee,
+		PluginTypeFabric, PluginTypeForge, PluginTypeNeoForge:
 		return true
 	default:
 		return false
@@ -57,6 +65,11 @@ func parseJAR(path string, pluginTypes ...string) (map[string]Descriptor, Descri
 		descriptors, primary, err := parseSpigotJAR(path)
 		return markPluginType(descriptors, primary, err, PluginTypeSpigot)
 	}
+	if pluginType == PluginTypePaper {
+		// paper 与 spigot 共用 plugin.yml/paper-plugin.yml 解析，仅平台标记不同。
+		descriptors, primary, err := parseSpigotJAR(path)
+		return markPluginType(descriptors, primary, err, PluginTypePaper)
+	}
 	if pluginType == PluginTypeVelocity {
 		return parseVelocityJAR(path)
 	}
@@ -68,6 +81,11 @@ func parseJAR(path string, pluginTypes ...string) (map[string]Descriptor, Descri
 	}
 	if pluginType == PluginTypeForge {
 		return parseForgeJAR(path)
+	}
+	if pluginType == PluginTypeNeoForge {
+		// neoforge 与 forge 共用 mods.toml 解析，仅平台标记不同。
+		descriptors, primary, err := parseForgeJAR(path)
+		return markPluginType(descriptors, primary, err, PluginTypeNeoForge)
 	}
 	if pluginType != "auto" {
 		return nil, Descriptor{}, fmt.Errorf("unsupported plugin type %q", pluginType)

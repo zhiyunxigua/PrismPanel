@@ -354,6 +354,59 @@ func TestRepositoryIconFallbackReparsesJar(t *testing.T) {
 	}
 }
 
+func TestRepositorySupportsSevenPlatformTypes(t *testing.T) {
+	root := t.TempDir()
+	repository, err := NewRepository(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{
+		PluginTypeFabric, PluginTypeForge, PluginTypeNeoForge,
+		PluginTypeSpigot, PluginTypePaper, PluginTypeVelocity, PluginTypeBungee,
+	}
+	for _, pluginType := range expected {
+		importDir := filepath.Join(root, pluginType, "import")
+		if info, statErr := os.Stat(importDir); statErr != nil || !info.IsDir() {
+			t.Fatalf("repository directory for %q missing: %v", pluginType, statErr)
+		}
+	}
+	paper, err := repository.Upload(UploadInput{
+		PluginType: PluginTypePaper, JARFilename: "PaperPlugin-1.0.jar",
+		JAR: testZIP(t, map[string]string{
+			"plugin.yml": "name: PaperPlugin\nversion: 1.0\nmain: com.example.PaperPlugin\n",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paper.Plugin.PluginType != PluginTypePaper || paper.Artifact.Name != "PaperPlugin" {
+		t.Fatalf("unexpected paper artifact: %#v", paper)
+	}
+	neo, err := repository.Upload(UploadInput{
+		PluginType: PluginTypeNeoForge, JARFilename: "NeoMod-2.0.jar",
+		JAR: testZIP(t, map[string]string{
+			"META-INF/mods.toml": "modLoader=\"javafml\"\nloaderVersion=\"[49,)\"\n\n[[mods]]\nmodId=\"neomod\"\nversion=\"2.0\"\ndisplayName=\"Neo Mod\"\n",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if neo.Plugin.PluginType != PluginTypeNeoForge || neo.Artifact.Name != "Neo Mod" {
+		t.Fatalf("unexpected neoforge artifact: %#v", neo)
+	}
+	catalog, err := repository.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	types := make(map[string]bool)
+	for _, plugin := range catalog {
+		types[plugin.PluginType] = true
+	}
+	if !types[PluginTypePaper] || !types[PluginTypeNeoForge] {
+		t.Fatalf("repository list must include paper and neoforge: %#v", types)
+	}
+}
+
 func testJAR(t *testing.T, name, version, main string) []byte {
 	t.Helper()
 	return testZIP(t, map[string]string{

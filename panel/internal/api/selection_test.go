@@ -20,7 +20,7 @@ func TestResolveSelectedServersUsesNodeDefaultsAndOverrides(t *testing.T) {
 		{NodeID: "node-a", Enabled: true},
 		{NodeID: "node-a", ServerID: "test", Enabled: false},
 	}
-	targets := resolveSelectedServers(catalog, rules, "spigot")
+	targets := resolveSelectedServers(catalog, rules, "paper")
 	if len(targets) != 1 || targets[0].ServerID != "lobby" {
 		t.Fatalf("unexpected selected targets: %#v", targets)
 	}

@@ -223,10 +223,14 @@ func pluginTypeForPlatform(platform string) string {
 	if isProxyPlatform(platform) {
 		return platform
 	}
-	// mod 平台返回自身类型：仓库中的 fabric/forge mod 制品可部署到对应平台
+	// mod 平台返回自身类型：仓库中的 fabric/forge/neoforge mod 制品可部署到对应平台
 	// 服务端，spigot 插件不会误装到 mod 服。
 	if isModPlatform(platform) {
 		return platform
+	}
+	// paper 是独立插件类型（仓库制品标记为 "paper"），部署目录仍为 plugins/。
+	if platform == panelplugins.PluginTypePaper {
+		return panelplugins.PluginTypePaper
 	}
 	return panelplugins.PluginTypeSpigot
 }
@@ -237,7 +241,9 @@ func isProxyPlatform(platform string) bool {
 
 // isModPlatform 判断平台是否为 mod 加载器平台（与 daemon model.IsModPlatform 同一约定）。
 func isModPlatform(platform string) bool {
-	return platform == panelplugins.PluginTypeFabric || platform == panelplugins.PluginTypeForge
+	return platform == panelplugins.PluginTypeFabric ||
+		platform == panelplugins.PluginTypeForge ||
+		platform == panelplugins.PluginTypeNeoForge
 }
 
 func nodeHost(raw string) (string, error) {
