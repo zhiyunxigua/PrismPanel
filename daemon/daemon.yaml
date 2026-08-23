@@ -1,0 +1,22 @@
+server:
+    listen: 0.0.0.0
+    port: 24444
+    public_url: ""
+ssl:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+security:
+    trusted_proxy_cidrs: []
+storage:
+    data_dir: data
+files:
+    max_edit_file_size: 5242880
+    max_upload_file_size: 2147483648
+    max_extracted_size: 21474836480
+    max_archive_download_size: 1073741824
+    max_concurrent_transfers: 4
+    copy_concurrency: 4
+process:
+    console_buffer_lines: 2000
+    shutdown_timeout_seconds: 90

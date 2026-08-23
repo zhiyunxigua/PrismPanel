@@ -1,0 +1,4 @@
+name: Prism
+version: '${version}'
+main: com.xigua.prism.bungee.PrismBungee
+author: xigua

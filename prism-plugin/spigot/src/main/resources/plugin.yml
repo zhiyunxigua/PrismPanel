@@ -1,0 +1,5 @@
+name: Prism
+version: '${version}'
+main: com.xigua.prism.spigot.PrismSpigot
+api-version: '1.18'
+authors: [xigua]

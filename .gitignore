@@ -1,0 +1,45 @@
+# ---- IDE ----
+.idea/
+out/
+*.iml
+*.ipr
+*.iws
+
+# ---- 构建产物 ----
+build/
+dist/
+target/
+run/
+frontend/node_modules/
+frontend/dist/
+winapp/build/
+winapp/assets/*
+!winapp/assets/.gitignore
+prism-plugin/.gradle/
+prism-plugin/*/build/
+*.class
+/PrismPanel.exe
+*.log
+
+# ---- 本地运行数据 ----
+daemon/data/
+panel/data/
+panel/panel.yaml
+panel/panel.db
+*.db
+
+# ---- 工作区会话缓存/临时（本工作区产生，可随时重建） ----
+.gocache/
+.gomodcache/
+.gradle-home/
+.verify/
+.verify-build/
+.tmpcheck/
+.agent-teams/
+.removed-netease-panel/
+.removed-netease-winapp/
+archived-docs-removed/
+
+# ---- 系统/跨平台垃圾 ----
+.DS_Store
+Thumbs.db

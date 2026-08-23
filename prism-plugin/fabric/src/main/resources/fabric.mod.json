@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "prism-fabric",
+  "version": "${version}",
+  "name": "Prism Fabric",
+  "description": "PrismPanel 运行态上报客户端：向 daemon 上报服务端实际加载的 mod 列表。",
+  "authors": [
+    "PrismPanel"
+  ],
+  "contact": {},
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.xigua.prism.fabric.PrismFabric"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.14.0"
+  }
+}
