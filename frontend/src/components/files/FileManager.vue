@@ -1,17 +1,22 @@
 <script setup>
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import {
   ArrowUp, ChevronRight, ClipboardPaste, Copy, Download, Edit3, File, FileArchive, FileCode2,
   FilePlus2, FileText, Folder, FolderOpen, FolderPlus, Home, MoreHorizontal, MoveRight,
-  RefreshCw, Save, Scissors, Trash2, Upload, X,
+  RefreshCw, RotateCcw, Save, Scissors, Trash2, Upload, X,
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { hasPermission } from "../../session";
-import { downloadFile, fileExportURL, fileJSON, importArchive, uploadFile } from "../../fileApi";
+import {
+  cancelUpload, createUploadID, downloadFile, fileExportURL, fileJSON, importArchive, uploadFile,
+} from "../../fileApi";
 import { isExternalFileDrag, plainUploadItems, scanDroppedItems } from "../../fileDrop";
+import { invertFileSelection, selectFileEntry } from "../../fileSelection";
 import { isWinApp, openRemoteFileWinApp, runtimeConfig } from "../../runtime";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
+import ExtractDialog from "./ExtractDialog.vue";
+import UploadTaskDialog from "./UploadTaskDialog.vue";
 
 const CodeEditor = defineAsyncComponent(() => import("./CodeEditor.vue"));
 
@@ -29,13 +34,21 @@ const selectedTargetKey = ref("");
 const activeDirectory = ref(".");
 const pathInput = ref(".");
 const uploadInput = ref(null);
+const uploadDirectoryInput = ref(null);
 const archiveInput = ref(null);
 const conflictDialog = ref(null);
 const dragTargetPath = ref("");
-const uploadState = ref({
-  active: false, completed: 0, total: 0, name: "", scanning: false,
-  directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
-});
+const uploadTasks = ref([]);
+const uploadDialogVisible = ref(false);
+const uploadScanning = ref(false);
+const uploadPreparing = ref("");
+const uploadWorkerActive = ref(false);
+const uploadEmptyDirectories = ref([]);
+const uploadStats = ref({ totalBytes: 0, loadedBytes: 0, completed: 0, startedAt: 0, speed: 0 });
+const uploadSummary = ref({ directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0 });
+const extractDialogVisible = ref(false);
+const extractEntry = ref(null);
+const extractTask = ref(null);
 const archiveImporting = ref(false);
 const archiveCreating = ref(false);
 const rootEmpty = ref(false);
@@ -44,25 +57,25 @@ const previewSaving = ref(false);
 const previewRequest = ref(0);
 const preview = ref(emptyPreview());
 const contextMenu = ref({ visible: false, x: 0, y: 0, entry: null });
-const tabs = ref([]);
-const activeTabKey = ref("");
+const contextMenuElement = ref(null);
 const selectedEntries = ref([]);
+const lastSelectedIndex = ref(-1);
 const pathEditing = ref(false);
 const clipboard = ref({ type: "", entries: [], targetKey: "" });
-const MAX_TABS = 10;
 let longPressTimer = 0;
 let longPressOrigin = null;
 let suppressEntryClick = false;
 let stopFileSyncEvents = null;
 
-const canWrite = computed(() => hasPermission("file.write"));
-const canDelete = computed(() => hasPermission("file.delete"));
+const canWrite = computed(() => hasPermission("file.write") || Boolean(currentTarget.value?.instance?.instance_admin));
+const canDelete = computed(() => hasPermission("file.delete") || Boolean(currentTarget.value?.instance?.instance_admin));
 const targetOptions = computed(() => {
   const options = [];
-  if (props.server?.type === "mirror") {
+  if (props.server?.type === "mirror" && hasPermission("file.read")) {
     options.push({ key: `image:${props.server.server_id}`, type: "image", id: props.server.server_id, label: "镜像源" });
   }
   for (const instance of props.instances) {
+    if (!hasPermission("file.read") && !instance.instance_admin) continue;
     options.push({
       key: `instance:${instance.instance_id}`,
       type: "instance",
@@ -81,7 +94,9 @@ const writeLocked = computed(() => {
   return Boolean(currentTarget.value?.instance?.deployment_locked);
 });
 const writeDisabled = computed(() => !currentTarget.value || writeLocked.value);
-const explorerBusy = computed(() => previewSaving.value || uploadState.value.active || archiveImporting.value || archiveCreating.value);
+const explorerBusy = computed(() => (
+  previewSaving.value || archiveImporting.value || archiveCreating.value
+));
 const canImportArchive = computed(() => canWrite.value && rootEmpty.value && currentTarget.value && (
   currentTarget.value.type === "image"
   || ["stopped", "failed"].includes(currentTarget.value.instance?.state)
@@ -99,6 +114,15 @@ const pathSegments = computed(() => {
   return segments;
 });
 const hasClipboard = computed(() => clipboard.value.entries.length > 0);
+const multiContextSelection = computed(() => (
+  selectedEntries.value.length > 1
+  && Boolean(contextMenu.value.entry)
+  && isSelected(contextMenu.value.entry)
+));
+const allSelected = computed(() => directoryEntries.value.length > 0 && selectedEntries.value.length === directoryEntries.value.length);
+const selectionIndeterminate = computed(() => selectedEntries.value.length > 0 && !allSelected.value);
+const activeUploadCount = computed(() => uploadTasks.value.filter((item) => ["waiting", "uploading", "paused"].includes(item.status)).length);
+const currentUploadTaskId = computed(() => uploadTasks.value.find((item) => item.status === "uploading")?.id || "");
 
 watch(targetOptions, (options) => {
   if (!options.some((item) => item.key === selectedTargetKey.value)) {
@@ -108,7 +132,7 @@ watch(targetOptions, (options) => {
 }, { immediate: true });
 
 watch(selectedTargetKey, () => {
-  if (selectedTargetKey.value) restoreTabs();
+  if (selectedTargetKey.value) restoreDirectory();
 });
 
 function authorization(scope, path, paths = [], extra = {}, target = currentTarget.value) {
@@ -156,7 +180,7 @@ async function loadDirectory(path = activeDirectory.value, target = currentTarge
     if (request !== directoryRequest.value || selectedTargetKey.value !== target.key) return false;
     activeDirectory.value = path;
     pathInput.value = path;
-    updateActiveTab(path, target);
+    saveDirectory(target);
     directoryEntries.value = entries;
     if (path === ".") rootEmpty.value = entries.length === 0;
     return true;
@@ -190,7 +214,7 @@ function resetExplorer() {
   directoryError.value = "";
   rootEmpty.value = false;
   closeContextMenu();
-  restoreTabs();
+  restoreDirectory();
 }
 
 function refreshDirectory() {
@@ -239,13 +263,31 @@ async function openNativeFile(entry, chooseApplication = false) {
 }
 
 function selectEntry(entry, event) {
-  if (event?.metaKey || event?.ctrlKey) {
-    const index = selectedEntries.value.findIndex((item) => item.path === entry.path);
-    if (index >= 0) selectedEntries.value.splice(index, 1);
-    else selectedEntries.value.push(entry);
-  } else {
-    selectedEntries.value = [entry];
-  }
+  const result = selectFileEntry(directoryEntries.value, selectedEntries.value, entry, event, lastSelectedIndex.value);
+  selectedEntries.value = result.selected;
+  lastSelectedIndex.value = result.lastIndex;
+}
+
+function toggleEntry(entry, checked) {
+  if (checked && !isSelected(entry)) selectedEntries.value.push(entry);
+  if (!checked) selectedEntries.value = selectedEntries.value.filter((item) => item.path !== entry.path);
+  lastSelectedIndex.value = directoryEntries.value.findIndex((item) => item.path === entry.path);
+}
+
+function toggleAll(checked) {
+  selectedEntries.value = checked ? [...directoryEntries.value] : [];
+  lastSelectedIndex.value = checked && directoryEntries.value.length ? directoryEntries.value.length - 1 : -1;
+}
+
+function invertSelection() {
+  selectedEntries.value = invertFileSelection(directoryEntries.value, selectedEntries.value);
+  lastSelectedIndex.value = -1;
+}
+
+function clearSelection(event) {
+  if (event?.target !== event?.currentTarget) return;
+  selectedEntries.value = [];
+  lastSelectedIndex.value = -1;
 }
 
 function isSelected(entry) {
@@ -258,85 +300,24 @@ function targetStorageKey(target = currentTarget.value) {
   return `prism:file-path:v2:${encodeURIComponent(panel)}:${props.nodeId}:${target.key}`;
 }
 
-function restoreTabs() {
+function restoreDirectory() {
   const target = currentTarget.value;
   if (!target) return;
   let stored;
   try { stored = JSON.parse(window.localStorage.getItem(targetStorageKey(target)) || "null"); } catch { stored = null; }
   const path = normalizePath(stored?.lastPath || ".");
-  const tab = { key: createTabKey(), path, name: tabName(path), closable: false };
-  tabs.value = [tab];
-  activeTabKey.value = tab.key;
   activeDirectory.value = path;
   pathInput.value = path;
-  saveTabs(target);
+  saveDirectory(target);
   void loadDirectory(path, target);
 }
 
-function saveTabs(target = currentTarget.value) {
+function saveDirectory(target = currentTarget.value) {
   const key = targetStorageKey(target);
   if (!key) return;
   window.localStorage.setItem(key, JSON.stringify({ lastPath: activeDirectory.value }));
 }
-
-function updateActiveTab(path, target = currentTarget.value) {
-  const active = tabs.value.find((item) => item.key === activeTabKey.value);
-  if (active) {
-    active.path = path;
-    active.name = tabName(path);
-  }
-  saveTabs(target);
-}
-
-async function switchTab(key) {
-  if (key === activeTabKey.value) return true;
-  if (explorerBusy.value || !await confirmDiscard()) return false;
-  const tab = tabs.value.find((item) => item.key === key);
-  if (!tab) return false;
-  activeTabKey.value = key;
-  selectedEntries.value = [];
-  preview.value = emptyPreview();
-  saveTabs();
-  return loadDirectory(tab.path);
-}
-
-async function addTab(path = ".") {
-  if (tabs.value.length >= MAX_TABS) {
-    ElMessage.warning(`最多打开 ${MAX_TABS} 个标签`);
-    return;
-  }
-  if (explorerBusy.value || !await confirmDiscard()) return;
-  const tab = { key: createTabKey(), path: normalizePath(path), name: tabName(path), closable: true };
-  tabs.value.push(tab);
-  activeTabKey.value = tab.key;
-  selectedEntries.value = [];
-  preview.value = emptyPreview();
-  saveTabs();
-  await loadDirectory(tab.path);
-}
-
-async function closeTab(key) {
-  if (tabs.value.length <= 1) return;
-  if (!await confirmDiscard()) return;
-  const index = tabs.value.findIndex((item) => item.key === key);
-  if (index < 0) return;
-  tabs.value.splice(index, 1);
-  if (activeTabKey.value === key) {
-    activeTabKey.value = tabs.value[index - 1]?.key || tabs.value[0].key;
-    const tab = tabs.value.find((item) => item.key === activeTabKey.value);
-    preview.value = emptyPreview();
-    await loadDirectory(tab.path);
-  }
-  saveTabs();
-}
-
-function openInNewTab(entry) {
-  void addTab(entry.type === "directory" ? entry.path : parentPath(entry.path));
-}
-
-function createTabKey() { return `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
 function normalizePath(value) { return value?.trim().replaceAll("\\", "/").replace(/^\/+|\/+$/g, "") || "."; }
-function tabName(value) { return value === "." ? "根目录" : value.split("/").pop() || "根目录"; }
 
 async function openFile(entry) {
   if (entry.path === preview.value.path) return;
@@ -536,6 +517,58 @@ async function archiveEntry(entry) {
   }
 }
 
+function openExtractDialog(entry) {
+  if (!canWrite.value || writeLocked.value || entry.type !== "file" || !entry.name.toLowerCase().endsWith(".zip")) return;
+  extractEntry.value = entry;
+  extractTask.value = null;
+  extractDialogVisible.value = true;
+}
+
+async function startExtract({ destination, password, encoding, directoryMode, conflictPolicy }) {
+  const entry = extractEntry.value;
+  const target = currentTarget.value;
+  if (!entry || !target) return;
+  try {
+    extractTask.value = await fileJSON(
+      authorization("file.extract", entry.path, [entry.path, destination], {}, target),
+      "POST",
+      {
+        destination, password, encoding,
+        directory_mode: directoryMode,
+        conflict_policy: conflictPolicy,
+      },
+    );
+    await pollExtractTask(target, entry.path, extractTask.value.id);
+  } catch (error) {
+    extractTask.value = {
+      ...(extractTask.value || {}), status: "failed", stage: error.stage || "start",
+      message: error.message || "解压失败", error: serializeFileError(error),
+    };
+  }
+}
+
+async function pollExtractTask(target, source, taskId) {
+  while (extractDialogVisible.value && extractTask.value?.id === taskId) {
+    await delay(500);
+    const task = await fileJSON(
+      authorization("file.extract.status", source, [], {}, target),
+      "POST",
+      { task_id: taskId },
+    );
+    extractTask.value = task;
+    if (task.status === "done") {
+      ElMessage.success("解压完成");
+      refreshDirectory();
+      return;
+    }
+    if (task.status === "failed") return;
+  }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
 async function removeEntry(entry) {
   if (!canDelete.value || writeLocked.value) return;
   const recursive = entry.type === "directory";
@@ -559,8 +592,40 @@ async function removeEntry(entry) {
   }
 }
 
+async function removeSelectedEntries() {
+  if (!canDelete.value || writeLocked.value || !selectedEntries.value.length) return;
+  const entries = [...selectedEntries.value];
+  const paths = entries.map((item) => item.path);
+  const recursive = entries.some((item) => item.type === "directory");
+  try {
+    await ElMessageBox.confirm(`将永久删除所选 ${entries.length} 项${recursive ? "及目录内的全部内容" : ""}。`, "批量删除", {
+      type: "warning", confirmButtonText: "删除", cancelButtonText: "取消",
+    });
+    for (let index = 0; index < paths.length; index += 100) {
+      const batch = paths.slice(index, index + 100);
+      await fileJSON(authorization("file.delete", batch[0], batch, { recursive }), "POST", { paths: batch, recursive });
+    }
+    selectedEntries.value = [];
+    lastSelectedIndex.value = -1;
+    ElMessage.success("删除完成");
+    refreshDirectory();
+  } catch (error) {
+    if (!isCancelled(error)) ElMessage.error(error.message || "删除失败");
+  }
+}
+
 function chooseFiles() {
-  if (canWrite.value && !writeDisabled.value) uploadInput.value?.click();
+  if (canWrite.value && !writeDisabled.value) {
+    uploadDialogVisible.value = true;
+    uploadInput.value?.click();
+  }
+}
+
+function chooseDirectory() {
+  if (canWrite.value && !writeDisabled.value) {
+    uploadDialogVisible.value = true;
+    uploadDirectoryInput.value?.click();
+  }
 }
 
 function chooseArchive() {
@@ -571,6 +636,22 @@ async function handleFileInput(event) {
   const files = Array.from(event.target.files || []);
   event.target.value = "";
   await uploadItems(plainUploadItems(files), activeDirectory.value);
+}
+
+async function handleDirectoryInput(event) {
+  const files = Array.from(event.target.files || []);
+  event.target.value = "";
+  if (!files.length) return;
+  uploadDialogVisible.value = true;
+  uploadScanning.value = true;
+  await renderUploadDialog();
+  try {
+    await uploadItems(plainUploadItems(files), activeDirectory.value);
+  } catch (error) {
+    ElMessage.error(error.message || "文件夹内容读取失败");
+  } finally {
+    uploadScanning.value = false;
+  }
 }
 
 async function handleArchiveInput(event) {
@@ -610,83 +691,244 @@ async function handleDrop(event, directory = activeDirectory.value) {
   event.preventDefault();
   event.stopPropagation();
   dragTargetPath.value = "";
-  uploadState.value = {
-    active: true, completed: 0, total: 0, name: "正在扫描拖入内容", scanning: true,
-    directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
-  };
+  uploadScanning.value = true;
+  uploadDialogVisible.value = true;
+  const droppedFiles = Array.from(event.dataTransfer?.files || []);
+  const scanPromise = isWinApp() ? null : scanDroppedItems(event.dataTransfer);
   try {
-    await uploadItems(await scanDroppedItems(event.dataTransfer), directory, true);
+    await renderUploadDialog();
+    if (isWinApp()) {
+      if (!droppedFiles.length) {
+        ElMessage.warning("当前客户端暂不支持拖入文件夹，请使用“上传目录”按钮");
+        return;
+      }
+      await uploadItems(plainUploadItems(droppedFiles), directory, true);
+      return;
+    }
+    await uploadItems(await scanPromise, directory, true);
   } catch (error) {
     ElMessage.error(error.message || "拖入内容读取失败");
-    uploadState.value.active = false;
+  } finally {
+    uploadScanning.value = false;
   }
 }
 
 async function uploadItems(items, baseDirectory) {
   if (!items.files.length && !items.directories.length) {
-    uploadState.value.active = false;
     return;
   }
   const target = currentTarget.value;
-  uploadState.value = {
-    active: true, completed: 0, total: items.files.length, name: items.files[0]?.path || "创建目录",
-    scanning: false, directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
-  };
-  let overwriteAll = false;
+  if (!uploadTasks.value.some((item) => ["waiting", "uploading", "paused"].includes(item.status))
+    && uploadStats.value.startedAt) {
+    clearUploadTasks();
+  }
+  const activeTasks = uploadTasks.value.filter((item) => !["canceled"].includes(item.status));
+  const nextCount = activeTasks.length + items.files.length;
+  const nextBytes = activeTasks.reduce((sum, item) => sum + item.total, 0)
+    + items.files.reduce((sum, item) => sum + item.file.size, 0);
+  if (nextCount > 1000) {
+    ElMessage.error("单次最多上传 1000 个文件，请压缩文件夹后重试");
+    return;
+  }
+  if (nextBytes > 30 * 1024 ** 3) {
+    ElMessage.error("单次上传总大小不能超过 30 GB，请使用 SFTP/FTP 等工具上传");
+    return;
+  }
+  uploadDialogVisible.value = true;
+  if (!uploadTasks.value.some((item) => ["waiting", "uploading", "paused"].includes(item.status))) {
+    uploadSummary.value = { directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0 };
+  }
+  const now = Date.now();
+  const tasks = items.files.map((item, index) => ({
+    id: createUploadID(), uploadId: createUploadID(), target, path: joinPath(baseDirectory, item.path),
+    displayPath: item.path, file: item.file, total: item.file.size, loaded: 0, speed: 0,
+    status: "waiting", overwrite: false, error: null, controller: null,
+    lastLoaded: 0, lastProgressAt: now, sequence: index,
+  }));
+  uploadTasks.value.push(...tasks);
+  uploadEmptyDirectories.value.push(...(items.emptyDirectories || []).map((directory) => ({
+    path: joinPath(baseDirectory, directory), target,
+  })));
+  uploadStats.value.totalBytes += tasks.reduce((sum, task) => sum + task.total, 0);
+  uploadScanning.value = false;
+  await nextTick();
+}
+
+async function renderUploadDialog() {
+  await nextTick();
+  await new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+}
+
+async function runUploadQueue() {
+  if (uploadWorkerActive.value) return;
+  if (!uploadTasks.value.some((item) => item.status === "waiting") && !uploadEmptyDirectories.value.length) return;
+  uploadWorkerActive.value = true;
+  if (!uploadStats.value.startedAt) uploadStats.value.startedAt = Date.now();
   try {
-    for (const directory of items.directories) {
-      const targetPath = joinPath(baseDirectory, directory);
-      try {
-        await fileJSON(authorization("file.create", targetPath, [], {}, target), "POST", { type: "directory" });
-        uploadState.value.directories += 1;
-      } catch (error) {
-        uploadState.value.failed += 1;
-      }
+    await createPendingUploadDirectories();
+    while (true) {
+      const task = uploadTasks.value.find((item) => item.status === "waiting");
+      if (!task) break;
+      await runUploadTask(task);
     }
-    for (const item of items.files) {
-      uploadState.value.name = item.path;
-      const targetPath = joinPath(baseDirectory, item.path);
-      const result = await uploadOneFile(target, targetPath, item.file, overwriteAll);
-      if (result === "overwrite-all") overwriteAll = true;
-      if (result === "uploaded") uploadState.value.uploaded += 1;
-      if (result === "overwritten" || result === "overwrite-all") uploadState.value.overwritten += 1;
-      if (result === "skipped") uploadState.value.skipped += 1;
-      if (result === "failed") uploadState.value.failed += 1;
-      uploadState.value.completed += 1;
-    }
-    showUploadSummary(uploadState.value);
-    refreshDirectory();
-  } catch (error) {
-    if (!isCancelled(error)) ElMessage.error(error.message || "文件上传失败");
   } finally {
-    uploadState.value.active = false;
+    uploadWorkerActive.value = false;
+    if (!uploadTasks.value.some((item) => ["waiting", "uploading", "paused"].includes(item.status))) {
+      showUploadSummary(uploadSummary.value);
+      refreshDirectory();
+    }
   }
 }
 
-async function uploadOneFile(target, targetPath, file, overwriteAll) {
-  try {
-    await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, overwriteAll);
-    return overwriteAll ? "overwritten" : "uploaded";
-  } catch (error) {
-    if (error.code !== "FILE_EXISTS") {
-      if (["RESULT_UNKNOWN", "UNAUTHENTICATED"].includes(error.code)) throw error;
-      return "failed";
+async function createPendingUploadDirectories() {
+  const directories = uploadEmptyDirectories.value.splice(0);
+  for (const [index, directory] of directories.entries()) {
+    uploadPreparing.value = `正在创建空目录 ${index + 1}/${directories.length}`;
+    try {
+      await fileJSON(authorization("file.create", directory.path, [], {}, directory.target), "POST", { type: "directory" });
+      uploadSummary.value.directories += 1;
+    } catch {
+      uploadSummary.value.failed += 1;
     }
   }
-  const action = await conflictDialog.value.ask({
-    title: "目标文件已存在",
-    message: "目标位置已存在「" + targetPath + "」，请选择处理方式。",
-    detail: "“全部覆盖”仅对本次拖入或选择的后续重复文件生效。",
-    allowOverwriteAll: true,
-  });
-  if (action === "skip") return "skipped";
+  uploadPreparing.value = "";
+}
+
+async function runUploadTask(task) {
+  task.status = "uploading";
+  task.error = null;
+  task.controller = new AbortController();
+  task.lastLoaded = task.loaded;
+  task.lastProgressAt = Date.now();
   try {
-    await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, true);
-    return action === "overwrite-all" ? "overwrite-all" : "overwritten";
+    await uploadFile(authorization("file.upload", task.path, [], {}, task.target), task.file, task.overwrite, {
+      uploadId: task.uploadId,
+      resume: task.loaded > 0 || task.hasStarted,
+      signal: task.controller.signal,
+      onProgress: ({ loaded }) => updateUploadProgress(task, loaded),
+    });
+    updateUploadProgress(task, task.total, true);
+    task.hasStarted = true;
+    task.speed = 0;
+    task.status = "done";
+    uploadStats.value.completed += 1;
+    if (task.overwrite) uploadSummary.value.overwritten += 1;
+    else uploadSummary.value.uploaded += 1;
   } catch (error) {
-    if (["RESULT_UNKNOWN", "UNAUTHENTICATED"].includes(error.code)) throw error;
-    return "failed";
+    task.hasStarted = true;
+    if (error?.name === "AbortError") {
+      if (task.status !== "canceled") task.status = "paused";
+      return;
+    }
+    if (error.code === "FILE_EXISTS" && !task.overwrite) {
+      const action = await conflictDialog.value.ask({
+        title: "目标文件已存在",
+        message: `目标位置已存在「${task.path}」，请选择处理方式。`,
+        detail: "全部覆盖仅对当前上传队列后续的同名文件生效。",
+        allowOverwriteAll: true,
+      });
+      if (action === "skip") {
+        task.status = "skipped";
+        uploadStats.value.completed += 1;
+        uploadSummary.value.skipped += 1;
+        try {
+          await cancelUpload(authorization("file.upload.cancel", task.path, [], {}, task.target), task.uploadId);
+        } catch { /* The upload session expires and cleans itself if the explicit cleanup is unavailable. */ }
+        return;
+      }
+      task.overwrite = true;
+      if (action === "overwrite-all") {
+        for (const pending of uploadTasks.value) {
+          if (pending.status === "waiting") pending.overwrite = true;
+        }
+      }
+      task.status = "waiting";
+      return;
+    }
+    task.status = "failed";
+    uploadStats.value.completed += 1;
+    task.speed = 0;
+    task.error = serializeFileError(error);
+    uploadSummary.value.failed += 1;
+  } finally {
+    task.controller = null;
   }
+}
+
+function updateUploadProgress(task, loaded, force = false) {
+  const now = Date.now();
+  const elapsed = Math.max(now - task.lastProgressAt, 1);
+  if (!force && now - (task.lastRenderedAt || 0) < 100) return;
+  const previous = task.loaded;
+  task.loaded = loaded;
+  task.lastRenderedAt = now;
+  uploadStats.value.loadedBytes += Math.max(0, loaded - previous);
+  if (elapsed >= 250 || force) {
+    task.speed = Math.max(0, (loaded - task.lastLoaded) * 1000 / elapsed);
+    uploadStats.value.speed = task.speed;
+    task.lastLoaded = loaded;
+    task.lastProgressAt = now;
+  }
+}
+
+function retryUploadTask(task) {
+  if (task.status !== "failed") return;
+  uploadSummary.value.failed = Math.max(0, uploadSummary.value.failed - 1);
+  uploadStats.value.completed = Math.max(0, uploadStats.value.completed - 1);
+  task.error = null;
+  task.status = "waiting";
+  void runUploadQueue();
+}
+
+async function cancelUploadTask(task) {
+	if (task.status === "waiting") {
+    uploadTasks.value = uploadTasks.value.filter((item) => item.id !== task.id);
+    uploadStats.value.totalBytes = Math.max(0, uploadStats.value.totalBytes - task.total);
+    return;
+	}
+	const wasFailed = task.status === "failed";
+	if (wasFailed) uploadSummary.value.failed = Math.max(0, uploadSummary.value.failed - 1);
+  task.status = "canceled";
+  if (!wasFailed) uploadStats.value.completed += 1;
+  task.controller?.abort();
+  try {
+    await cancelUpload(authorization("file.upload.cancel", task.path, [], {}, task.target), task.uploadId);
+  } catch (error) {
+		if (wasFailed) uploadSummary.value.failed += 1;
+    uploadStats.value.completed = Math.max(0, uploadStats.value.completed - 1);
+    task.error = serializeFileError(error);
+    task.status = "failed";
+  }
+}
+
+function cancelAllUploads() {
+  for (const task of uploadTasks.value) {
+    if (task.status === "waiting") {
+      task.status = "canceled";
+      uploadStats.value.completed += 1;
+    } else if (task.status === "uploading") {
+      task.status = "canceled";
+      uploadStats.value.completed += 1;
+      task.controller?.abort();
+    }
+  }
+  uploadEmptyDirectories.value = [];
+}
+
+function clearUploadTasks() {
+  if (uploadWorkerActive.value) return;
+  uploadTasks.value = [];
+  uploadEmptyDirectories.value = [];
+  uploadStats.value = { totalBytes: 0, loadedBytes: 0, completed: 0, startedAt: 0, speed: 0 };
+  uploadSummary.value = { directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0 };
+}
+
+function serializeFileError(error) {
+  return {
+    code: error?.code || "UPLOAD_FAILED", message: error?.message || "上传失败",
+    stage: error?.stage || "upload", details: error?.details || [], retryable: Boolean(error?.retryable),
+    requestId: error?.requestId || "",
+  };
 }
 
 function showUploadSummary(state) {
@@ -723,18 +965,22 @@ function handleEntryDragStart(event, entry) {
   event.dataTransfer.setData("application/x-prism-file-entry", entry.path);
 }
 
-function showContextMenu(event, entry) {
+async function showContextMenu(event, entry) {
   event.preventDefault();
   event.stopPropagation();
   if (!isSelected(entry)) selectEntry(entry, event);
   const menuWidth = 196;
-  const menuHeight = entry.type === "directory" ? 278 : 238;
   contextMenu.value = {
     visible: true,
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 48)),
     entry,
   };
+  await nextTick();
+  const bounds = contextMenuElement.value?.getBoundingClientRect();
+  if (!bounds || contextMenu.value.entry !== entry) return;
+  contextMenu.value.x = Math.max(8, Math.min(event.clientX, window.innerWidth - bounds.width - 8));
+  contextMenu.value.y = Math.max(8, Math.min(event.clientY, window.innerHeight - bounds.height - 8));
 }
 
 function showEntryMenu(event, entry) {
@@ -789,31 +1035,54 @@ function handleDocumentClick(event) {
 
 function runContextAction(action) {
   const entry = contextMenu.value.entry;
+  const isMulti = multiContextSelection.value;
   suppressEntryClick = false;
   closeContextMenu();
   if (!entry) return;
   if (action === "open") openEntry(entry);
   if (action === "online-edit") void openFile(entry);
   if (action === "open-with") void openNativeFile(entry, true);
-  if (action === "new-tab") openInNewTab(entry);
-  if (action === "download") void downloadEntry(entry);
-  if (action === "copy") setClipboard("copy", entry);
-  if (action === "cut") setClipboard("move", entry);
+  if (action === "download") void (isMulti ? downloadSelectedEntries() : downloadEntry(entry));
+  if (action === "copy") setClipboard("copy", isMulti ? null : entry);
+  if (action === "cut") setClipboard("move", isMulti ? null : entry);
   if (action === "paste") void pasteClipboard();
   if (action === "archive") void archiveEntry(entry);
+  if (action === "extract") openExtractDialog(entry);
   if (action === "rename") void renameEntry(entry);
   if (action === "move") void promptMove(entry);
-  if (action === "delete") void removeEntry(entry);
+  if (action === "delete") void (isMulti ? removeSelectedEntries() : removeEntry(entry));
 }
 
 async function downloadEntry(entry = preview.value) {
   if (!entry.path) return;
   try {
     const name = entry.name || entry.path.split("/").pop();
-    await downloadFile(authorization("file.download", entry.path), entry.type === "directory" ? name + ".zip" : name);
+    await downloadFile(
+      authorization("file.download", entry.path, [], {}, currentTarget.value),
+      entry.type === "directory" ? name + ".zip" : name,
+    );
   } catch (error) {
     if (error?.name !== "AbortError") ElMessage.error(error.message || "文件下载失败");
   }
+}
+
+async function downloadSelectedEntries() {
+  if (!selectedEntries.value.length) return;
+  const entries = [...selectedEntries.value];
+  const failures = [];
+  for (const entry of entries) {
+    try {
+      const name = entry.name || entry.path.split("/").pop();
+      await downloadFile(
+        authorization("file.download", entry.path, [], {}, currentTarget.value),
+        entry.type === "directory" ? `${name}.zip` : name,
+      );
+    } catch (error) {
+      if (error?.name !== "AbortError") failures.push(`${entry.name}: ${error.message || "下载失败"}`);
+    }
+  }
+  if (failures.length) ElMessage.warning(`批量下载完成，${failures.length} 项失败`);
+  else ElMessage.success(`已开始下载 ${entries.length} 项`);
 }
 
 async function confirmDiscard() {
@@ -911,36 +1180,22 @@ function fileIconClass(entry) {
       </div>
 
       <div class="explorer-heading">
-        <strong>资源管理器</strong>
         <div class="explorer-actions">
-          <el-tooltip content="新建标签"><button type="button" :disabled="explorerBusy || tabs.length >= MAX_TABS" @click="addTab()"><FilePlus2 :size="15" /></button></el-tooltip>
-          <el-tooltip content="新建文件"><button v-if="canWrite" type="button" :disabled="writeDisabled" @click="createEntry('file')"><FilePlus2 :size="15" /></button></el-tooltip>
-          <el-tooltip content="新建目录"><button v-if="canWrite" type="button" :disabled="writeDisabled" @click="createEntry('directory')"><FolderPlus :size="15" /></button></el-tooltip>
-          <el-tooltip content="上传文件"><button v-if="canWrite" type="button" :disabled="writeDisabled" @click="chooseFiles"><Upload :size="15" /></button></el-tooltip>
-          <el-tooltip content="导入 ZIP"><button v-if="canImportArchive" type="button" :disabled="writeDisabled || archiveImporting" @click="chooseArchive"><FileArchive :size="15" /></button></el-tooltip>
-          <el-tooltip content="粘贴"><button v-if="hasClipboard" type="button" :disabled="writeDisabled" @click="pasteClipboard"><ClipboardPaste :size="15" /></button></el-tooltip>
-          <el-tooltip content="复制所选"><button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('copy')"><Copy :size="15" /></button></el-tooltip>
-          <el-tooltip content="剪切所选"><button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('move')"><Scissors :size="15" /></button></el-tooltip>
-          <el-tooltip content="刷新"><button type="button" @click="refreshDirectory"><RefreshCw :size="15" /></button></el-tooltip>
+          <button v-if="canWrite" type="button" :disabled="writeDisabled" @click="chooseFiles"><Upload :size="15" />上传文件</button>
+          <button v-if="canWrite" type="button" :disabled="writeDisabled" @click="chooseDirectory"><FolderPlus :size="15" />上传目录</button>
+          <button v-if="canWrite" type="button" :disabled="writeDisabled" @click="createEntry('file')"><FilePlus2 :size="15" />新建文件</button>
+          <button v-if="canWrite" type="button" :disabled="writeDisabled" @click="createEntry('directory')"><FolderPlus :size="15" />新建目录</button>
+          <button v-if="hasClipboard" type="button" :disabled="writeDisabled" @click="pasteClipboard"><ClipboardPaste :size="15" />粘贴</button>
+          <button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('copy')"><Copy :size="15" />复制</button>
+          <button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('move')"><Scissors :size="15" />剪切</button>
+          <button v-if="directoryEntries.length" type="button" @click="invertSelection"><RotateCcw :size="15" />反选</button>
+          <button v-if="canDelete && selectedEntries.length" class="danger" type="button" :disabled="writeDisabled" @click="removeSelectedEntries"><Trash2 :size="15" />删除</button>
+          <button v-if="canImportArchive" type="button" :disabled="writeDisabled || archiveImporting" @click="chooseArchive"><FileArchive :size="15" />导入 ZIP</button>
+          <button type="button" @click="refreshDirectory"><RefreshCw :size="15" />刷新</button>
         </div>
-      </div>
-
-      <div class="file-tabs" role="tablist">
-        <button
-          v-for="tab in tabs"
-          :key="tab.key"
-          type="button"
-          class="file-tab"
-          :class="{ active: tab.key === activeTabKey }"
-          role="tab"
-          :aria-selected="tab.key === activeTabKey"
-          @click="switchTab(tab.key)"
-        >
-          <Folder :size="13" />
-          <span :title="tab.path">{{ tab.name }}</span>
-          <X v-if="tab.closable" :size="13" @click.stop="closeTab(tab.key)" />
+        <button v-if="uploadTasks.length" class="upload-task-trigger" type="button" @click="uploadDialogVisible = true">
+          上传任务<span v-if="activeUploadCount">{{ activeUploadCount }}</span>
         </button>
-        <button class="file-tab-add" type="button" aria-label="新建标签" :disabled="tabs.length >= MAX_TABS" @click="addTab()">+</button>
       </div>
 
       <form class="explorer-location" @submit.prevent="submitPath">
@@ -976,14 +1231,20 @@ function fileIconClass(entry) {
         <el-button text size="small" @click="refreshDirectory">重试</el-button>
       </div>
       <div v-else v-loading="directoryLoading" class="file-list-shell">
-        <div class="file-list-head" aria-hidden="true">
-          <span>名称</span><span>大小</span><span>修改时间</span><span />
+        <div class="file-list-head">
+          <el-checkbox
+            :model-value="allSelected"
+            :indeterminate="selectionIndeterminate"
+            aria-label="全选"
+            @change="toggleAll"
+          />
+          <span>名称</span><span>大小</span><span>修改时间</span><span>操作</span>
         </div>
         <div v-if="!directoryLoading && directoryEntries.length === 0" class="file-list-empty">
           <FolderOpen :size="34" />
           <span>此目录为空</span>
         </div>
-        <div v-else class="file-list" role="list">
+        <div v-else class="file-list" role="list" @click="clearSelection">
           <div
             v-for="entry in directoryEntries"
             :key="entry.path"
@@ -1006,10 +1267,19 @@ function fileIconClass(entry) {
             @dragleave.stop="handleDragLeave"
             @drop.stop="handleDrop($event, dropDirectory(entry))"
           >
+            <el-checkbox
+              :model-value="isSelected(entry)"
+              :aria-label="`选择 ${entry.name}`"
+              @click.stop
+              @change="toggleEntry(entry, $event)"
+            />
             <span class="file-list-name">
               <Folder v-if="entry.type === 'directory'" class="folder-icon" :size="18" />
               <component :is="fileIcon(entry)" v-else :class="fileIconClass(entry)" :size="18" />
-              <span><strong>{{ entry.name }}</strong><small>{{ entry.type === 'directory' ? '文件夹' : formatSize(entry.size) }} · {{ formatDate(entry.modified_at) }}</small></span>
+              <span>
+                <button class="file-name-link" type="button" @click.stop="openEntry(entry)">{{ entry.name }}</button>
+                <small>{{ entry.type === 'directory' ? '文件夹' : formatSize(entry.size) }} · {{ formatDate(entry.modified_at) }}</small>
+              </span>
             </span>
             <span class="file-list-size">{{ entry.type === 'directory' ? '-' : formatSize(entry.size) }}</span>
             <time>{{ formatDate(entry.modified_at) }}</time>
@@ -1020,20 +1290,8 @@ function fileIconClass(entry) {
         </div>
       </div>
 
-      <div v-if="uploadState.active" class="upload-status">
-        <div>
-          <span>{{ uploadState.name }}</span>
-          <strong>{{ uploadState.scanning ? "扫描中" : uploadState.completed + "/" + uploadState.total }}</strong>
-        </div>
-        <el-progress
-          :percentage="uploadState.total ? Math.round(uploadState.completed / uploadState.total * 100) : 0"
-          :indeterminate="uploadState.scanning"
-          :duration="1.2"
-          :stroke-width="3"
-          :show-text="false"
-        />
-      </div>
       <input ref="uploadInput" type="file" multiple hidden @change="handleFileInput" />
+      <input ref="uploadDirectoryInput" type="file" webkitdirectory multiple hidden @change="handleDirectoryInput" />
       <input ref="archiveInput" type="file" accept=".zip,application/zip" hidden @change="handleArchiveInput" />
     </aside>
 
@@ -1079,35 +1337,61 @@ function fileIconClass(entry) {
       </footer>
     </section>
     <UploadConflictDialog ref="conflictDialog" />
+    <UploadTaskDialog
+      v-model:visible="uploadDialogVisible"
+      :tasks="uploadTasks"
+      :stats="uploadStats"
+      :scanning="uploadScanning"
+      :preparing="uploadPreparing"
+      :uploading="uploadWorkerActive"
+      :pending-directories="uploadEmptyDirectories.length"
+      :current-task-id="currentUploadTaskId"
+      @choose-files="chooseFiles"
+      @choose-directory="chooseDirectory"
+      @start="runUploadQueue"
+      @cancel="cancelUploadTask"
+      @cancel-all="cancelAllUploads"
+      @retry="retryUploadTask"
+      @clear="clearUploadTasks"
+    />
+    <ExtractDialog
+      v-model:visible="extractDialogVisible"
+      :entry="extractEntry"
+      :task="extractTask"
+      @start="startExtract"
+    />
     <Teleport to="body">
       <div
         v-if="contextMenu.visible && contextMenu.entry"
+        ref="contextMenuElement"
         class="file-context-menu"
         :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
         role="menu"
         @click.stop
         @contextmenu.prevent
       >
-        <button type="button" role="menuitem" @click="runContextAction('open')">
+        <button v-if="!multiContextSelection" type="button" role="menuitem" @click="runContextAction('open')">
           <FolderOpen v-if="contextMenu.entry.type === 'directory'" :size="16" />
           <Edit3 v-else :size="16" />
           {{ contextMenu.entry.type === "directory" ? "打开文件夹" : "打开文件" }}
         </button>
-        <button v-if="isWinApp() && contextMenu.entry.type === 'file'" type="button" role="menuitem" @click="runContextAction('open-with')"><FolderOpen :size="16" />选择打开方式</button>
-        <button v-if="isWinApp() && contextMenu.entry.type === 'file'" type="button" role="menuitem" @click="runContextAction('online-edit')"><Edit3 :size="16" />在线编辑</button>
-        <button v-if="contextMenu.entry.type === 'directory'" type="button" role="menuitem" @click="runContextAction('new-tab')"><Folder :size="16" />在新标签中打开</button>
-        <button type="button" role="menuitem" @click="runContextAction('download')"><Download :size="16" />下载</button>
+        <button v-if="!multiContextSelection && isWinApp() && contextMenu.entry.type === 'file'" type="button" role="menuitem" @click="runContextAction('open-with')"><FolderOpen :size="16" />选择打开方式</button>
+        <button v-if="!multiContextSelection && isWinApp() && contextMenu.entry.type === 'file'" type="button" role="menuitem" @click="runContextAction('online-edit')"><Edit3 :size="16" />在线编辑</button>
+        <button type="button" role="menuitem" @click="runContextAction('download')"><Download :size="16" />{{ multiContextSelection ? `批量下载 (${selectedEntries.length})` : "下载" }}</button>
         <div class="file-context-separator" />
         <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('copy')"><Copy :size="16" />复制</button>
         <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('cut')"><Scissors :size="16" />剪切</button>
         <button v-if="hasClipboard" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('paste')"><ClipboardPaste :size="16" />粘贴</button>
         <div class="file-context-separator" />
-        <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked || archiveCreating" @click="runContextAction('archive')"><FileArchive :size="16" />压缩为 ZIP</button>
-        <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('rename')"><Edit3 :size="16" />重命名</button>
-        <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('move')"><MoveRight :size="16" />移动到</button>
+        <template v-if="!multiContextSelection">
+          <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked || archiveCreating" @click="runContextAction('archive')"><FileArchive :size="16" />压缩为 ZIP</button>
+          <button v-if="canWrite && contextMenu.entry.type === 'file' && contextMenu.entry.name.toLowerCase().endsWith('.zip')" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('extract')"><FolderOpen :size="16" />解压</button>
+          <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('rename')"><Edit3 :size="16" />重命名</button>
+          <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('move')"><MoveRight :size="16" />移动到</button>
+        </template>
         <template v-if="canDelete">
           <div class="file-context-separator" />
-          <button class="danger" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('delete')"><Trash2 :size="16" />删除</button>
+          <button class="danger" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('delete')"><Trash2 :size="16" />{{ multiContextSelection ? `批量删除 (${selectedEntries.length})` : "删除" }}</button>
         </template>
       </div>
     </Teleport>
@@ -1147,23 +1431,17 @@ function fileIconClass(entry) {
 .explorer-pane { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; background: var(--app-surface); }
 .explorer-target { display: flex; min-height: 48px; align-items: center; gap: 8px; border-bottom: 1px solid var(--app-border); padding: 7px 10px; background: var(--app-surface-muted); }
 .explorer-target .el-select { min-width: 0; flex: 1; }
-.explorer-heading { display: flex; min-height: 42px; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 8px 5px 12px; }
-.explorer-heading strong { color: var(--app-text); font-size: 12px; font-weight: 700; }
-.explorer-actions, .editor-commands { display: flex; align-items: center; gap: 2px; }
-.explorer-actions button, .editor-commands button, .editor-tab button {
+.explorer-heading { display: flex; min-height: 46px; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 9px; border-bottom: 1px solid var(--app-border-soft); }
+.explorer-actions, .editor-commands { display: flex; align-items: center; gap: 4px; }
+.explorer-actions { min-width: 0; flex-wrap: wrap; }
+.explorer-actions button { display: flex; height: 30px; align-items: center; gap: 5px; border: 1px solid var(--app-border); border-radius: 4px; padding: 0 9px; background: var(--app-surface); color: var(--app-text-secondary); cursor: pointer; font-size: 11px; white-space: nowrap; }
+.editor-commands button, .editor-tab button {
   display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid transparent; border-radius: 4px; padding: 0; background: transparent; color: var(--app-text-secondary); cursor: pointer;
 }
 .explorer-actions button:hover, .editor-commands button:hover, .editor-tab button:hover { border-color: var(--app-border); background: var(--app-surface-hover); color: var(--app-text); }
 .explorer-actions button:disabled, .editor-commands button:disabled { cursor: not-allowed; opacity: 0.38; }
-.file-tabs { display: flex; min-height: 36px; align-items: stretch; overflow-x: auto; border-bottom: 1px solid var(--app-border); background: var(--app-surface-muted); }
-.file-tab { display: flex; min-width: 120px; max-width: 220px; align-items: center; gap: 6px; border: 0; border-right: 1px solid var(--app-border); padding: 0 9px; color: var(--app-text-muted); background: transparent; cursor: pointer; font-size: 11px; }
-.file-tab:hover { background: var(--app-surface-hover); }
-.file-tab.active { color: var(--app-text); background: var(--app-surface); box-shadow: inset 0 2px 0 var(--file-accent); }
-.file-tab > span { min-width: 0; flex: 1; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-.file-tab > svg:last-child { flex: 0 0 auto; opacity: .7; }
-.file-tab-add { width: 34px; flex: 0 0 auto; border: 0; color: var(--app-text-muted); background: transparent; cursor: pointer; font-size: 19px; }
-.file-tab-add:hover:not(:disabled) { background: var(--app-surface-hover); }
-.file-tab-add:disabled { cursor: not-allowed; opacity: .35; }
+.upload-task-trigger { display: flex; height: 30px; flex: 0 0 auto; align-items: center; gap: 6px; border: 1px solid var(--file-accent); border-radius: 4px; padding: 0 9px; color: var(--file-accent-text); background: transparent; font-size: 11px; }
+.upload-task-trigger span { display: grid; min-width: 18px; height: 18px; place-items: center; border-radius: 9px; color: #fff; background: var(--file-accent); font-size: 9px; }
 .explorer-location { display: grid; min-height: 38px; grid-template-columns: 28px 16px minmax(0, 1fr) auto; align-items: center; gap: 5px; border-block: 1px solid var(--app-border-soft); padding: 4px 8px; color: var(--app-text-muted); background: var(--app-surface-muted); }
 .location-up, .location-go { display: grid; width: 28px; height: 28px; place-items: center; border: 0; border-radius: 4px; padding: 0; color: inherit; background: transparent; }
 .explorer-location button:hover:not(:disabled) { color: var(--file-accent-text); background: var(--app-surface-hover); }
@@ -1176,10 +1454,10 @@ function fileIconClass(entry) {
 .location-edit-hint { padding-right: 4px; color: var(--app-text-subtle); font-size: 10px; white-space: nowrap; }
 .explorer-error { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px; border-left: 3px solid var(--file-danger-border); padding: 9px 10px; color: var(--file-danger-text); background: var(--file-danger-bg); font-size: 12px; }
 .file-list-shell { position: relative; min-height: 0; flex: 1; overflow: hidden; }
-.file-list-head, .file-list-row { display: grid; grid-template-columns: minmax(240px, 1fr) 110px 170px 38px; align-items: center; gap: 12px; }
+.file-list-head, .file-list-row { display: grid; grid-template-columns: 28px minmax(240px, 1fr) 110px 170px 38px; align-items: center; gap: 8px; }
 .file-list-head { min-height: 34px; padding: 0 9px 0 14px; color: var(--app-text-muted); background: var(--app-surface-muted); border-bottom: 1px solid var(--app-border-soft); font-size: 10px; font-weight: 700; }
 .file-list { height: calc(100% - 34px); overflow: auto; overscroll-behavior: contain; }
-.file-list-row { min-height: 48px; padding: 4px 9px 4px 14px; border-bottom: 1px solid var(--app-border-soft); color: var(--app-text-secondary); cursor: default; user-select: none; }
+.file-list-row { height: 36px; min-height: 36px; padding: 0 9px 0 14px; border-bottom: 1px solid var(--app-border-soft); color: var(--app-text-secondary); cursor: default; user-select: none; }
 .file-list-row:hover, .file-list-row:focus-visible { background: var(--app-surface-hover); outline: 0; }
 .file-list-row.selected { background: var(--file-selected-bg); box-shadow: inset 3px 0 var(--file-accent); }
 .file-list-row.drop-target { background: var(--file-drop-bg); box-shadow: inset 0 0 0 1px var(--file-accent); }
@@ -1188,8 +1466,10 @@ function fileIconClass(entry) {
 .file-list-name { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .file-list-name > svg { flex: 0 0 auto; }
 .file-list-name > span { min-width: 0; }
-.file-list-name strong, .file-list-name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-list-name strong { color: var(--app-text); font-size: 12px; font-weight: 600; }
+.file-list-name .file-name-link, .file-list-name small { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-name-link { border: 0; padding: 0; color: #3570a3; background: transparent; cursor: pointer; font-size: 12px; font-weight: 600; text-align: left; }
+.file-name-link:hover { color: #225884; text-decoration: underline; }
+:global(html.dark) .file-name-link { color: #85b8e0; }
 .file-list-name small { display: none; margin-top: 3px; color: var(--app-text-muted); font-size: 9px; }
 .folder-icon { color: #b78930; }
 .archive-icon { color: #9a6b32; }
@@ -1217,7 +1497,7 @@ function fileIconClass(entry) {
 .preview-unavailable span, .editor-empty span { max-width: 440px; font-size: 12px; }
 .preview-unavailable small { color: var(--app-text-subtle); }
 .editor-statusbar { display: flex; min-height: 24px; align-items: center; justify-content: flex-end; gap: 14px; border-top: 1px solid var(--app-border); padding: 0 9px; background: var(--app-surface-muted); color: var(--app-text-muted); font-size: 10px; }
-.file-context-menu { --file-menu-danger: #a23f36; position: fixed; z-index: 5000; display: grid; width: 196px; padding: 5px; color: var(--app-text); background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 6px; box-shadow: var(--app-shadow); }
+.file-context-menu { --file-menu-danger: #a23f36; position: fixed; z-index: 5000; display: grid; width: 196px; max-height: calc(100vh - 16px); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 5px; color: var(--app-text); background: var(--app-surface); border: 1px solid var(--app-border); border-radius: 6px; box-shadow: var(--app-shadow); }
 :global(html.dark) .file-context-menu { --file-menu-danger: #efa49b; }
 .file-context-menu button { display: flex; width: 100%; min-height: 34px; align-items: center; gap: 9px; border: 0; border-radius: 4px; padding: 6px 9px; color: inherit; background: transparent; text-align: left; font-size: 12px; }
 .file-context-menu button:hover:not(:disabled) { color: var(--app-text); background: var(--app-surface-hover); }
@@ -1232,7 +1512,7 @@ function fileIconClass(entry) {
   .explorer-actions { flex-wrap: wrap; justify-content: flex-end; }
   .file-list-head { display: none; }
   .file-list { height: 100%; -webkit-overflow-scrolling: touch; }
-  .file-list-row { grid-template-columns: minmax(0, 1fr) 36px; min-height: 58px; gap: 6px; padding: 6px 8px 6px 11px; touch-action: pan-y; }
+  .file-list-row { grid-template-columns: 26px minmax(0, 1fr) 36px; min-height: 58px; gap: 6px; padding: 6px 8px; touch-action: pan-y; }
   .file-list-name small { display: block; }
   .file-list-size, .file-list-row > time { display: none; }
   .file-row-menu { width: 36px; height: 36px; }

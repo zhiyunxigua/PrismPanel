@@ -75,15 +75,19 @@ func (s *fileProxyStore) Consume(token, userID, nodeID, scope string) (fileProxy
 var fileScopePermissions = map[string]string{
 	"file.list": "file.read", "file.read": "file.read", "file.download": "file.read",
 	"file.edit": "file.write", "file.upload": "file.write", "file.create": "file.write",
+	"file.upload.status": "file.write", "file.upload.cancel": "file.write",
 	"file.import": "file.write",
-	"file.move":   "file.write", "file.copy": "file.write", "file.archive": "file.write", "file.delete": "file.delete",
+	"file.move":   "file.write", "file.copy": "file.write", "file.archive": "file.write",
+	"file.extract": "file.write", "file.extract.status": "file.write", "file.delete": "file.delete",
 }
 
 var fileScopeOperations = map[string]string{
 	"file.list": "list", "file.read": "content", "file.download": "download",
 	"file.edit": "content", "file.upload": "upload", "file.create": "create",
+	"file.upload.status": "upload-status", "file.upload.cancel": "upload-cancel",
 	"file.import": "import",
-	"file.move":   "move", "file.copy": "copy", "file.archive": "archive", "file.delete": "delete",
+	"file.move":   "move", "file.copy": "copy", "file.archive": "archive",
+	"file.extract": "extract", "file.extract.status": "extract-status", "file.delete": "delete",
 }
 
 type fileAuthorizeInput struct {
@@ -123,7 +127,7 @@ func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.R
 		err = apiError("INVALID_REQUEST", "不支持的文件操作范围")
 	}
 	if err == nil {
-		err = s.authorize(request, permission)
+		err = s.authorizeFileScope(request, permission, input.NodeID, input.ResourceType, input.ResourceID)
 	}
 	if err == nil {
 		err = validateFileAuthorization(input.NodeID, input.ResourceType, input.ResourceID, input.Path, input.Paths)
@@ -141,17 +145,20 @@ func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.R
 	}
 	operationName := fileScopeOperations[input.Scope]
 	mustProxy := input.Scope == "file.create" || input.Scope == "file.move" || input.Scope == "file.copy" || input.Scope == "file.archive" ||
-		input.Scope == "file.delete" || input.Scope == "file.import"
+		input.Scope == "file.extract" || input.Scope == "file.extract.status" || input.Scope == "file.delete" || input.Scope == "file.import"
 	directSourceIP, directSourceKnown := s.directAccessSourceIP(request)
 	direct := err == nil && !input.ForceProxy && publicURL != "" && !mustProxy && directSourceKnown
 
 	mutating := input.Scope == "file.edit" || input.Scope == "file.upload" || input.Scope == "file.import" ||
-		input.Scope == "file.create" || input.Scope == "file.move" || input.Scope == "file.copy" || input.Scope == "file.archive" || input.Scope == "file.delete"
+		input.Scope == "file.upload.cancel" || input.Scope == "file.create" || input.Scope == "file.move" ||
+		input.Scope == "file.copy" || input.Scope == "file.archive" || input.Scope == "file.extract" || input.Scope == "file.delete"
 	var operation store.FileOperation
 	if err == nil && mutating {
 		expiresAt := time.Now().UTC().Add(2 * time.Minute)
 		if input.Chunked && input.Scope == "file.upload" {
 			expiresAt = time.Now().UTC().Add(15 * time.Minute)
+		} else if input.Scope == "file.extract" {
+			expiresAt = time.Now().UTC().Add(time.Hour)
 		}
 		operation, err = s.store.CreateFileOperation(request.Context(), newFileOperation(request, input, expiresAt))
 	}
@@ -249,7 +256,7 @@ func (s *Server) handleFileExport(writer http.ResponseWriter, request *http.Requ
 		ResourceID:   strings.TrimSpace(request.URL.Query().Get("resource_id")),
 		Path:         strings.TrimSpace(request.URL.Query().Get("path")),
 	}
-	err := s.authorize(request, "file.read")
+	err := s.authorizeFileScope(request, "file.read", input.NodeID, input.ResourceType, input.ResourceID)
 	if err == nil {
 		err = validateFileAuthorization(input.NodeID, input.ResourceType, input.ResourceID, input.Path, nil)
 	}
@@ -321,10 +328,6 @@ func (s *Server) handleFileProxy(writer http.ResponseWriter, request *http.Reque
 		http.NotFound(writer, request)
 		return
 	}
-	if err := s.authorize(request, permission); err != nil {
-		writeRequestError(writer, err)
-		return
-	}
 	nodeID := strings.TrimSpace(request.URL.Query().Get("node_id"))
 	if nodeID == "" {
 		writeRequestError(writer, apiError("INVALID_REQUEST", "必须指定目标节点"))
@@ -347,7 +350,7 @@ func (s *Server) handleFileProxy(writer http.ResponseWriter, request *http.Reque
 	for _, name := range []string{
 		"Content-Type", "Range", "X-Prism-Resource-Type",
 		"X-Prism-Resource-ID", "X-Prism-Path", "X-Prism-Overwrite", "X-Prism-Expected-Version",
-		"X-Prism-Upload-Offset", "X-Prism-Upload-Final",
+		"X-Prism-Upload-ID", "X-Prism-Upload-Offset", "X-Prism-Upload-Final",
 	} {
 		if value := request.Header.Get(name); value != "" {
 			headers.Set(name, value)
@@ -384,6 +387,14 @@ func proxyFileScope(operation, method string) string {
 		if method == http.MethodPost {
 			return "file.upload"
 		}
+	case "upload-status":
+		if method == http.MethodPost {
+			return "file.upload.status"
+		}
+	case "upload-cancel":
+		if method == http.MethodPost {
+			return "file.upload.cancel"
+		}
 	case "import":
 		if method == http.MethodPost {
 			return "file.import"
@@ -407,6 +418,14 @@ func proxyFileScope(operation, method string) string {
 	case "archive":
 		if method == http.MethodPost {
 			return "file.archive"
+		}
+	case "extract":
+		if method == http.MethodPost {
+			return "file.extract"
+		}
+	case "extract-status":
+		if method == http.MethodPost {
+			return "file.extract.status"
 		}
 	case "delete":
 		if method == http.MethodPost {

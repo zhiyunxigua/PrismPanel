@@ -31,7 +31,7 @@ func (m *Manager) DeployInstance(
 
 	current.mu.RLock()
 	state := current.state
-	wasRunning := current.cmd != nil && state == StateRunning
+	wasRunning := current.session != nil && state == StateRunning
 	current.mu.RUnlock()
 	if state == StateStarting || state == StateStopping || state == StateDeploying {
 		return apperr.New("INSTANCE_BUSY", "实例正在切换状态")

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"PrismPanel-daemon/internal/apperr"
 	fileservice "PrismPanel-daemon/internal/files"
@@ -18,6 +19,7 @@ const (
 	resourceTypeHeader = "X-Prism-Resource-Type"
 	resourceIDHeader   = "X-Prism-Resource-ID"
 	filePathHeader     = "X-Prism-Path"
+	uploadIDHeader     = "X-Prism-Upload-ID"
 	uploadOffsetHeader = "X-Prism-Upload-Offset"
 	uploadFinalHeader  = "X-Prism-Upload-Final"
 )
@@ -36,6 +38,10 @@ func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) 
 		s.handleFileContent(writer, request)
 	case "upload":
 		s.handleFileUpload(writer, request)
+	case "upload-status":
+		s.handleFileUploadStatus(writer, request)
+	case "upload-cancel":
+		s.handleFileUploadCancel(writer, request)
 	case "import":
 		s.handleFileImport(writer, request)
 	case "download":
@@ -48,11 +54,66 @@ func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) 
 		s.handleFileCopy(writer, request)
 	case "archive":
 		s.handleFileArchive(writer, request)
+	case "extract":
+		s.handleFileExtract(writer, request)
+	case "extract-status":
+		s.handleFileExtractStatus(writer, request)
 	case "delete":
 		s.handleFileDelete(writer, request)
 	default:
 		http.NotFound(writer, request)
 	}
+}
+
+func (s *Server) handleFileUploadStatus(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	var input struct {
+		UploadID string `json:"upload_id"`
+	}
+	if err := decodeFileJSON(request, &input, 64*1024); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	target, relative := fileTarget(request)
+	if _, err := s.consumeFileTicket(request, "file.upload.status", target, relative); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	status, err := s.files.UploadSessionStatus(target, relative, input.UploadID)
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, status)
+}
+
+func (s *Server) handleFileUploadCancel(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	var input struct {
+		UploadID string `json:"upload_id"`
+	}
+	if err := decodeFileJSON(request, &input, 64*1024); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	target, relative := fileTarget(request)
+	created, err := s.consumeFileTicket(request, "file.upload.cancel", target, relative)
+	var status fileservice.UploadStatus
+	if err == nil {
+		status, err = s.files.CancelUpload(target, relative, input.UploadID)
+	}
+	s.publishFileResult(created, target, []string{relative}, err)
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, status)
 }
 
 func (s *Server) handleFileImport(writer http.ResponseWriter, request *http.Request) {
@@ -185,7 +246,11 @@ func (s *Server) handleFileUpload(writer http.ResponseWriter, request *http.Requ
 		} else {
 			var entry fileservice.Entry
 			var nextOffset int64
-			entry, nextOffset, err = s.files.UploadChunk(target, relative, request.Body, created.MaxBytes, created.SHA256, overwrite, created.ExpectedVersion, created.ID, offset, final)
+			uploadID := strings.TrimSpace(request.Header.Get(uploadIDHeader))
+			if uploadID == "" {
+				uploadID = created.ID
+			}
+			entry, nextOffset, err = s.files.UploadChunk(target, relative, request.Body, created.MaxBytes, created.SHA256, overwrite, created.ExpectedVersion, uploadID, offset, final)
 			if err == nil {
 				if final {
 					s.publishFileResult(created, target, []string{relative}, nil)
@@ -356,6 +421,82 @@ func (s *Server) handleFileArchive(writer http.ResponseWriter, request *http.Req
 	writeFileSuccess(writer, result)
 }
 
+func (s *Server) handleFileExtract(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	var input fileservice.ExtractInput
+	if err := decodeFileJSON(request, &input, 64*1024); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	target, source := fileTarget(request)
+	created, err := s.consumeFileTicket(request, "file.extract", target, source)
+	if err == nil && !created.AllowsPath(input.Destination) {
+		err = apperr.New("PERMISSION_DENIED", "临时凭证不允许写入解压目标目录")
+	}
+	var task fileservice.ExtractTask
+	if err == nil {
+		task, err = s.files.StartExtract(target, source, input)
+	}
+	if err != nil {
+		s.publishFileResult(created, target, []string{source, input.Destination}, err)
+		writeFileError(writer, err)
+		return
+	}
+	go s.publishExtractResult(created, target, task.ID)
+	writeFileSuccess(writer, task)
+}
+
+func (s *Server) publishExtractResult(created ticket.Ticket, target fileservice.Target, taskID string) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for range ticker.C {
+		task, err := s.files.ExtractStatus(target, taskID)
+		if err != nil {
+			s.publishFileResult(created, target, []string{created.Path}, err)
+			return
+		}
+		if task.Status == "failed" {
+			s.publishFileResult(created, target, []string{task.Source, task.Destination}, task.Error)
+			return
+		}
+		if task.Status == "done" {
+			s.publishFileResult(created, target, []string{task.Source, task.Destination}, nil)
+			return
+		}
+	}
+}
+
+func (s *Server) handleFileExtractStatus(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	var input struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := decodeFileJSON(request, &input, 64*1024); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	target, relative := fileTarget(request)
+	created, err := s.consumeFileTicket(request, "file.extract.status", target, relative)
+	var task fileservice.ExtractTask
+	if err == nil {
+		task, err = s.files.ExtractStatus(target, input.TaskID)
+	}
+	if err == nil && !created.AllowsPath(task.Source) {
+		err = apperr.New("PERMISSION_DENIED", "临时凭证不允许查询该解压任务")
+	}
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, task)
+}
+
 func (s *Server) handleFileDelete(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		writeFileMethodError(writer, "POST")
@@ -449,7 +590,7 @@ func writeFileError(writer http.ResponseWriter, err error) {
 	if err == nil {
 		err = apperr.New("INTERNAL", "文件操作失败")
 	}
-	apiError := apperr.From(err)
+	apiError := fileAPIDetail(err)
 	status := http.StatusBadRequest
 	switch apiError.Code {
 	case "UNAUTHENTICATED", "TICKET_EXPIRED":
@@ -464,10 +605,23 @@ func writeFileError(writer http.ResponseWriter, err error) {
 		status = http.StatusRequestEntityTooLarge
 	case "TOO_MANY_REQUESTS":
 		status = http.StatusTooManyRequests
-	case "INTERNAL", "FILE_OPERATION_FAILED", "FILE_WRITE_FAILED":
+	case "INTERNAL", "FILE_OPERATION_FAILED", "FILE_WRITE_FAILED", "DISK_FULL", "READ_ONLY_FILESYSTEM":
 		status = http.StatusInternalServerError
 	}
 	writeJSON(writer, status, map[string]any{"success": false, "error": apiError})
+}
+
+func fileAPIDetail(err error) *apperr.Error {
+	apiError := apperr.From(err)
+	if apiError == nil {
+		return apperr.New("INTERNAL", "文件操作失败")
+	}
+	stage := apiError.Stage
+	if stage == "" {
+		stage = "file-operation"
+	}
+	retryable := apiError.Retryable || apiError.Code == "TOO_MANY_REQUESTS"
+	return apperr.Describe(apiError, stage, retryable)
 }
 
 func writeFileMethodError(writer http.ResponseWriter, allow string) {
@@ -482,6 +636,6 @@ func setFileCORS(writer http.ResponseWriter, request *http.Request) {
 	}
 	writer.Header().Set("Access-Control-Allow-Origin", "*")
 	writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
-	writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Prism-Resource-Type, X-Prism-Resource-ID, X-Prism-Path, X-Prism-Overwrite, X-Prism-Expected-Version, X-Prism-Upload-Offset, X-Prism-Upload-Final")
+	writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Prism-Resource-Type, X-Prism-Resource-ID, X-Prism-Path, X-Prism-Overwrite, X-Prism-Expected-Version, X-Prism-Upload-ID, X-Prism-Upload-Offset, X-Prism-Upload-Final")
 	writer.Header().Set("Access-Control-Expose-Headers", "Content-Disposition, Content-Length")
 }

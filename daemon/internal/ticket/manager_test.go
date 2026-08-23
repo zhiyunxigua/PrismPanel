@@ -72,3 +72,17 @@ func TestTicketSourceBindingAndSessionRevocation(t *testing.T) {
 		t.Fatal("expected session revocation to invalidate ticket")
 	}
 }
+
+func TestRestrictedTicketAllowsPluginUpload(t *testing.T) {
+	manager := NewManager()
+	created, err := manager.CreateRestricted(RestrictedOptions{
+		Scope: "plugin.upload", ResourceType: "instance", ResourceID: "lobby",
+		Path: ".", Method: "POST", MaxBytes: 12, SHA256: "abc", TTL: time.Minute, MaxUses: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ConsumeRestricted(created.Token, "plugin.upload", "instance", "lobby", ".", "POST"); err != nil {
+		t.Fatal(err)
+	}
+}

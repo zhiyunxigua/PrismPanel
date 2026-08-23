@@ -32,11 +32,18 @@ type serverNodeContent struct {
 func (s *Server) handleServers(writer http.ResponseWriter, request *http.Request) {
 	switch request.Method {
 	case http.MethodGet:
-		if !s.authorizeServerRequest(writer, request, "server.view") {
+		canViewAll := s.allow(request, "server.view")
+		adminSet, err := s.instanceAdminSet(request)
+		if err != nil {
+			writeRequestError(writer, err)
+			return
+		}
+		if !canViewAll && len(adminSet) == 0 {
+			writeRequestError(writer, apiError("FORBIDDEN", "无权执行此操作"))
 			return
 		}
 		if strings.TrimSpace(request.URL.Query().Get("node_id")) == "" {
-			s.handleAllServers(writer, request)
+			s.handleAllServers(writer, request, canViewAll, adminSet)
 			return
 		}
 		var result json.RawMessage
@@ -44,9 +51,14 @@ func (s *Server) handleServers(writer http.ResponseWriter, request *http.Request
 			writeError(writer, err)
 			return
 		}
-		result = sanitizeServerListResult(
-			result, s.allow(request, "player.view"), s.allow(request, "plugin.view"),
-		)
+		nodeID := strings.TrimSpace(request.URL.Query().Get("node_id"))
+		var visible bool
+		result, visible = filterServerListResult(result, nodeID, adminSet, !canViewAll,
+			s.allow(request, "player.view"), s.allow(request, "plugin.view"))
+		if !canViewAll && !visible {
+			writeRequestError(writer, apiError("FORBIDDEN", "无权查看该节点上的服务器"))
+			return
+		}
 		writeSuccess(writer, result)
 	case http.MethodPost:
 		if !s.authorizeServerRequest(writer, request, "server.create") {
@@ -108,7 +120,7 @@ func (s *Server) handleServers(writer http.ResponseWriter, request *http.Request
 	}
 }
 
-func (s *Server) handleAllServers(writer http.ResponseWriter, request *http.Request) {
+func (s *Server) handleAllServers(writer http.ResponseWriter, request *http.Request, canViewAll bool, adminSet map[string]struct{}) {
 	canViewPlayers := s.allow(request, "player.view")
 	canViewPlugins := s.allow(request, "plugin.view")
 	nodes, err := s.nodes.List(request.Context())
@@ -136,13 +148,34 @@ func (s *Server) handleAllServers(writer http.ResponseWriter, request *http.Requ
 				items[targetIndex].Instances = []json.RawMessage{}
 				return
 			}
-			items[targetIndex].Servers = content.Servers
-			items[targetIndex].Instances = sanitizeInstanceMessages(
-				content.Instances, canViewPlayers, canViewPlugins,
-			)
+			payload, _ := json.Marshal(map[string]any{
+				"servers": content.Servers, "instances": content.Instances,
+			})
+			filtered, _ := filterServerListResult(payload, nodeID, adminSet, !canViewAll, canViewPlayers, canViewPlugins)
+			var visible struct {
+				Servers   []json.RawMessage `json:"servers"`
+				Instances []json.RawMessage `json:"instances"`
+			}
+			if json.Unmarshal(filtered, &visible) == nil {
+				items[targetIndex].Servers = visible.Servers
+				items[targetIndex].Instances = visible.Instances
+			}
 		}(index, node.ID)
 	}
 	wait.Wait()
+	if !canViewAll {
+		visible := false
+		for _, item := range items {
+			if len(item.Instances) > 0 {
+				visible = true
+				break
+			}
+		}
+		if !visible {
+			writeRequestError(writer, apiError("FORBIDDEN", "无权查看已分配的服务器实例"))
+			return
+		}
+	}
 	writeSuccess(writer, map[string]any{"nodes": items})
 }
 
@@ -232,6 +265,10 @@ func (s *Server) handleServer(writer http.ResponseWriter, request *http.Request)
 		s.handlePluginConfigSync(writer, request, parts[0])
 		return
 	}
+	if len(parts) == 2 && parts[1] == "image-sync-back" {
+		s.handleImageSyncBack(writer, request, parts[0])
+		return
+	}
 	if len(parts) == 2 && parts[1] == "deployment" {
 		s.handleActiveServerDeployment(writer, request, parts[0])
 		return
@@ -319,7 +356,12 @@ func (s *Server) handleServerPluginOperation(writer http.ResponseWriter, request
 		http.NotFound(writer, request)
 		return
 	}
-	if !s.authorizeServerRequest(writer, request, permission) {
+	instanceID := strings.TrimSpace(request.URL.Query().Get("instance_id"))
+	if instanceID != "" {
+		if !s.authorizeInstanceRequest(writer, request, permission, instanceID) {
+			return
+		}
+	} else if !s.authorizeServerRequest(writer, request, permission) {
 		return
 	}
 	var input struct {
@@ -338,7 +380,7 @@ func (s *Server) handleServerPluginOperation(writer http.ResponseWriter, request
 	messageType := "plugin." + action
 	if err == nil {
 		err = s.callNode(request, messageType, map[string]any{
-			"server_id": serverID, "plugin_name": input.PluginName,
+			"server_id": serverID, "instance_id": instanceID, "plugin_name": input.PluginName,
 			"delete_config": input.DeleteConfig, "config_directory": input.ConfigDirectory,
 		}, &result)
 	}
@@ -407,6 +449,38 @@ func (s *Server) handlePluginConfigSync(writer http.ResponseWriter, request *htt
 		}, &result)
 	}
 	s.record(request, "deployment.plugin_config_sync.start", serverID, input, err)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	writeSuccess(writer, result)
+}
+
+func (s *Server) handleImageSyncBack(writer http.ResponseWriter, request *http.Request, serverID string) {
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", "POST")
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizeServerRequest(writer, request, "server.deploy") {
+		return
+	}
+	var input struct {
+		Targets []int `json:"targets"`
+	}
+	body, err := readBody(request)
+	if err == nil {
+		if decodeErr := json.Unmarshal(body, &input); decodeErr != nil || len(input.Targets) != 1 {
+			err = &daemon.APIError{Code: "INVALID_REQUEST", Message: "同步回镜像源必须且只能选择一个实例"}
+		}
+	}
+	var result json.RawMessage
+	if err == nil {
+		err = s.callNode(request, "deployment.image_sync_back.start", map[string]any{
+			"server_id": serverID, "targets": input.Targets,
+		}, &result)
+	}
+	s.record(request, "deployment.image_sync_back.start", serverID, input, err)
 	if err != nil {
 		writeError(writer, err)
 		return
@@ -529,7 +603,8 @@ func riskLevel(action string) string {
 		strings.Contains(action, "kill"), strings.Contains(action, "password.reset"):
 		return "critical"
 	case strings.Contains(action, "update"), strings.Contains(action, "restart"),
-		strings.Contains(action, "stop"), strings.Contains(action, "deploy"):
+		strings.Contains(action, "stop"), strings.Contains(action, "deploy"),
+		strings.Contains(action, "image_sync_back"):
 		return "high"
 	default:
 		return "normal"
@@ -559,16 +634,20 @@ func (s *Server) handleInstance(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	instanceID, action := parts[0], parts[1]
+	if action == "admins" {
+		s.handleInstanceAdmins(writer, request, instanceID)
+		return
+	}
 	if action == "plugins" {
 		if request.Method == http.MethodPost {
-			if !s.authorizeServerRequest(writer, request, "plugin.deploy") {
+			if !s.authorizeInstanceRequest(writer, request, "plugin.deploy", instanceID) {
 				return
 			}
 			s.handleInstancePluginUpload(writer, request, instanceID)
 			return
 		}
 		if request.Method == http.MethodGet {
-			if !s.authorizeServerRequest(writer, request, "plugin.view") {
+			if !s.authorizeInstanceRequest(writer, request, "plugin.view", instanceID) {
 				return
 			}
 			var result json.RawMessage
@@ -588,7 +667,7 @@ func (s *Server) handleInstance(writer http.ResponseWriter, request *http.Reques
 	switch action {
 	case "start", "stop", "restart", "kill":
 		messageType := "instance." + action
-		if !s.authorizeServerRequest(writer, request, messageType) {
+		if !s.authorizeInstanceRequest(writer, request, messageType, instanceID) {
 			return
 		}
 		var result json.RawMessage
@@ -600,7 +679,7 @@ func (s *Server) handleInstance(writer http.ResponseWriter, request *http.Reques
 		}
 		writeSuccess(writer, result)
 	case "command":
-		if !s.authorizeServerRequest(writer, request, "console.command") {
+		if !s.authorizeInstanceRequest(writer, request, "console.command", instanceID) {
 			return
 		}
 		var input struct {
@@ -627,7 +706,7 @@ func (s *Server) handleInstance(writer http.ResponseWriter, request *http.Reques
 		}
 		writeSuccess(writer, map[string]any{})
 	case "console-ticket":
-		if !s.authorizeServerRequest(writer, request, "console.read") {
+		if !s.authorizeInstanceRequest(writer, request, "console.read", instanceID) {
 			return
 		}
 		s.handleConsoleTicket(writer, request, instanceID)
@@ -672,7 +751,7 @@ func (s *Server) handleConsoleTicket(writer http.ResponseWriter, request *http.R
 		writeError(writer, err)
 		return
 	}
-	endpoint := "/api/v1/ws/console?node_id=" + nodeID
+	endpoint := "/api/v1/ws/console?node_id=" + nodeID + "&instance_id=" + instanceID
 	publicURL := ""
 	if direct {
 		publicURL = created.PublicURL

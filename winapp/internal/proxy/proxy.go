@@ -212,7 +212,7 @@ func (s *Server) setCORSHeaders(writer http.ResponseWriter, origin string) {
 	}
 	writer.Header().Set("Access-Control-Allow-Origin", origin)
 	writer.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS")
-	writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Prism-Client-Session, X-Prism-Resource-Type, X-Prism-Resource-ID, X-Prism-Path, X-Prism-Overwrite, X-Prism-Expected-Version")
+	writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Prism-Client-Session, X-Prism-Resource-Type, X-Prism-Resource-ID, X-Prism-Path, X-Prism-Overwrite, X-Prism-Expected-Version, X-Prism-Upload-ID, X-Prism-Upload-Offset, X-Prism-Upload-Final")
 	writer.Header().Set("Access-Control-Expose-Headers", "Content-Disposition, Content-Length, X-Request-ID")
 	writer.Header().Add("Vary", "Origin")
 }

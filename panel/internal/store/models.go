@@ -117,6 +117,13 @@ type UserPermissionProfile struct {
 	Permissions []UserPermissionItem `json:"permissions"`
 }
 
+type InstanceAdmin struct {
+	UserID      string    `json:"user_id"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"display_name"`
+	AssignedAt  time.Time `json:"assigned_at"`
+}
+
 type AuditLog struct {
 	ID               string         `json:"id"`
 	RequestID        string         `json:"request_id"`

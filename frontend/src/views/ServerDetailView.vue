@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import {
   Activity, ArrowLeft, ArrowRightLeft, Cpu, Edit3, FileCode2, MemoryStick, OctagonX, Play,
-  PlugZap, Puzzle, RefreshCw, RotateCw, Server, Square, Terminal, Trash2, Upload, Users,
+  PlugZap, Puzzle, RefreshCw, RotateCw, Server, ShieldCheck, Square, Terminal, Trash2, Upload, Users,
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { request } from "../api";
@@ -11,6 +11,7 @@ import { hasPermission } from "../session";
 import ConsoleOutput from "../components/servers/ConsoleOutput.vue";
 import MetricLineChart from "../components/metrics/MetricLineChart.vue";
 import ServerEditorDialog from "../components/servers/ServerEditorDialog.vue";
+import InstanceAdminDialog from "../components/servers/InstanceAdminDialog.vue";
 import FileManager from "../components/files/FileManager.vue";
 import TargetSelectionTree from "../components/TargetSelectionTree.vue";
 
@@ -56,6 +57,8 @@ const deploymentTargets = ref([]);
 const deploymentTask = ref(null);
 const deploymentSubmitting = ref(false);
 const deploymentRefreshing = ref(false);
+const instanceAdminOpen = ref(false);
+const instanceAdminTarget = ref(null);
 const actionLoading = reactive({});
 let refreshTimer;
 let deploymentTimer;
@@ -68,14 +71,23 @@ const pluginInstance = computed(() => instances.value.find((item) => item.instan
 const canConfigure = computed(() => hasPermission("server.configure"));
 const canDeploy = computed(() => hasPermission("server.deploy"));
 const canDelete = computed(() => hasPermission("server.delete"));
-const canReadConsole = computed(() => hasPermission("console.read"));
-const canReadFiles = computed(() => hasPermission("file.read"));
-const canCommand = computed(() => hasPermission("console.command"));
-const canViewPlugins = computed(() => hasPermission("plugin.view"));
-const canDeployPlugins = computed(() => hasPermission("plugin.deploy"));
-const canRemovePlugins = computed(() => hasPermission("plugin.remove"));
+function hasInstancePermission(instance, permission) {
+  return hasPermission(permission) || Boolean(instance?.instance_admin);
+}
+
+function openInstanceAdmins(instance) {
+  instanceAdminTarget.value = instance;
+  instanceAdminOpen.value = true;
+}
+
+const canReadConsole = computed(() => hasPermission("console.read") || instances.value.some((item) => item.instance_admin));
+const canReadFiles = computed(() => hasPermission("file.read") || instances.value.some((item) => item.instance_admin));
+const canCommand = computed(() => hasInstancePermission(selectedInstance.value, "console.command"));
+const canViewPlugins = computed(() => hasPermission("plugin.view") || instances.value.some((item) => item.instance_admin));
+const canDeployPlugins = computed(() => hasPermission("plugin.deploy") || Boolean(pluginInstance.value?.instance_admin));
+const canRemovePlugins = computed(() => hasPermission("plugin.remove") || Boolean(pluginInstance.value?.instance_admin));
 const canRestartUploadedPlugin = computed(() => (
-  hasPermission("instance.restart")
+  hasInstancePermission(pluginInstance.value, "instance.restart")
   && pluginInstance.value?.state === "running"
   && !pluginInstance.value?.deployment_locked
 ));
@@ -83,7 +95,7 @@ const pluginConflictRestartNote = computed(() => {
   if (pluginInstance.value?.state === "stopped" || pluginInstance.value?.state === "failed") {
     return "新版本将在下次启动时生效。";
   }
-  if (!hasPermission("instance.restart")) {
+  if (!hasInstancePermission(pluginInstance.value, "instance.restart")) {
     return "替换后需要由有权限的管理员重启当前子服。";
   }
   if (!canRestartUploadedPlugin.value) {
@@ -91,7 +103,9 @@ const pluginConflictRestartNote = computed(() => {
   }
   return "替换后需要重启当前子服才能加载新版本。";
 });
-const canViewPlayers = computed(() => hasPermission("player.view"));
+const canViewPlayers = computed(() => hasPermission("player.view") || instances.value.some((item) => item.instance_admin));
+const consoleInstances = computed(() => instances.value.filter((item) => hasInstancePermission(item, "console.read")));
+const pluginInstances = computed(() => instances.value.filter((item) => hasInstancePermission(item, "plugin.view")));
 const canTransferPlayers = computed(() => hasPermission("player.transfer"));
 const isProxyServer = computed(() => ["velocity", "bungee"].includes(server.value?.platform));
 const canViewTasks = computed(() => hasPermission("task.view"));
@@ -114,6 +128,12 @@ const deploymentActive = computed(() => deploymentTask.value && ![
   "cancelled", "force_stopped", "completed", "completed_with_errors", "failed",
 ].includes(deploymentTask.value.status));
 const pluginConfigSyncMode = computed(() => deploymentMode.value === "plugin_config_sync");
+const imageSyncBackMode = computed(() => deploymentMode.value === "image_sync_back");
+const deploymentDialogTitle = computed(() => {
+  if (pluginConfigSyncMode.value) return "同步插件配置";
+  if (imageSyncBackMode.value) return "同步回镜像源";
+  return "部署镜像服务器组";
+});
 const deploymentProgress = computed(() => {
   const total = deploymentTask.value?.targets?.length || 0;
   if (!total) return 0;
@@ -154,10 +174,17 @@ const pluginConfigSyncStatusLabels = {
   force_stop_requested: "正在强制结束", cancelled: "已取消", force_stopped: "已强制结束",
   completed: "同步完成", completed_with_errors: "同步完成，部分失败", failed: "同步失败",
 };
+const imageSyncBackStatusLabels = {
+  queued: "等待同步", running: "同步中", cancel_requested: "正在取消",
+  force_stop_requested: "正在强制结束", cancelled: "已取消", force_stopped: "已强制结束",
+  completed: "同步完成", completed_with_errors: "同步失败", failed: "同步失败",
+};
 const deploymentStatusText = computed(() => {
   const status = deploymentTask.value?.status;
   if (!status) return "";
-  return (pluginConfigSyncMode.value ? pluginConfigSyncStatusLabels : deploymentStatusLabels)[status] || status;
+  if (pluginConfigSyncMode.value) return pluginConfigSyncStatusLabels[status] || status;
+  if (imageSyncBackMode.value) return imageSyncBackStatusLabels[status] || status;
+  return deploymentStatusLabels[status] || status;
 });
 const deploymentCopyStageLabels = {
   scanning_plugin_config: "扫描插件配置",
@@ -168,6 +195,9 @@ const deploymentCopyStageLabels = {
   scanning_excluded: "扫描排除项",
   restoring_excluded: "恢复排除项",
   finalizing: "写入配置并切换目录",
+  scanning_instance: "扫描实例文件",
+  copying_instance: "复制实例文件",
+  finalizing_image: "切换镜像源目录",
 };
 const players = computed(() => instances.value.flatMap((instance) => (
   Array.isArray(instance.players)
@@ -497,8 +527,10 @@ async function setPluginEnabled(plugin, enabled) {
   pluginActionLoading.value = plugin.name;
   try {
     const action = enabled ? "enable" : "disable";
+    const permission = "plugin.deploy";
     const path = "/api/v1/servers/" + encodeURIComponent(serverId.value) +
-      "/plugins/" + action + "?node_id=" + encodeURIComponent(nodeId.value);
+      "/plugins/" + action + "?node_id=" + encodeURIComponent(nodeId.value)
+      + (hasPermission(permission) ? "" : "&instance_id=" + encodeURIComponent(pluginInstanceId.value));
     const result = await request(path, {
       method: "POST", body: JSON.stringify({ plugin_name: plugin.name }),
     });
@@ -521,8 +553,10 @@ async function uninstallPlugin() {
   if (!uninstallTarget.value || pluginActionLoading.value) return;
   pluginActionLoading.value = uninstallTarget.value.name;
   try {
+    const permission = "plugin.remove";
     const path = "/api/v1/servers/" + encodeURIComponent(serverId.value) +
-      "/plugins/uninstall?node_id=" + encodeURIComponent(nodeId.value);
+      "/plugins/uninstall?node_id=" + encodeURIComponent(nodeId.value)
+      + (hasPermission(permission) ? "" : "&instance_id=" + encodeURIComponent(pluginInstanceId.value));
     const result = await request(path, {
       method: "POST",
       body: JSON.stringify({
@@ -559,11 +593,13 @@ async function load(silent = false) {
     }
     server.value = target;
     instances.value = (data.instances || []).filter((item) => item.server_id === serverId.value);
-    if (!instances.value.some((item) => item.instance_id === selectedInstanceId.value)) {
-      selectedInstanceId.value = instances.value[0]?.instance_id || "";
+    if (!instances.value.some((item) => item.instance_id === selectedInstanceId.value)
+      || !hasInstancePermission(selectedInstance.value, "console.read")) {
+      selectedInstanceId.value = consoleInstances.value[0]?.instance_id || "";
     }
-    if (!instances.value.some((item) => item.instance_id === pluginInstanceId.value)) {
-      pluginInstanceId.value = instances.value[0]?.instance_id || "";
+    if (!instances.value.some((item) => item.instance_id === pluginInstanceId.value)
+      || !hasInstancePermission(pluginInstance.value, "plugin.view")) {
+      pluginInstanceId.value = pluginInstances.value[0]?.instance_id || "";
     }
     if (!healthInstanceId.value) healthInstanceId.value = instances.value[0]?.instance_id || "";
     await loadMetrics();
@@ -590,7 +626,7 @@ function stateTagType(state) {
 function canRun(instance, action) {
   if (
     !instance || instance.deployment_locked ||
-    !hasPermission("instance." + action) || actionLoading[instance.instance_id]
+    !hasInstancePermission(instance, "instance." + action) || actionLoading[instance.instance_id]
   ) return false;
   if (action === "start") return instance.state === "stopped" || instance.state === "failed";
   if (action === "stop") return instance.state === "running";
@@ -710,7 +746,7 @@ function startDeploymentPolling() {
 }
 
 function applyDeploymentMode(task) {
-  if (task?.kind === "plugin_config_sync" || task?.kind === "mirror_deploy") {
+  if (["plugin_config_sync", "mirror_deploy", "image_sync_back"].includes(task?.kind)) {
     deploymentMode.value = task.kind;
   }
 }
@@ -752,23 +788,8 @@ async function recoverActiveDeployment() {
   }
 }
 
-async function openDeployment() {
-  deploymentMode.value = "mirror_deploy";
-  deploymentOpen.value = true;
-  if (deploymentActive.value) {
-    applyDeploymentMode(deploymentTask.value);
-    return;
-  }
-  deploymentTask.value = null;
-  if (instances.value.some((item) => item.deployment_locked || item.state === "deploying")) {
-    await recoverActiveDeployment();
-    if (deploymentTask.value) return;
-  }
-  resetDeployment();
-}
-
-async function openPluginConfigSync() {
-  deploymentMode.value = "plugin_config_sync";
+async function openDeployment(mode = "mirror_deploy") {
+  deploymentMode.value = mode;
   deploymentOpen.value = true;
   if (deploymentActive.value) {
     applyDeploymentMode(deploymentTask.value);
@@ -790,15 +811,20 @@ function resetDeployment() {
   deploymentMode.value = deploymentMode.value || "mirror_deploy";
   stopDeploymentPolling();
   deploymentTask.value = null;
-  deploymentTargets.value = instances.value
+  const available = instances.value
     .filter(deployableInstance)
     .map((item) => Number(item.slot))
     .filter(Number.isFinite);
+  deploymentTargets.value = imageSyncBackMode.value ? available.slice(0, 1) : available;
 }
 
 async function startDeployment() {
   if (pluginConfigSyncMode.value) {
     await startPluginConfigSync();
+    return;
+  }
+  if (imageSyncBackMode.value) {
+    await startImageSyncBack();
     return;
   }
   if (!deploymentTargets.value.length) {
@@ -828,6 +854,43 @@ async function startDeployment() {
       method: "POST", body: JSON.stringify({ targets: deploymentTargets.value }),
     });
     ElMessage.success("部署任务已创建");
+    startDeploymentPolling();
+    await load(true);
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    deploymentSubmitting.value = false;
+  }
+}
+
+async function startImageSyncBack() {
+  if (deploymentTargets.value.length !== 1) {
+    ElMessage.warning("请选择一个要同步的镜像服实例");
+    return;
+  }
+  const source = instances.value.find((item) => Number(item.slot) === deploymentTargets.value[0]);
+  if (!source) {
+    ElMessage.warning("所选实例不存在");
+    return;
+  }
+  const runningMessage = source.state === "running" ? "该实例将先停止，完成后自动恢复运行。" : "";
+  try {
+    await ElMessageBox.confirm(
+      "将使用“" + source.name + "”的全部文件替换当前镜像源，镜像源中该实例没有的文件也会被删除。" + runningMessage,
+      "同步回镜像源",
+      { type: "warning", confirmButtonText: "确认同步", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  deploymentSubmitting.value = true;
+  try {
+    const path = "/api/v1/servers/" + encodeURIComponent(serverId.value) +
+      "/image-sync-back?node_id=" + encodeURIComponent(nodeId.value);
+    deploymentTask.value = await request(path, {
+      method: "POST", body: JSON.stringify({ targets: deploymentTargets.value }),
+    });
+    ElMessage.success("同步回镜像源任务已创建");
     startDeploymentPolling();
     await load(true);
   } catch (error) {
@@ -876,6 +939,10 @@ async function stopDeployment(force) {
     await stopPluginConfigSync(force);
     return;
   }
+  if (imageSyncBackMode.value) {
+    await stopImageSyncBack(force);
+    return;
+  }
   try {
     await ElMessageBox.confirm(
       force
@@ -885,6 +952,36 @@ async function stopDeployment(force) {
       {
         type: force ? "error" : "warning",
         confirmButtonText: force ? "强制结束" : "取消部署",
+        cancelButtonText: "返回",
+      },
+    );
+  } catch {
+    return;
+  }
+  deploymentSubmitting.value = true;
+  try {
+    const action = force ? "force-stop" : "cancel";
+    const path = "/api/v1/deployments/" + encodeURIComponent(deploymentTask.value.task_id) +
+      "/" + action + "?node_id=" + encodeURIComponent(nodeId.value);
+    deploymentTask.value = await request(path, { method: "POST", body: "{}" });
+    startDeploymentPolling();
+  } catch (error) {
+    ElMessage.error(error.message);
+  } finally {
+    deploymentSubmitting.value = false;
+  }
+}
+
+async function stopImageSyncBack(force) {
+  try {
+    await ElMessageBox.confirm(
+      force
+        ? "强制结束会中止后续复制；如果目录切换已经开始，系统仍会完成或回滚该原子操作。"
+        : "取消会在当前安全点停止同步，镜像源目录不会处于半完成状态。",
+      force ? "强制结束镜像源同步" : "取消镜像源同步",
+      {
+        type: force ? "error" : "warning",
+        confirmButtonText: force ? "强制结束" : "取消同步",
         cancelButtonText: "返回",
       },
     );
@@ -1030,13 +1127,18 @@ onBeforeRouteLeave(async () => {
           v-if="server?.type === 'mirror' && canDeploy"
           type="primary"
           :plain="!deploymentActive"
-          @click="openDeployment"
+          @click="openDeployment('mirror_deploy')"
         ><Upload :size="16" />{{ deploymentActive || deploymentGroupLocked ? "查看部署" : "部署镜像" }}</el-button>
         <el-button
           v-if="server?.type === 'mirror' && canDeploy"
           plain
-          @click="openPluginConfigSync"
+          @click="openDeployment('plugin_config_sync')"
         ><FileCode2 :size="16" />{{ deploymentActive && deploymentTask?.kind === 'plugin_config_sync' ? '查看配置同步' : '同步插件配置' }}</el-button>
+        <el-button
+          v-if="server?.type === 'mirror' && canDeploy"
+          plain
+          @click="openDeployment('image_sync_back')"
+        ><ArrowRightLeft :size="16" />{{ deploymentActive && deploymentTask?.kind === 'image_sync_back' ? '查看回同步' : '同步回镜像源' }}</el-button>
         <el-button v-if="canConfigure" :disabled="groupBusy || deploymentGroupLocked" @click="editorOpen = true"><Edit3 :size="16" />编辑配置</el-button>
         <el-button v-if="canDelete" type="danger" plain :disabled="!allStopped" @click="removeServer">
           <Trash2 :size="16" />删除
@@ -1050,7 +1152,7 @@ onBeforeRouteLeave(async () => {
           <div class="instance-control-identity">
             <span>当前子服</span>
             <el-select v-model="selectedInstanceId" placeholder="选择子服">
-              <el-option v-for="item in instances" :key="item.instance_id" :label="item.name" :value="item.instance_id" />
+              <el-option v-for="item in consoleInstances" :key="item.instance_id" :label="item.name" :value="item.instance_id" />
             </el-select>
             <el-tag v-if="selectedInstance" :type="stateTagType(displayState(selectedInstance))" effect="plain">
               {{ stateLabels[displayState(selectedInstance)] || displayState(selectedInstance) }}
@@ -1058,26 +1160,26 @@ onBeforeRouteLeave(async () => {
           </div>
           <div v-if="selectedInstance" class="instance-lifecycle-actions">
             <el-button
-              v-if="hasPermission('instance.start')"
+              v-if="hasInstancePermission(selectedInstance, 'instance.start')"
               type="success"
               :loading="actionLoading[selectedInstance.instance_id] === 'start'"
               :disabled="!canRun(selectedInstance, 'start')"
               @click="invoke(selectedInstance, 'start')"
             ><Play :size="15" />启动</el-button>
             <el-button
-              v-if="hasPermission('instance.restart')"
+              v-if="hasInstancePermission(selectedInstance, 'instance.restart')"
               :loading="actionLoading[selectedInstance.instance_id] === 'restart'"
               :disabled="!canRun(selectedInstance, 'restart')"
               @click="invoke(selectedInstance, 'restart')"
             ><RotateCw :size="15" />重启</el-button>
             <el-button
-              v-if="hasPermission('instance.stop')"
+              v-if="hasInstancePermission(selectedInstance, 'instance.stop')"
               :loading="actionLoading[selectedInstance.instance_id] === 'stop'"
               :disabled="!canRun(selectedInstance, 'stop')"
               @click="invoke(selectedInstance, 'stop')"
             ><Square :size="14" />关闭</el-button>
             <el-button
-              v-if="hasPermission('instance.kill')"
+              v-if="hasInstancePermission(selectedInstance, 'instance.kill')"
               type="danger"
               plain
               :loading="actionLoading[selectedInstance.instance_id] === 'kill'"
@@ -1097,7 +1199,7 @@ onBeforeRouteLeave(async () => {
         </div>
 
         <ConsoleOutput
-          v-if="selectedInstance"
+          v-if="selectedInstance && hasInstancePermission(selectedInstance, 'console.read')"
           :key="selectedInstance.instance_id"
           :node-id="nodeId"
           :instance-id="selectedInstance.instance_id"
@@ -1135,16 +1237,19 @@ onBeforeRouteLeave(async () => {
               <span v-else-if="instance.last_error" class="danger">{{ instance.last_error }}</span>
               <span v-else class="muted">最后启动：{{ formatDate(instance.started_at) }}</span>
               <el-button
-                v-if="canReadConsole"
+                v-if="hasInstancePermission(instance, 'console.read')"
                 text
                 @click="selectedInstanceId = instance.instance_id; activeTab = 'console'"
               ><Terminal :size="14" />控制台</el-button>
+              <el-button v-if="canConfigure" text @click="openInstanceAdmins(instance)">
+                <ShieldCheck :size="14" />实例管理员
+              </el-button>
             </div>
           </article>
         </div>
 
         <section class="data-section server-health-section">
-          <div class="section-title">
+            <div class="section-title">
             <div><h3>运行趋势</h3><p>最近 10 分钟的子服占用与游戏状态</p></div>
             <el-select v-model="healthInstanceId" placeholder="选择子服">
               <el-option v-for="item in instances" :key="item.instance_id" :label="item.name" :value="item.instance_id" />
@@ -1189,7 +1294,7 @@ onBeforeRouteLeave(async () => {
           <div>
             <span>子服</span>
             <el-select v-model="pluginInstanceId" :disabled="pluginUploadState.active" placeholder="选择子服">
-              <el-option v-for="item in instances" :key="item.instance_id" :label="item.name" :value="item.instance_id" />
+              <el-option v-for="item in pluginInstances" :key="item.instance_id" :label="item.name" :value="item.instance_id" />
             </el-select>
           </div>
           <el-input v-model="pluginSearch" clearable placeholder="搜索插件" />
@@ -1222,7 +1327,7 @@ onBeforeRouteLeave(async () => {
         >
           <template #default>
             <el-button
-              v-if="pluginInstance?.state === 'running' && hasPermission('instance.restart')"
+              v-if="pluginInstance?.state === 'running' && hasInstancePermission(pluginInstance, 'instance.restart')"
               size="small"
               :loading="actionLoading[pluginInstance.instance_id] === 'restart'"
               @click="invoke(pluginInstance, 'restart')"
@@ -1354,6 +1459,13 @@ onBeforeRouteLeave(async () => {
     </el-tabs>
   </div>
 
+  <InstanceAdminDialog
+    v-model="instanceAdminOpen"
+    :node-id="nodeId"
+    :instance="instanceAdminTarget"
+    @updated="load(true)"
+  />
+
   <el-dialog
     v-model="pluginConflictOpen"
     title="发现同名插件"
@@ -1389,7 +1501,7 @@ onBeforeRouteLeave(async () => {
 
   <el-dialog
     v-model="deploymentOpen"
-    :title="pluginConfigSyncMode ? '同步插件配置' : '部署镜像服务器组'"
+    :title="deploymentDialogTitle"
     width="min(820px, 94vw)"
     :close-on-click-modal="false"
   >
@@ -1404,17 +1516,36 @@ onBeforeRouteLeave(async () => {
       </div>
       <div class="section-title">
         <div>
-          <h3>{{ pluginConfigSyncMode ? '同步目标' : '部署目标' }}</h3>
+          <h3>{{ imageSyncBackMode ? '来源实例' : (pluginConfigSyncMode ? '同步目标' : '部署目标') }}</h3>
           <p v-if="pluginConfigSyncMode">仅覆盖镜像源 plugins 目录中符合白名单的文件，不会停止或重启服务器，也不会删除目标中的额外文件。</p>
+          <p v-else-if="imageSyncBackMode">选择一个实例，用它的全部文件替换镜像源；实例中不存在的镜像源文件也会被删除。</p>
           <p v-else>选中的子服在任务结束前会被锁定，运行中的子服完成后自动恢复</p>
         </div>
         <el-checkbox
+          v-if="!imageSyncBackMode"
           :model-value="deploymentTargets.length === instances.filter(deployableInstance).length"
           :indeterminate="deploymentTargets.length > 0 && deploymentTargets.length < instances.filter(deployableInstance).length"
           @change="deploymentTargets = $event ? instances.filter(deployableInstance).map((item) => Number(item.slot)) : []"
         >全选</el-checkbox>
       </div>
-      <el-checkbox-group v-model="deploymentTargets" class="deployment-target-grid">
+      <el-radio-group
+        v-if="imageSyncBackMode"
+        :model-value="deploymentTargets[0]"
+        class="deployment-target-grid"
+        @update:model-value="deploymentTargets = [$event]"
+      >
+        <el-radio
+          v-for="item in instances"
+          :key="item.instance_id"
+          :value="Number(item.slot)"
+          :disabled="!deployableInstance(item)"
+          border
+        >
+          <span>{{ item.name }}</span>
+          <small>{{ stateLabels[displayState(item)] || displayState(item) }} · {{ item.online_players || 0 }} 人</small>
+        </el-radio>
+      </el-radio-group>
+      <el-checkbox-group v-else v-model="deploymentTargets" class="deployment-target-grid">
         <el-checkbox
           v-for="item in instances"
           :key="item.instance_id"
@@ -1492,18 +1623,19 @@ onBeforeRouteLeave(async () => {
         <el-button @click="deploymentOpen = false">取消</el-button>
         <el-button type="primary" :loading="deploymentSubmitting" :disabled="!deploymentTargets.length" @click="startDeployment">
           <FileCode2 v-if="pluginConfigSyncMode" :size="15" />
+          <ArrowRightLeft v-else-if="imageSyncBackMode" :size="15" />
           <Upload v-else :size="15" />
-          {{ pluginConfigSyncMode ? '开始同步' : '开始部署' }}
+          {{ imageSyncBackMode ? '确认同步' : (pluginConfigSyncMode ? '开始同步' : '开始部署') }}
         </el-button>
       </template>
       <template v-else-if="deploymentActive">
         <el-button @click="deploymentOpen = false">后台运行</el-button>
-        <el-button v-if="canCancelTasks" :loading="deploymentSubmitting" @click="stopDeployment(false)">{{ pluginConfigSyncMode ? '取消同步' : '取消部署' }}</el-button>
+        <el-button v-if="canCancelTasks" :loading="deploymentSubmitting" @click="stopDeployment(false)">{{ pluginConfigSyncMode || imageSyncBackMode ? '取消同步' : '取消部署' }}</el-button>
         <el-button v-if="canCancelTasks" type="danger" plain :loading="deploymentSubmitting" @click="stopDeployment(true)">强制结束</el-button>
       </template>
       <template v-else>
         <el-button @click="deploymentOpen = false">关闭</el-button>
-        <el-button type="primary" plain @click="resetDeployment">{{ pluginConfigSyncMode ? '再次同步' : '再次部署' }}</el-button>
+        <el-button type="primary" plain @click="resetDeployment">{{ pluginConfigSyncMode || imageSyncBackMode ? '再次同步' : '再次部署' }}</el-button>
       </template>
     </template>
   </el-dialog>

@@ -521,6 +521,15 @@ func (s *Server) executeFrom(callerSource, messageType string, raw json.RawMessa
 			return nil, invalidJSON(err)
 		}
 		return s.deployments.StartPluginConfigSync(input.ServerID, input.Targets)
+	case "deployment.image_sync_back.start":
+		var input struct {
+			ServerID string `json:"server_id"`
+			Targets  []int  `json:"targets,omitempty"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		return s.deployments.StartImageSyncBack(input.ServerID, input.Targets)
 	case "deployment.get":
 		var input struct {
 			TaskID string `json:"task_id"`
@@ -631,10 +640,12 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 		allowed := map[string]string{
 			"file.list": http.MethodPost, "file.read": http.MethodGet,
 			"file.edit": http.MethodPut, "file.upload": http.MethodPost,
+			"file.upload.status": http.MethodPost, "file.upload.cancel": http.MethodPost,
 			"file.import":   http.MethodPost,
 			"file.download": http.MethodGet, "file.create": http.MethodPost,
 			"file.move": http.MethodPost, "file.copy": http.MethodPost,
-			"file.archive": http.MethodPost, "file.delete": http.MethodPost,
+			"file.archive": http.MethodPost, "file.extract": http.MethodPost,
+			"file.extract.status": http.MethodPost, "file.delete": http.MethodPost,
 		}
 		method, exists := allowed[input.Scope]
 		if !exists || (input.Method != "" && !strings.EqualFold(input.Method, method)) {
@@ -659,9 +670,11 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			input.TTLSeconds = 120
 		}
 		maxUses := 1
-		if input.Scope == "file.list" {
+		if input.Scope == "file.list" || input.Scope == "file.extract.status" {
 			maxUses = 64
-			input.PathPrefix = true
+			if input.Scope == "file.list" {
+				input.PathPrefix = true
+			}
 		}
 		if input.Scope == "file.upload" && input.Chunked {
 			chunks := (input.Size + fileservice.UploadChunkSize - 1) / fileservice.UploadChunkSize

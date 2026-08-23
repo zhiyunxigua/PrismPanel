@@ -36,7 +36,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Store, error) {
 }
 
 var logicalTablePattern = regexp.MustCompile(
-	`\b(user_permission_overrides|group_permissions|user_preferences|user_groups|sessions|users|nodes|audit_logs|file_operations|operator_state|operators|scheduled_task_targets|scheduled_tasks|task_run_targets|task_runs|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences|net_game_observations|net_game_collection_runs|net_games)\b`,
+	`\b(instance_admins|user_permission_overrides|group_permissions|user_preferences|user_groups|sessions|users|nodes|audit_logs|file_operations|operator_state|operators|scheduled_task_targets|scheduled_tasks|task_run_targets|task_runs|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences|net_game_observations|net_game_collection_runs|net_games)\b`,
 )
 
 type database struct {
@@ -176,6 +176,15 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			updated_at DATETIME(6) NOT NULL,
 			PRIMARY KEY (user_id, permission_code),
 			CONSTRAINT fk_user_permission_overrides_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS instance_admins (
+			node_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			instance_id VARCHAR(64) CHARACTER SET ascii NOT NULL,
+			user_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			assigned_at DATETIME(6) NOT NULL,
+			PRIMARY KEY (node_id, instance_id, user_id),
+			KEY idx_instance_admins_user (user_id, node_id),
+			CONSTRAINT fk_instance_admins_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS nodes (
 			id CHAR(32) CHARACTER SET ascii NOT NULL PRIMARY KEY,

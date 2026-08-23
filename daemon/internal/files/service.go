@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -81,6 +82,8 @@ type Service struct {
 	transfers          chan struct{}
 	uploadMu           sync.Mutex
 	uploads            map[string]*uploadState
+	extractMu          sync.Mutex
+	extracts           map[string]*ExtractTask
 }
 
 type uploadState struct {
@@ -93,12 +96,20 @@ type uploadState struct {
 	finalOffset int64
 }
 
+type UploadStatus struct {
+	UploadID string `json:"upload_id"`
+	Offset   int64  `json:"offset"`
+	Complete bool   `json:"complete"`
+	Entry    *Entry `json:"entry,omitempty"`
+}
+
 func NewService(servers *serverservice.Service, processManager *supervisor.Manager, deployments *deployment.Manager, maxEdit, maxUpload, maxExtract, maxArchiveDownload int64, concurrentTransfers int) *Service {
 	return &Service{
 		servers: servers, supervisor: processManager, deployments: deployments,
 		maxEdit: maxEdit, maxUpload: maxUpload, maxExtract: maxExtract, maxArchiveDownload: maxArchiveDownload,
 		transfers: make(chan struct{}, concurrentTransfers),
 		uploads:   make(map[string]*uploadState),
+		extracts:  make(map[string]*ExtractTask),
 	}
 }
 
@@ -338,7 +349,16 @@ func (s *Service) Upload(target Target, relative string, source io.Reader, expec
 		}
 		targetPath, err := securePath(root, clean, true)
 		if err != nil {
-			return err
+			if apperr.From(err).Code != "FILE_NOT_FOUND" {
+				return err
+			}
+			if err := ensureUploadParent(root, clean); err != nil {
+				return err
+			}
+			targetPath, err = securePath(root, clean, true)
+			if err != nil {
+				return err
+			}
 		}
 		if info, statErr := os.Lstat(targetPath); statErr == nil {
 			if info.IsDir() || !info.Mode().IsRegular() {
@@ -400,7 +420,8 @@ func (s *Service) Upload(target Target, relative string, source io.Reader, expec
 }
 
 func (s *Service) UploadChunk(target Target, relative string, source io.Reader, expectedSize int64, expectedSHA string, overwrite bool, expectedVersion, sessionID string, offset int64, final bool) (Entry, int64, error) {
-	if strings.TrimSpace(sessionID) == "" {
+	sessionID = strings.TrimSpace(sessionID)
+	if !validUploadSessionID(sessionID) {
 		return Entry{}, 0, apperr.New("INVALID_REQUEST", "上传会话无效")
 	}
 	if expectedSize < 0 || expectedSize > s.maxUpload || offset < 0 || offset > expectedSize {
@@ -432,7 +453,16 @@ func (s *Service) UploadChunk(target Target, relative string, source io.Reader, 
 		}
 		targetPath, pathErr := securePath(root, clean, true)
 		if pathErr != nil {
-			return pathErr
+			if apperr.From(pathErr).Code != "FILE_NOT_FOUND" {
+				return pathErr
+			}
+			if parentErr := ensureUploadParent(root, clean); parentErr != nil {
+				return parentErr
+			}
+			targetPath, pathErr = securePath(root, clean, true)
+			if pathErr != nil {
+				return pathErr
+			}
 		}
 		tempPath := filepath.Join(filepath.Dir(targetPath), ".prism-upload-"+safeUploadSessionID(sessionID))
 		if !pathWithin(root, tempPath) {
@@ -465,19 +495,6 @@ func (s *Service) UploadChunk(target Target, relative string, source io.Reader, 
 			}
 			return apperr.New("UPLOAD_OFFSET_MISMATCH", "上传会话已经完成")
 		}
-		published := false
-		defer func() {
-			if final && !published {
-				if state.timer != nil {
-					state.timer.Stop()
-				}
-				_ = os.Remove(tempPath)
-				s.uploadMu.Lock()
-				delete(s.uploads, sessionID)
-				s.uploadMu.Unlock()
-			}
-		}()
-
 		file, openErr := os.OpenFile(tempPath, os.O_RDWR|os.O_CREATE, 0o640)
 		if openErr != nil {
 			return apperr.Wrap("FILE_WRITE_FAILED", "无法打开上传临时文件", openErr)
@@ -562,13 +579,106 @@ func (s *Service) UploadChunk(target Target, relative string, source io.Reader, 
 		state.published = true
 		state.entry = result
 		state.finalOffset = offset
-		published = true
 		return nil
 	})
 	if err != nil {
 		return Entry{}, 0, err
 	}
 	return result, nextOffset, nil
+}
+
+func (s *Service) UploadSessionStatus(target Target, relative, sessionID string) (UploadStatus, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if !validUploadSessionID(sessionID) {
+		return UploadStatus{}, apperr.New("INVALID_REQUEST", "上传会话无效")
+	}
+	clean, err := normalizeRelative(relative)
+	if err != nil || clean == "." {
+		return UploadStatus{}, apperr.New("INVALID_REQUEST", "上传目标路径无效")
+	}
+	root, err := s.root(target)
+	if err != nil {
+		return UploadStatus{}, err
+	}
+	targetPath, err := securePath(root, clean, true)
+	if err != nil {
+		return UploadStatus{}, err
+	}
+	tempPath := filepath.Join(filepath.Dir(targetPath), ".prism-upload-"+sessionID)
+
+	s.uploadMu.Lock()
+	state := s.uploads[sessionID]
+	s.uploadMu.Unlock()
+	if state != nil {
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		if !sameFilePath(state.path, tempPath) {
+			return UploadStatus{}, apperr.New("PERMISSION_DENIED", "上传会话与目标路径不匹配")
+		}
+		if state.published {
+			entry := state.entry
+			return UploadStatus{UploadID: sessionID, Offset: entry.Size, Complete: true, Entry: &entry}, nil
+		}
+	}
+
+	info, statErr := os.Stat(tempPath)
+	if errors.Is(statErr, os.ErrNotExist) {
+		return UploadStatus{UploadID: sessionID}, nil
+	}
+	if statErr != nil {
+		return UploadStatus{}, fileError(statErr, "无法读取上传会话")
+	}
+	return UploadStatus{UploadID: sessionID, Offset: info.Size()}, nil
+}
+
+func (s *Service) CancelUpload(target Target, relative, sessionID string) (UploadStatus, error) {
+	status, err := s.UploadSessionStatus(target, relative, sessionID)
+	if err != nil || status.Complete {
+		return status, err
+	}
+	err = s.mutate(target, func(root string) error {
+		clean, normalizeErr := normalizeRelative(relative)
+		if normalizeErr != nil || clean == "." {
+			return apperr.New("INVALID_REQUEST", "上传目标路径无效")
+		}
+		targetPath, pathErr := securePath(root, clean, true)
+		if pathErr != nil {
+			return pathErr
+		}
+		tempPath := filepath.Join(filepath.Dir(targetPath), ".prism-upload-"+sessionID)
+		s.uploadMu.Lock()
+		state := s.uploads[sessionID]
+		delete(s.uploads, sessionID)
+		s.uploadMu.Unlock()
+		if state != nil {
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if !sameFilePath(state.path, tempPath) {
+				return apperr.New("PERMISSION_DENIED", "上传会话与目标路径不匹配")
+			}
+			if state.timer != nil {
+				state.timer.Stop()
+			}
+		}
+		if removeErr := os.Remove(tempPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return fileError(removeErr, "无法取消上传会话")
+		}
+		return nil
+	})
+	return UploadStatus{UploadID: sessionID}, err
+}
+
+func validUploadSessionID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '-' && char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func safeUploadSessionID(value string) string {
@@ -915,6 +1025,34 @@ func securePath(root, relative string, allowMissingFinal bool) (string, error) {
 	return current, nil
 }
 
+func ensureUploadParent(root, relative string) error {
+	parent := path.Dir(relative)
+	if parent == "." {
+		return nil
+	}
+	current, err := filepath.Abs(root)
+	if err != nil {
+		return apperr.Wrap("INVALID_CONFIG", "无法解析工作目录", err)
+	}
+	for _, part := range strings.Split(parent, "/") {
+		current = filepath.Join(current, filepath.FromSlash(part))
+		info, statErr := os.Lstat(current)
+		switch {
+		case statErr == nil:
+			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+				return apperr.New("PATH_ESCAPE", "上传路径的父级不能是符号链接且必须是目录")
+			}
+		case errors.Is(statErr, os.ErrNotExist):
+			if mkdirErr := os.Mkdir(current, 0o750); mkdirErr != nil && !errors.Is(mkdirErr, os.ErrExist) {
+				return fileError(mkdirErr, "上传目录创建失败")
+			}
+		default:
+			return fileError(statErr, "上传目录不可用")
+		}
+	}
+	return nil
+}
+
 func ensureConfiguredDirectory(base, relative string) (string, error) {
 	absoluteBase, err := filepath.Abs(base)
 	if err != nil {
@@ -1068,9 +1206,13 @@ func decodeCursor(cursor string) (int, error) {
 func fileError(err error, message string) *apperr.Error {
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		return apperr.New("FILE_NOT_FOUND", "文件或目录不存在")
+		return apperr.Wrap("FILE_NOT_FOUND", "文件或目录不存在", err)
 	case errors.Is(err, os.ErrPermission):
-		return apperr.New("PERMISSION_DENIED", "节点进程无权访问文件或目录")
+		return apperr.Wrap("PERMISSION_DENIED", "节点进程无权访问文件或目录", err)
+	case errors.Is(err, syscall.ENOSPC):
+		return apperr.Wrap("DISK_FULL", "目标磁盘空间不足", err)
+	case errors.Is(err, syscall.EROFS):
+		return apperr.Wrap("READ_ONLY_FILESYSTEM", "目标文件系统为只读", err)
 	default:
 		return apperr.Wrap("FILE_OPERATION_FAILED", message, err)
 	}

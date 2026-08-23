@@ -1,8 +1,6 @@
 package supervisor
 
 import (
-	"io"
-	"os/exec"
 	"sync"
 	"time"
 
@@ -137,9 +135,7 @@ type instance struct {
 	cfg                   model.InstanceConfig
 	managed               bool
 	state                 State
-	cmd                   *exec.Cmd
-	stdin                 io.WriteCloser
-	done                  chan struct{}
+	session               *sessionConn
 	expectedExit          bool
 	sessionID             string
 	sequence              uint64

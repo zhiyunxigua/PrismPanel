@@ -13,7 +13,7 @@ import (
 func (s *Server) handleUsers(writer http.ResponseWriter, request *http.Request) {
 	switch request.Method {
 	case http.MethodGet:
-		if err := s.authorize(request, "user.view"); err != nil {
+		if err := s.authorizeAny(request, "user.view", "server.configure"); err != nil {
 			writeRequestError(writer, err)
 			return
 		}

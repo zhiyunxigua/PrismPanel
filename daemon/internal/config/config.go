@@ -52,8 +52,11 @@ type FilesConfig struct {
 }
 
 type ProcessConfig struct {
-	ConsoleBufferLines int `yaml:"console_buffer_lines"`
-	ShutdownTimeoutSec int `yaml:"shutdown_timeout_seconds"`
+	ConsoleBufferLines      int    `yaml:"console_buffer_lines"`
+	ShutdownTimeoutSec      int    `yaml:"shutdown_timeout_seconds"`
+	SessionOrphanTimeoutSec int    `yaml:"session_orphan_timeout_seconds"`
+	SessionSocket           string `yaml:"session_socket"`
+	SessionTokenFile        string `yaml:"session_token_file"`
 }
 
 func Default() Config {
@@ -70,8 +73,11 @@ func Default() Config {
 			CopyConcurrency:        4,
 		},
 		Process: ProcessConfig{
-			ConsoleBufferLines: 2000,
-			ShutdownTimeoutSec: 90,
+			ConsoleBufferLines:      2000,
+			ShutdownTimeoutSec:      90,
+			SessionOrphanTimeoutSec: 180,
+			SessionSocket:           defaultSessionSocket(),
+			SessionTokenFile:        defaultSessionTokenFile(),
 		},
 	}
 }
@@ -155,6 +161,15 @@ func (c Config) Validate() error {
 	if c.Process.ShutdownTimeoutSec <= 0 {
 		return errors.New("process.shutdown_timeout_seconds must be positive")
 	}
+	if c.Process.SessionOrphanTimeoutSec <= 0 {
+		return errors.New("process.session_orphan_timeout_seconds must be positive")
+	}
+	if strings.TrimSpace(c.Process.SessionSocket) == "" {
+		c.Process.SessionSocket = defaultSessionSocket()
+	}
+	if strings.TrimSpace(c.Process.SessionTokenFile) == "" {
+		c.Process.SessionTokenFile = defaultSessionTokenFile()
+	}
 	return nil
 }
 
@@ -210,4 +225,34 @@ func (c Config) DataDir() string {
 		return absolute
 	}
 	return filepath.Clean(c.Storage.DataDir)
+}
+
+func (c Config) SessionSocket() string {
+	path := strings.TrimSpace(c.Process.SessionSocket)
+	if path == "" {
+		path = defaultSessionSocket()
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	absolute, err := filepath.Abs(path)
+	if err == nil {
+		return absolute
+	}
+	return filepath.Clean(path)
+}
+
+func (c Config) SessionTokenFile() string {
+	path := strings.TrimSpace(c.Process.SessionTokenFile)
+	if path == "" {
+		path = defaultSessionTokenFile()
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	absolute, err := filepath.Abs(path)
+	if err == nil {
+		return absolute
+	}
+	return filepath.Clean(path)
 }

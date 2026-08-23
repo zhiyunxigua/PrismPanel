@@ -1,29 +1,27 @@
 export async function scanDroppedItems(dataTransfer) {
   const directories = [];
   const files = [];
-  const items = Array.from(dataTransfer?.items || []).filter((item) => item.kind === "file");
+  const items = Array.from(dataTransfer?.items || [])
+    .filter((item) => item.kind === "file")
+    .map(snapshotDropItem);
 
   for (const item of items) {
     let scanned = false;
-    if (typeof item.getAsFileSystemHandle === "function") {
+    if (item.entry) {
+      await scanEntry(item.entry, "", directories, files);
+      scanned = true;
+    }
+    if (!scanned && item.handlePromise) {
       try {
-        const handle = await item.getAsFileSystemHandle();
+        const handle = await item.handlePromise;
         if (handle) {
           await scanHandle(handle, "", directories, files);
           scanned = true;
         }
-      } catch { /* Fall through to the WebKit entry API or plain files. */ }
+      } catch { /* Fall through to the snapshotted plain file. */ }
     }
-    if (!scanned && typeof item.webkitGetAsEntry === "function") {
-      const entry = item.webkitGetAsEntry();
-      if (entry) {
-        await scanEntry(entry, "", directories, files);
-        scanned = true;
-      }
-    }
-    if (!scanned) {
-      const file = item.getAsFile();
-      if (file) files.push({ path: cleanRelativePath(file.name), file });
+    if (!scanned && item.file) {
+      files.push({ path: cleanRelativePath(item.file.name), file: item.file });
     }
   }
 
@@ -34,6 +32,25 @@ export async function scanDroppedItems(dataTransfer) {
     }
   }
   return normalizeScannedItems(directories, files);
+}
+
+function snapshotDropItem(item) {
+  const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+  let handlePromise = null;
+  if (!entry && typeof item.getAsFileSystemHandle === "function") {
+    try {
+      handlePromise = item.getAsFileSystemHandle();
+    } catch { /* Fall through to the plain file snapshot. */ }
+  }
+  let file = null;
+  if (!entry && typeof item.getAsFile === "function") {
+    try { file = item.getAsFile(); } catch { /* Use the captured handle when available. */ }
+  }
+  return {
+    entry,
+    handlePromise,
+    file,
+  };
 }
 
 export function plainUploadItems(files) {
@@ -98,10 +115,20 @@ function normalizeScannedItems(directories, files) {
     addDirectoryAndParents(directorySet, parentPath(path));
     normalizedFiles.push({ path, file: item.file });
   }
-  return {
-    directories: Array.from(directorySet).sort((left, right) => (
+  const sortedDirectories = Array.from(directorySet).sort((left, right) => (
       pathDepth(left) - pathDepth(right) || left.localeCompare(right)
-    )),
+    ));
+  const directoriesWithFiles = new Set();
+  for (const item of normalizedFiles) {
+    let current = parentPath(item.path);
+    while (current) {
+      directoriesWithFiles.add(current);
+      current = parentPath(current);
+    }
+  }
+  return {
+    directories: sortedDirectories,
+    emptyDirectories: sortedDirectories.filter((directory) => !directoriesWithFiles.has(directory)),
     files: normalizedFiles.sort((left, right) => left.path.localeCompare(right.path)),
   };
 }

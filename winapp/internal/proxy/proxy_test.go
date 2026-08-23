@@ -103,6 +103,36 @@ func TestProxyRejectsUnknownOrigin(t *testing.T) {
 	}
 }
 
+func TestProxyAllowsChunkedUploadHeaders(t *testing.T) {
+	target, err := url.Parse("https://panel.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := New(Config{Target: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodOptions, "/api/v1/files/proxy/upload", nil)
+	request.Header.Set("Origin", "wails://wails.localhost")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	request.Header.Set("Access-Control-Request-Headers", strings.Join([]string{
+		"authorization", "content-type", "x-prism-client-session", "x-prism-resource-type",
+		"x-prism-resource-id", "x-prism-path", "x-prism-overwrite", "x-prism-upload-id",
+		"x-prism-upload-offset", "x-prism-upload-final",
+	}, ", "))
+	response := httptest.NewRecorder()
+	proxy.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+	allowedHeaders := strings.ToLower(response.Header().Get("Access-Control-Allow-Headers"))
+	for _, header := range []string{"x-prism-upload-id", "x-prism-upload-offset", "x-prism-upload-final"} {
+		if !strings.Contains(allowedHeaders, header) {
+			t.Fatalf("preflight headers do not allow %q: %q", header, allowedHeaders)
+		}
+	}
+}
+
 func TestProxySessionMustBeCreatedBeforeUse(t *testing.T) {
 	target, err := url.Parse("https://panel.example.test")
 	if err != nil {

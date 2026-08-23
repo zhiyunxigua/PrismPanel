@@ -129,7 +129,7 @@ func NewServer(
 	mux.HandleFunc("/api/v1/files/authorize", server.requireAuth(server.handleFileAuthorize))
 	mux.HandleFunc("/api/v1/files/export", server.requireAuth(server.handleFileExport))
 	mux.HandleFunc("/api/v1/files/proxy/", server.requireAuth(server.handleFileProxy))
-	mux.HandleFunc("/api/v1/ws/console", server.requirePermission("console.read", server.handleConsoleProxy))
+	mux.HandleFunc("/api/v1/ws/console", server.requireAuth(server.handleConsoleProxy))
 	mux.Handle("/", frontendHandler(cfg.Frontend.Directory))
 	server.http = &http.Server{
 		Addr: net.JoinHostPort(cfg.Server.Listen, fmt.Sprintf("%d", cfg.Server.Port)),

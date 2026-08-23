@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"PrismPanel-daemon/internal/config"
@@ -72,6 +73,28 @@ func TestFileLifecycleAndVersionConflict(t *testing.T) {
 	}
 	if err := service.Delete(target, []string{"plugins"}, true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUploadCreatesMissingParentDirectories(t *testing.T) {
+	service, target, root := newTestService(t)
+	entry, err := service.Upload(target, "nested/deep/file.bin", bytes.NewReader([]byte("data")), 4, "", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Path != "nested/deep/file.bin" {
+		t.Fatalf("unexpected upload path: %q", entry.Path)
+	}
+	contents, err := os.ReadFile(filepath.Join(root, "nested", "deep", "file.bin"))
+	if err != nil || string(contents) != "data" {
+		t.Fatalf("uploaded contents = %q, err = %v", contents, err)
+	}
+	info, err := os.Stat(filepath.Join(root, "nested", "deep"))
+	if err != nil || !info.IsDir() {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o750 {
+		t.Fatalf("parent mode = %v", info.Mode().Perm())
 	}
 }
 

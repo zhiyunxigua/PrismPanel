@@ -14,6 +14,9 @@ func (s *Server) handleInstancePluginUpload(writer http.ResponseWriter, request 
 	filename := strings.TrimSpace(request.URL.Query().Get("filename"))
 	overwrite, _ := strconv.ParseBool(request.URL.Query().Get("overwrite"))
 	var err error
+	if nodeID != "" {
+		err = s.authorizeInstance(request, "plugin.upload", instanceID)
+	}
 	if nodeID == "" {
 		err = apiError("INVALID_REQUEST", "必须指定目标节点")
 	} else if filename == "" || !strings.EqualFold(fileExtension(filename), ".jar") {

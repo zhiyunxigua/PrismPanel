@@ -56,3 +56,27 @@ func TestHTTPSPublicURLWithTLSReverseProxy(t *testing.T) {
 		t.Fatalf("HTTPS public URL behind TLS reverse proxy was rejected: %v", err)
 	}
 }
+
+func TestDefaultSessionManagerEndpoints(t *testing.T) {
+	cfg := Default()
+	if cfg.Process.SessionSocket == "" {
+		t.Fatal("default session socket is empty")
+	}
+	if cfg.Process.SessionTokenFile == "" {
+		t.Fatal("default session token file is empty")
+	}
+	if cfg.SessionSocket() == "" || cfg.SessionTokenFile() == "" {
+		t.Fatalf("resolved session endpoints are empty: socket=%q token=%q", cfg.SessionSocket(), cfg.SessionTokenFile())
+	}
+}
+
+func TestDefaultSessionOrphanTimeout(t *testing.T) {
+	cfg := Default()
+	if cfg.Process.SessionOrphanTimeoutSec != 180 {
+		t.Fatalf("default session orphan timeout = %d", cfg.Process.SessionOrphanTimeoutSec)
+	}
+	cfg.Process.SessionOrphanTimeoutSec = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected zero session orphan timeout to be rejected")
+	}
+}

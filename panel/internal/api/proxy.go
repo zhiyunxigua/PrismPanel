@@ -21,12 +21,19 @@ var proxyUpgrader = websocket.Upgrader{
 }
 
 func (s *Server) handleConsoleProxy(writer http.ResponseWriter, request *http.Request) {
+	nodeID := strings.TrimSpace(request.URL.Query().Get("node_id"))
+	instanceID := strings.TrimSpace(request.URL.Query().Get("instance_id"))
+	if nodeID == "" || instanceID == "" {
+		return
+	}
+	if err := s.authorizeInstance(request, "console.read", instanceID); err != nil {
+		return
+	}
 	frontend, err := proxyUpgrader.Upgrade(writer, request, nil)
 	if err != nil {
 		return
 	}
 	defer frontend.Close()
-	nodeID := request.URL.Query().Get("node_id")
 	daemonURL, err := s.connections.ConsoleURL(nodeID)
 	if err != nil {
 		_ = frontend.WriteJSON(map[string]any{"type": "proxy.error", "message": err.Error()})

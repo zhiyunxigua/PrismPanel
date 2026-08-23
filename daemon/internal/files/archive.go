@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"PrismPanel-daemon/internal/apperr"
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 const maxArchiveEntries = 100000
@@ -124,6 +125,10 @@ func (s *Service) importArchive(root string, source io.Reader, expectedSize int6
 }
 
 func (s *Service) validateArchive(reader *zip.Reader) ([]archiveEntry, ImportResult, error) {
+	return s.validateArchiveEncoding(reader, "utf-8")
+}
+
+func (s *Service) validateArchiveEncoding(reader *zip.Reader, encoding string) ([]archiveEntry, ImportResult, error) {
 	if len(reader.File) > maxArchiveEntries {
 		return nil, ImportResult{}, apperr.New("INVALID_ARCHIVE", "压缩包条目数量超过限制")
 	}
@@ -131,7 +136,11 @@ func (s *Service) validateArchive(reader *zip.Reader) ([]archiveEntry, ImportRes
 	seen := make(map[string]struct{}, len(reader.File))
 	result := ImportResult{}
 	for _, file := range reader.File {
-		clean, err := normalizeArchiveEntry(file.Name)
+		name, err := decodeArchiveEntryName(file.Name, encoding)
+		if err != nil {
+			return nil, ImportResult{}, err
+		}
+		clean, err := normalizeArchiveEntry(name)
 		if err != nil {
 			return nil, ImportResult{}, err
 		}
@@ -163,6 +172,24 @@ func (s *Service) validateArchive(reader *zip.Reader) ([]archiveEntry, ImportRes
 		entries = append(entries, archiveEntry{file: file, path: clean})
 	}
 	return entries, result, nil
+}
+
+func decodeArchiveEntryName(name, encoding string) (string, error) {
+	switch encoding {
+	case "utf-8":
+		if !utf8.ValidString(name) {
+			return "", apperr.New("INVALID_ARCHIVE", "压缩包包含非 UTF-8 文件名，请选择正确的解压编码")
+		}
+		return name, nil
+	case "gbk":
+		decoded, err := simplifiedchinese.GBK.NewDecoder().Bytes([]byte(name))
+		if err != nil || !utf8.Valid(decoded) {
+			return "", apperr.New("INVALID_ARCHIVE", "压缩包文件名无法按 GBK 解码")
+		}
+		return string(decoded), nil
+	default:
+		return "", apperr.New("INVALID_REQUEST", "解压编码无效")
+	}
 }
 
 func normalizeArchiveEntry(name string) (string, error) {

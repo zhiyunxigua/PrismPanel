@@ -1,7 +1,7 @@
 <script setup>
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
-import { FileArchive } from "lucide-vue-next";
+import { FileArchive, Plus, Trash2 } from "lucide-vue-next";
 import TargetSelectionTree from "../TargetSelectionTree.vue";
 import { request } from "../../api";
 import { hasPermission } from "../../session";
@@ -40,6 +40,7 @@ const form = reactive({
   imageDirectory: "image",
   instanceCount: 1,
   portsText: "25565",
+  exclude: [],
   pluginConfigSyncExtensions: [...defaultPluginConfigSyncExtensions],
   startCommand: "java -jar server.jar nogui",
   stopCommand: "stop",
@@ -89,6 +90,22 @@ function selectedByTargetRules(rules, nodeId, serverId) {
   if (serverRule) return Boolean(serverRule.enabled);
   const nodeRule = rules.find((rule) => rule.node_id === nodeId && !rule.server_id);
   return Boolean(nodeRule?.enabled);
+}
+
+function normalizeExcludeEntries(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries.map((entry) => ({
+    type: entry?.type === "file" ? "file" : "directory",
+    path: String(entry?.path || ""),
+  }));
+}
+
+function addExcludeEntry() {
+  form.exclude.push({ type: "directory", path: "" });
+}
+
+function removeExcludeEntry(index) {
+  form.exclude.splice(index, 1);
 }
 
 async function loadProxyTargetDefaults() {
@@ -155,6 +172,7 @@ function resetForm() {
     imageDirectory: source?.image_directory || "image",
     instanceCount: source?.instance_count || 1,
     portsText: source?.ports?.join(", ") || "25565",
+    exclude: normalizeExcludeEntries(source?.exclude),
     pluginConfigSyncExtensions: source?.plugin_config_sync_extensions?.length
       ? [...source.plugin_config_sync_extensions]
       : [...defaultPluginConfigSyncExtensions],
@@ -255,6 +273,10 @@ async function submit() {
       ElMessage.warning("请提供足够数量的有效实例端口");
       return;
     }
+    if (form.exclude.some((entry) => !entry.path.trim())) {
+      ElMessage.warning("请填写排除项路径，或删除空白排除项");
+      return;
+    }
     if (!form.pluginConfigSyncExtensions.length) {
       ElMessage.warning("请至少保留一个插件配置文件后缀");
       return;
@@ -298,7 +320,10 @@ async function submit() {
       image_directory: form.imageDirectory.trim(),
       instance_count: form.instanceCount,
       ports: ports.slice(0, form.instanceCount),
-      exclude: props.server?.exclude || [],
+      exclude: form.exclude.map((entry) => ({
+        type: entry.type,
+        path: entry.path.trim(),
+      })),
       plugin_config_sync_extensions: form.pluginConfigSyncExtensions,
     });
   }
@@ -374,6 +399,37 @@ async function submit() {
         </div>
         <el-form-item label="实例端口">
           <el-input v-model="form.portsText" placeholder="25565, 25566, 25567" />
+        </el-form-item>
+        <el-form-item label="部署排除项">
+          <div class="exclude-editor">
+            <div v-for="(entry, index) in form.exclude" :key="index" class="exclude-row">
+              <el-select v-model="entry.type" class="exclude-type" :disabled="submitting">
+                <el-option label="目录（保留整个目录）" value="directory" />
+                <el-option label="文件（保留单个文件）" value="file" />
+              </el-select>
+              <el-input
+                v-model="entry.path"
+                :disabled="submitting"
+                placeholder="例如 world 或 server.properties"
+              />
+              <el-tooltip content="删除排除项">
+                <el-button
+                  class="square-button"
+                  type="danger"
+                  plain
+                  :disabled="submitting"
+                  aria-label="删除排除项"
+                  @click="removeExcludeEntry(index)"
+                >
+                  <Trash2 :size="15" />
+                </el-button>
+              </el-tooltip>
+            </div>
+            <el-button plain :disabled="submitting" @click="addExcludeEntry">
+              <Plus :size="15" />添加排除项
+            </el-button>
+            <small class="form-help">路径相对于每个实例目录；排除目录会保留其全部子目录和文件。</small>
+          </div>
         </el-form-item>
         <el-form-item label="插件配置同步后缀白名单">
           <el-select
@@ -465,4 +521,12 @@ async function submit() {
 
 <style scoped>
 .form-help { display: block; margin-top: 6px; color: var(--app-text-muted); font-size: 12px; line-height: 1.5; }
+.exclude-editor { display: grid; gap: 8px; width: 100%; }
+.exclude-row { display: grid; grid-template-columns: 190px minmax(0, 1fr) 32px; gap: 8px; align-items: start; }
+.exclude-type { min-width: 0; }
+
+@media (max-width: 560px) {
+  .exclude-row { grid-template-columns: minmax(0, 1fr) 32px; }
+  .exclude-type { grid-column: 1 / -1; }
+}
 </style>

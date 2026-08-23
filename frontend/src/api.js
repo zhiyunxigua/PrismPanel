@@ -1,12 +1,15 @@
 import { apiURL, runtimeHeaders, runtimeConfig } from "./runtime.js";
 
 export class ApiError extends Error {
-  constructor(code, message, status, requestId = "") {
+  constructor(code, message, status, requestId = "", options = {}) {
     super(message);
     this.name = "ApiError";
     this.code = code;
     this.status = status;
     this.requestId = requestId;
+    this.stage = options.stage || "";
+    this.details = Array.isArray(options.details) ? options.details : [];
+    this.retryable = Boolean(options.retryable);
   }
 }
 
@@ -33,6 +36,7 @@ export async function request(path, options = {}) {
       error.message || "请求失败",
       response.status,
       payload.request_id || response.headers.get("X-Request-ID") || "",
+      error,
     );
     apiError.data = payload.data;
     if (response.status === 401) {

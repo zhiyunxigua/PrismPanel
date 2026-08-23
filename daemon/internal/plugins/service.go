@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"PrismPanel-daemon/internal/apperr"
 	"PrismPanel-daemon/internal/model"
 	serverservice "PrismPanel-daemon/internal/server"
 	"PrismPanel-daemon/internal/supervisor"
@@ -100,11 +101,27 @@ type operationTarget struct {
 }
 
 func (s *Service) targets(serverID string) ([]operationTarget, func(), error) {
+	return s.targetsForInstance(serverID, "")
+}
+
+func (s *Service) targetsForInstance(serverID, instanceID string) ([]operationTarget, func(), error) {
 	cfg, err := s.servers.Get(serverID)
 	if err != nil {
 		return nil, nil, err
 	}
 	instances := cfg.Instances()
+	if instanceID != "" {
+		filtered := instances[:0]
+		for _, instance := range instances {
+			if instance.InstanceID == instanceID {
+				filtered = append(filtered, instance)
+			}
+		}
+		if len(filtered) == 0 {
+			return nil, nil, apperr.New("INSTANCE_NOT_FOUND", "instance not found")
+		}
+		instances = filtered
+	}
 	ids := make([]string, len(instances))
 	for index, instance := range instances {
 		ids[index] = instance.InstanceID

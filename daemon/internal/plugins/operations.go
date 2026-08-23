@@ -170,7 +170,7 @@ func (s *Service) SetEnabled(input OperationInput, enabled bool) (OperationResul
 	if strings.TrimSpace(input.PluginName) == "" {
 		return OperationResult{}, apperr.New("INVALID_REQUEST", "plugin_name is required")
 	}
-	targets, release, err := s.targets(input.ServerID)
+	targets, release, err := s.targetsForInstance(input.ServerID, input.InstanceID)
 	if err != nil {
 		return OperationResult{}, err
 	}
@@ -205,7 +205,7 @@ func (s *Service) Uninstall(input OperationInput) (OperationResult, error) {
 	if input.DeleteConfig && !validDirectoryName(input.ConfigDirectory) {
 		return OperationResult{}, apperr.New("INVALID_REQUEST", "config_directory is invalid")
 	}
-	targets, release, err := s.targets(input.ServerID)
+	targets, release, err := s.targetsForInstance(input.ServerID, input.InstanceID)
 	if err != nil {
 		return OperationResult{}, err
 	}

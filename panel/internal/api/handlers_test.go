@@ -62,6 +62,18 @@ func TestProxyFileScopeRequiresExpectedMethod(t *testing.T) {
 	if got := proxyFileScope("archive", "GET"); got != "" {
 		t.Fatalf("archive GET unexpectedly mapped to %q", got)
 	}
+	if got := proxyFileScope("extract", "POST"); got != "file.extract" {
+		t.Fatalf("extract POST scope = %q", got)
+	}
+	if got := proxyFileScope("extract-status", "POST"); got != "file.extract.status" {
+		t.Fatalf("extract-status POST scope = %q", got)
+	}
+	if got := proxyFileScope("upload-status", "POST"); got != "file.upload.status" {
+		t.Fatalf("upload-status POST scope = %q", got)
+	}
+	if got := proxyFileScope("upload-cancel", "POST"); got != "file.upload.cancel" {
+		t.Fatalf("upload-cancel POST scope = %q", got)
+	}
 }
 
 func TestSanitizeInstanceMessagesProtectsPlayerAndPluginDetails(t *testing.T) {

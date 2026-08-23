@@ -964,20 +964,23 @@ code {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
-.deployment-target-grid .el-checkbox {
+.deployment-target-grid .el-checkbox,
+.deployment-target-grid .el-radio {
   width: 100%;
   height: auto;
   min-height: 54px;
   margin: 0;
   padding: 9px 11px;
 }
-.deployment-target-grid .el-checkbox__label {
+.deployment-target-grid .el-checkbox__label,
+.deployment-target-grid .el-radio__label {
   display: grid;
   min-width: 0;
   gap: 3px;
   overflow: hidden;
 }
-.deployment-target-grid .el-checkbox__label span {
+.deployment-target-grid .el-checkbox__label span,
+.deployment-target-grid .el-radio__label span {
   overflow: hidden;
   color: #344039;
   font-size: 11px;
@@ -985,7 +988,8 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.deployment-target-grid .el-checkbox__label small { color: #7c867f; font-size: 9px; }
+.deployment-target-grid .el-checkbox__label small,
+.deployment-target-grid .el-radio__label small { color: #7c867f; font-size: 9px; }
 .deployment-task-head {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1402,6 +1406,7 @@ html.dark .instance-overview-primary,
 html.dark .core-metric,
 html.dark .deployment-source,
 html.dark .deployment-target-grid .el-checkbox,
+html.dark .deployment-target-grid .el-radio,
 html.dark .deployment-task-head > div,
 html.dark .deployment-copy-progress,
 html.dark .net-game-image-link,
@@ -1420,6 +1425,7 @@ html.dark .server-card-metrics strong,
 html.dark .instance-overview-primary strong,
 html.dark .core-metric strong,
 html.dark .deployment-target-grid .el-checkbox__label span,
+html.dark .deployment-target-grid .el-radio__label span,
 html.dark .deployment-copy-head strong,
 html.dark .plugin-conflict-content p,
 html.dark .net-games-status strong,
@@ -1535,7 +1541,8 @@ html.dark .instance-overview-foot > span,
 html.dark .host-metric-summary span,
 html.dark .core-metric span,
 html.dark .deployment-source span,
-html.dark .deployment-target-grid .el-checkbox__label small { color: var(--app-text-muted); }
+html.dark .deployment-target-grid .el-checkbox__label small,
+html.dark .deployment-target-grid .el-radio__label small { color: var(--app-text-muted); }
 html.dark .brand span,
 html.dark .sidebar-status span { color: #a5a5a5; }
 html.dark .sidebar-status strong { color: #ededed; }

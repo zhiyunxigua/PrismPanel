@@ -107,6 +107,66 @@ func (m *Manager) deployFiles(item *task, cfg model.ServerConfig, target supervi
 	return nil
 }
 
+func (m *Manager) syncInstanceBackToImage(item *task, cfg model.ServerConfig, source supervisor.DeploymentTarget) (resultErr error) {
+	root := filepath.Clean(cfg.RootPath)
+	sourcePath := filepath.Clean(source.Workspace)
+	imagePath := filepath.Join(root, cfg.ImageDirectory)
+	if filepath.Dir(sourcePath) != root {
+		return apperr.New("PATH_ESCAPE", "镜像实例目录不在镜像根目录内")
+	}
+	tempPath := filepath.Join(root, ".image-sync-"+cfg.ServerID+"-"+item.TaskID)
+	backupPath := filepath.Join(root, ".image-backup-"+cfg.ServerID+"-"+item.TaskID)
+	if pathExists(tempPath) || pathExists(backupPath) {
+		return apperr.New("ROLLBACK_FAILED", "镜像源同步临时目录或备份目录已存在")
+	}
+	if err := os.Mkdir(tempPath, 0o750); err != nil {
+		return apperr.Wrap("INTERNAL", "无法创建镜像源同步临时目录", err)
+	}
+	defer func() {
+		if pathExists(tempPath) {
+			if err := safeRemoveDeploymentDirectory(root, tempPath); resultErr == nil && err != nil {
+				resultErr = err
+			}
+		}
+	}()
+
+	m.log(item, "info", "scanning_instance", source.InstanceID, "正在扫描实例内容")
+	m.beginCopyProgress(item, "scanning_instance", 0, 0)
+	files, bytes, err := scanTree(item.context, sourcePath, nil)
+	if err != nil {
+		return err
+	}
+	m.beginCopyProgress(item, "copying_instance", files, bytes)
+	m.log(item, "info", "copying_instance", source.InstanceID,
+		fmt.Sprintf("正在使用 %d 个工作线程复制 %d 个文件", m.copyConcurrency, files))
+	if err := m.copyTree(item.context, sourcePath, tempPath, nil, func(bytes int64, fileDone bool) {
+		m.advanceCopyProgress(item, bytes, fileDone)
+	}); err != nil {
+		return err
+	}
+	if err := item.context.Err(); err != nil {
+		return err
+	}
+	m.setCopyStage(item, "finalizing_image")
+	m.log(item, "info", "swapping_image", source.InstanceID, "正在切换镜像源目录")
+
+	if err := os.Rename(imagePath, backupPath); err != nil {
+		return apperr.Wrap("INTERNAL", "无法创建原镜像源目录备份", err)
+	}
+	if err := os.Rename(tempPath, imagePath); err != nil {
+		if rollbackErr := os.Rename(backupPath, imagePath); rollbackErr != nil {
+			return apperr.Wrap("ROLLBACK_FAILED", "镜像源同步失败且无法恢复原镜像源目录", errors.Join(err, rollbackErr))
+		}
+		return apperr.Wrap("INTERNAL", "无法启用新的镜像源目录", err)
+	}
+	if err := safeRemoveDeploymentDirectory(root, backupPath); err != nil {
+		return apperr.Wrap("ROLLBACK_FAILED", "新镜像源目录已启用，但旧镜像源备份清理失败", err)
+	}
+	m.log(item, "info", "copying_instance", source.InstanceID,
+		fmt.Sprintf("实例复制完成，%d 个文件，%d 字节", files, bytes))
+	return nil
+}
+
 func (m *Manager) copyTree(
 	ctx context.Context,
 	sourceRoot string,
@@ -421,13 +481,18 @@ func copyFileWithBuffer(
 }
 
 func safeRemoveAll(root, target string) error {
+	return safeRemoveDeploymentDirectory(root, target)
+}
+
+func safeRemoveDeploymentDirectory(root, target string) error {
 	cleanRoot := filepath.Clean(root)
 	cleanTarget := filepath.Clean(target)
 	if filepath.Dir(cleanTarget) != cleanRoot {
 		return apperr.New("PATH_ESCAPE", "拒绝删除镜像根目录外的部署临时目录")
 	}
 	base := filepath.Base(cleanTarget)
-	if !strings.HasPrefix(base, ".deploy-") && !strings.HasPrefix(base, ".backup-") {
+	if !strings.HasPrefix(base, ".deploy-") && !strings.HasPrefix(base, ".backup-") &&
+		!strings.HasPrefix(base, ".image-sync-") && !strings.HasPrefix(base, ".image-backup-") {
 		return apperr.New("PATH_ESCAPE", "拒绝删除非部署临时目录")
 	}
 	return os.RemoveAll(cleanTarget)

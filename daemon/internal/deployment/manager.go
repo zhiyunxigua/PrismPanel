@@ -34,6 +34,7 @@ const (
 const (
 	TaskKindMirrorDeploy     = "mirror_deploy"
 	TaskKindPluginConfigSync = "plugin_config_sync"
+	TaskKindImageSyncBack    = "image_sync_back"
 )
 
 type Log struct {
@@ -101,22 +102,39 @@ func (m *Manager) StartPluginConfigSync(serverID string, requested []int) (Snaps
 	return m.start(serverID, requested, TaskKindPluginConfigSync)
 }
 
+func (m *Manager) StartImageSyncBack(serverID string, requested []int) (Snapshot, error) {
+	return m.start(serverID, requested, TaskKindImageSyncBack)
+}
+
 func (m *Manager) start(serverID string, requested []int, kind string) (Snapshot, error) {
 	cfg, err := m.servers.Get(serverID)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	if cfg.Type != "mirror" {
-		return Snapshot{}, apperr.New("INVALID_STATE", "只有镜像服务器组可以执行镜像部署")
+		return Snapshot{}, apperr.New("INVALID_STATE", "只有镜像服务器组可以执行该任务")
 	}
 	imageLock := m.imageLock(serverID)
-	imageLock.RLock()
+	unlockImage := imageLock.RUnlock
+	if kind == TaskKindImageSyncBack {
+		if !imageLock.TryLock() {
+			return Snapshot{}, apperr.New("INSTANCE_BUSY", "镜像源正在被其他任务使用")
+		}
+		unlockImage = imageLock.Unlock
+	} else {
+		if !imageLock.TryRLock() {
+			return Snapshot{}, apperr.New("INSTANCE_BUSY", "镜像源正在被其他任务使用")
+		}
+	}
 	imageLocked := true
 	defer func() {
 		if imageLocked {
-			imageLock.RUnlock()
+			unlockImage()
 		}
 	}()
+	if kind == TaskKindImageSyncBack && len(requested) != 1 {
+		return Snapshot{}, apperr.New("INVALID_REQUEST", "同步回镜像源必须且只能选择一个实例")
+	}
 	targets, err := normalizeTargets(requested, cfg.InstanceCount)
 	if err != nil {
 		return Snapshot{}, err
@@ -129,6 +147,11 @@ func (m *Manager) start(serverID string, requested []int, kind string) (Snapshot
 	taskID := "deploy-" + randomID()
 	if err := precheckResidualDirectories(cfg, targets); err != nil {
 		return Snapshot{}, err
+	}
+	if kind == TaskKindImageSyncBack {
+		if err := precheckImageSyncResidualDirectories(cfg); err != nil {
+			return Snapshot{}, err
+		}
 	}
 	instanceIDs := make([]string, len(targets))
 	for index, slot := range targets {
@@ -161,7 +184,7 @@ func (m *Manager) start(serverID string, requested []int, kind string) (Snapshot
 		},
 		context: ctx, cancel: cancel, release: func() {
 			release()
-			imageLock.RUnlock()
+			unlockImage()
 		},
 	}
 	imageLocked = false
@@ -170,6 +193,8 @@ func (m *Manager) start(serverID string, requested []int, kind string) (Snapshot
 	message := "部署任务已进入队列"
 	if kind == TaskKindPluginConfigSync {
 		message = "插件配置同步任务已进入队列"
+	} else if kind == TaskKindImageSyncBack {
+		message = "同步回镜像源任务已进入队列"
 	}
 	m.appendLogLocked(item, "info", "queued", "", message)
 	snapshot := cloneSnapshot(item.Snapshot)
@@ -235,6 +260,8 @@ func (m *Manager) Cancel(taskID string, force bool) (Snapshot, error) {
 		message := "已请求强制结束部署"
 		if item.Kind == TaskKindPluginConfigSync {
 			message = "已请求强制结束插件配置同步"
+		} else if item.Kind == TaskKindImageSyncBack {
+			message = "已请求强制结束镜像源同步"
 		}
 		m.appendLogLocked(item, "warn", "force_stop_requested", item.CurrentInstance, message)
 	} else {
@@ -242,6 +269,8 @@ func (m *Manager) Cancel(taskID string, force bool) (Snapshot, error) {
 		message := "已请求在安全点取消部署"
 		if item.Kind == TaskKindPluginConfigSync {
 			message = "已请求在安全点取消插件配置同步"
+		} else if item.Kind == TaskKindImageSyncBack {
+			message = "已请求在安全点取消镜像源同步"
 		}
 		m.appendLogLocked(item, "warn", "cancel_requested", item.CurrentInstance, message)
 	}
@@ -260,6 +289,8 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 	message := "部署预检查完成"
 	if item.Kind == TaskKindPluginConfigSync {
 		message = "插件配置同步预检查完成"
+	} else if item.Kind == TaskKindImageSyncBack {
+		message = "同步回镜像源预检查完成"
 	}
 	m.appendLogLocked(item, "info", "prechecking", "", message)
 	m.mu.Unlock()
@@ -282,6 +313,9 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 		if item.Kind == TaskKindPluginConfigSync {
 			stage = "syncing_plugin_config"
 			message = "正在准备插件配置同步"
+		} else if item.Kind == TaskKindImageSyncBack {
+			stage = "stopping"
+			message = "正在准备来源实例"
 		}
 		m.appendLogLocked(item, "info", stage, instanceID, message)
 		m.mu.Unlock()
@@ -298,6 +332,9 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 			err = m.supervisor.DeployInstance(
 				instanceID,
 				func(target supervisor.DeploymentTarget) error {
+					if item.Kind == TaskKindImageSyncBack {
+						return m.syncInstanceBackToImage(item, cfg, target)
+					}
 					return m.deployFiles(item, cfg, target)
 				},
 				func() bool { return !m.isForce(item) },
@@ -319,6 +356,8 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 			message := "目标实例部署完成"
 			if item.Kind == TaskKindPluginConfigSync {
 				message = "目标实例插件配置同步完成"
+			} else if item.Kind == TaskKindImageSyncBack {
+				message = "实例内容已同步回镜像源"
 			}
 			m.appendLogLocked(item, "info", "completed", instanceID, message)
 			m.mu.Unlock()
@@ -337,6 +376,8 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 		message := "部署完成，但部分实例失败"
 		if item.Kind == TaskKindPluginConfigSync {
 			message = "插件配置同步完成，但部分实例失败"
+		} else if item.Kind == TaskKindImageSyncBack {
+			message = "同步回镜像源失败"
 		}
 		m.appendLogLocked(item, "warn", "completed", "", message)
 	} else {
@@ -345,6 +386,8 @@ func (m *Manager) run(item *task, cfg model.ServerConfig) {
 		message := "全部目标实例部署完成"
 		if item.Kind == TaskKindPluginConfigSync {
 			message = "全部目标实例插件配置同步完成"
+		} else if item.Kind == TaskKindImageSyncBack {
+			message = "实例内容已全部同步回镜像源"
 		}
 		m.appendLogLocked(item, "info", "completed", "", message)
 	}
@@ -364,6 +407,9 @@ func (m *Manager) finishCancelled(item *task) {
 		if item.Kind == TaskKindPluginConfigSync {
 			item.Error = "plugin config sync force stopped"
 			message = "插件配置同步已强制结束，已完成目标不会回滚"
+		} else if item.Kind == TaskKindImageSyncBack {
+			item.Error = "image sync back force stopped"
+			message = "镜像源同步已强制结束，目录切换仍保持事务完整"
 		}
 		m.appendLogLocked(item, "warn", "force_stopped", "", message)
 	} else {
@@ -373,6 +419,9 @@ func (m *Manager) finishCancelled(item *task) {
 		if item.Kind == TaskKindPluginConfigSync {
 			item.Error = "plugin config sync cancelled"
 			message = "插件配置同步已在安全点取消"
+		} else if item.Kind == TaskKindImageSyncBack {
+			item.Error = "image sync back cancelled"
+			message = "镜像源同步已在安全点取消"
 		}
 		m.appendLogLocked(item, "warn", "cancelled", "", message)
 	}
@@ -466,6 +515,19 @@ func precheckResidualDirectories(cfg model.ServerConfig, targets []int) error {
 			if len(matches) > 0 {
 				return apperr.New("ROLLBACK_FAILED", "存在未处理的部署残留目录")
 			}
+		}
+	}
+	return nil
+}
+
+func precheckImageSyncResidualDirectories(cfg model.ServerConfig) error {
+	for _, prefix := range []string{".image-sync-", ".image-backup-"} {
+		matches, err := filepath.Glob(filepath.Join(cfg.RootPath, prefix+cfg.ServerID+"-*"))
+		if err != nil {
+			return apperr.Wrap("INVALID_CONFIG", "无法检查镜像源同步残留目录", err)
+		}
+		if len(matches) > 0 {
+			return apperr.New("ROLLBACK_FAILED", "存在未处理的镜像源同步残留目录")
 		}
 	}
 	return nil

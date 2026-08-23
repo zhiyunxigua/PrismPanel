@@ -26,6 +26,7 @@ echo === Building %TARGET_OS%/%TARGET_ARCH% ===
 
 if not exist "%TARGET_DIR%/daemon" mkdir "%TARGET_DIR%/daemon"
 if not exist "%TARGET_DIR%/panel" mkdir "%TARGET_DIR%/panel"
+if not exist "%TARGET_DIR%/sessiond" mkdir "%TARGET_DIR%/sessiond"
 if exist "%TARGET_DIR%/frontend" rmdir /S /Q "%TARGET_DIR%/frontend"
 mkdir "%TARGET_DIR%/frontend"
 
@@ -33,6 +34,9 @@ call "%~dp0daemon/build.bat" "%TARGET_OS%" "%TARGET_ARCH%" "%TARGET_DIR%/daemon/
 if errorlevel 1 exit /b 1
 
 call "%~dp0panel/build.bat" "%TARGET_OS%" "%TARGET_ARCH%" "%TARGET_DIR%/panel/prism-panel%EXECUTABLE_SUFFIX%"
+if errorlevel 1 exit /b 1
+
+call "%~dp0sessiond/build.bat" "%TARGET_OS%" "%TARGET_ARCH%" "%TARGET_DIR%/sessiond/prism-sessiond%EXECUTABLE_SUFFIX%"
 if errorlevel 1 exit /b 1
 
 xcopy "%~dp0frontend\dist\*" "%TARGET_DIR%\frontend\" /E /I /Y /Q >nul

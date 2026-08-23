@@ -128,6 +128,79 @@ func TestPluginConfigSyncUsesWhitelistAndPreservesTargetFiles(t *testing.T) {
 	}
 }
 
+func TestImageSyncBackReplacesImageWithSelectedInstance(t *testing.T) {
+	root := t.TempDir()
+	image := filepath.Join(root, "image")
+	instancePath := filepath.Join(root, "bedwars_1")
+	mustWrite(t, filepath.Join(image, "obsolete.txt"), "obsolete")
+	mustWrite(t, filepath.Join(image, "config.txt"), "old image config")
+	mustWrite(t, filepath.Join(instancePath, "config.txt"), "instance config")
+	mustWrite(t, filepath.Join(instancePath, "world", "level.dat"), "updated world")
+	mustWrite(t, filepath.Join(instancePath, "server.properties"), "server-port=25571\n")
+
+	serverConfig := model.ServerConfig{
+		SchemaVersion: model.SchemaVersion, Type: "mirror", ServerID: "bedwars", Name: "BedWars",
+		RootPath: root, ImageDirectory: "image", InstanceCount: 1, Ports: []int{25571},
+		Exclude: []model.ExcludeEntry{{Path: "world", Type: "directory"}},
+		Process: model.ProcessConfig{
+			StartCommand: "java -jar server.jar", StopCommand: "stop", StopTimeoutSeconds: 5,
+		},
+		Console: model.ConsoleConfig{Encoding: "utf-8"},
+	}
+	processManager, err := supervisor.NewManager(config.Default(), &eventbus.Bus{}, []model.ServerConfig{serverConfig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverService := serverservice.NewService(
+		store.NewServerStore(t.TempDir()), processManager, []model.ServerConfig{serverConfig},
+	)
+	manager := NewManager(serverService, processManager, 2)
+	started, err := manager.StartImageSyncBack("bedwars", []int{1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := waitForDeployment(t, manager, started.TaskID)
+	if result.Status != StatusCompleted || result.Kind != TaskKindImageSyncBack {
+		t.Fatalf("image sync back failed: %#v", result)
+	}
+	assertContents(t, filepath.Join(image, "config.txt"), "instance config")
+	assertContents(t, filepath.Join(image, "world", "level.dat"), "updated world")
+	assertContents(t, filepath.Join(image, "server.properties"), "server-port=25571\n")
+	if _, err := os.Stat(filepath.Join(image, "obsolete.txt")); !os.IsNotExist(err) {
+		t.Fatalf("image-only file should be removed, got %v", err)
+	}
+	residual, err := filepath.Glob(filepath.Join(root, ".image-*-bedwars-*"))
+	if err != nil || len(residual) != 0 {
+		t.Fatalf("image sync left residual directories: %v, %v", residual, err)
+	}
+}
+
+func TestImageSyncBackRequiresExactlyOneInstance(t *testing.T) {
+	root := t.TempDir()
+	mustWrite(t, filepath.Join(root, "image", "server.jar"), "jar")
+	serverConfig := model.ServerConfig{
+		SchemaVersion: model.SchemaVersion, Type: "mirror", ServerID: "bedwars", Name: "BedWars",
+		RootPath: root, ImageDirectory: "image", InstanceCount: 2, Ports: []int{25571, 25572},
+		Process: model.ProcessConfig{
+			StartCommand: "java -jar server.jar", StopCommand: "stop", StopTimeoutSeconds: 5,
+		},
+		Console: model.ConsoleConfig{Encoding: "utf-8"},
+	}
+	processManager, err := supervisor.NewManager(config.Default(), &eventbus.Bus{}, []model.ServerConfig{serverConfig})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverService := serverservice.NewService(
+		store.NewServerStore(t.TempDir()), processManager, []model.ServerConfig{serverConfig},
+	)
+	manager := NewManager(serverService, processManager, 1)
+	for _, targets := range [][]int{nil, {1, 2}} {
+		if _, err := manager.StartImageSyncBack("bedwars", targets); err == nil {
+			t.Fatalf("expected target validation error for %v", targets)
+		}
+	}
+}
+
 func waitForDeployment(t *testing.T, manager *Manager, taskID string) Snapshot {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

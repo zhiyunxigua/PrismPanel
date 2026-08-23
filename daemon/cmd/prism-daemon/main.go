@@ -114,6 +114,7 @@ func run() error {
 		cfg, secretFile.Secret, secretFile.NodeID, serverService, manager, ticketManager,
 		deploymentManager, pluginManager, fileManager, firewallManager, events, slog.Default(),
 	)
+	var listen = httpServer.ListenAndServe
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -126,8 +127,9 @@ func run() error {
 			scheme = "https"
 		}
 		slog.Info("daemon listening", "address", fmt.Sprintf("%s://%s:%d", scheme, cfg.Server.Listen, cfg.Server.Port))
-		serverError <- httpServer.ListenAndServe()
+		serverError <- listen()
 	}()
+	manager.RecoverSessions()
 	manager.StartAuto()
 
 	select {

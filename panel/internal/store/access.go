@@ -65,6 +65,23 @@ var permissionDefinitions = []PermissionDefinition{
 	{Code: "system.settings", Name: "修改系统设置", Category: "系统"},
 }
 
+var instanceAdminPermissions = map[string]struct{}{
+	"instance.start": {}, "instance.stop": {}, "instance.restart": {}, "instance.kill": {},
+	"console.read": {}, "console.command": {},
+	"file.read": {}, "file.write": {}, "file.delete": {},
+	"player.view": {}, "player.kick": {}, "player.message": {}, "player.whitelist.manage": {}, "player.op.manage": {},
+	"plugin.view": {}, "plugin.upload": {}, "plugin.deploy": {}, "plugin.remove": {},
+}
+
+func InstanceAdminPermissions() []string {
+	permissions := make([]string, 0, len(instanceAdminPermissions))
+	for permission := range instanceAdminPermissions {
+		permissions = append(permissions, permission)
+	}
+	sort.Strings(permissions)
+	return permissions
+}
+
 func newID() (string, error) {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {
@@ -173,6 +190,17 @@ func (s *Store) Can(ctx context.Context, user User, permission string) (bool, er
 	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM group_permissions
 		WHERE group_code = ? AND permission_code = ?`, user.GroupCode, permission).Scan(&count)
 	return count > 0, err
+}
+
+func (s *Store) CanInstance(ctx context.Context, user User, permission, nodeID, instanceID string) (bool, error) {
+	allowed, err := s.Can(ctx, user, permission)
+	if err != nil || allowed {
+		return allowed, err
+	}
+	if _, scoped := instanceAdminPermissions[permission]; !scoped {
+		return false, nil
+	}
+	return s.IsInstanceAdmin(ctx, nodeID, instanceID, user.ID)
 }
 
 func (s *Store) ListUserGroups(ctx context.Context) ([]UserGroup, error) {

@@ -62,7 +62,7 @@ type RestrictedOptions struct {
 }
 
 func (m *Manager) CreateRestricted(options RestrictedOptions) (Ticket, error) {
-	if options.ResourceType != "instance" && options.ResourceType != "image" {
+	if options.ResourceType != "instance" && options.ResourceType != "image" && options.ResourceType != "daemon" {
 		return Ticket{}, apperr.New("INVALID_TICKET", "文件凭证资源类型无效")
 	}
 	if strings.TrimSpace(options.ResourceID) == "" || strings.TrimSpace(options.Method) == "" {
