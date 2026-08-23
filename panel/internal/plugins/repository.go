@@ -179,7 +179,8 @@ func (r *Repository) Upload(input UploadInput) (UploadResult, error) {
 		PluginID: pluginID, PluginType: input.PluginType,
 		Name: primary.Name, Version: primary.Version,
 		Main: primary.Main, Authors: append([]string(nil), primary.Authors...),
-		Description: primary.Description, Website: primary.Website, Descriptors: descriptors,
+		Description: primary.Description, Website: primary.Website,
+		ModMetadata: primary.ModMetadata, Descriptors: descriptors,
 		Artifact: ArtifactFile{
 			File: "plugin.jar", OriginalFilename: input.JARFilename,
 			SHA256: jarHashText, Size: int64(len(input.JAR)),

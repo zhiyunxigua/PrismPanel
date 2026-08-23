@@ -45,6 +45,38 @@ type MCServerSeriesResponse struct {
 	Games       []MCServerSeriesGame `json:"games"`
 }
 
+// MCServerSummaryServer 是总览页对比表格中的一行：服务器元信息 + 最近一次采集结果。
+type MCServerSummaryServer struct {
+	ID            uint64     `json:"id"`
+	Name          string     `json:"name"`
+	ServerKey     string     `json:"server_key"`
+	Host          string     `json:"host"`
+	Port          uint16     `json:"port"`
+	Enabled       bool       `json:"enabled"`
+	Note          string     `json:"note"`
+	LastStatus    string     `json:"last_status"`
+	LastOnline    *uint32    `json:"last_online,omitempty"`
+	LastMax       *uint32    `json:"last_max,omitempty"`
+	LastLatencyMS *uint32    `json:"last_latency_ms,omitempty"`
+	LastVersion   string     `json:"last_version"`
+	LastError     string     `json:"last_error"`
+	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
+}
+
+// MCServerSummary 是全服总览聚合：各服务器最新状态 + 汇总统计，供总览页摘要卡片与对比表格渲染。
+type MCServerSummary struct {
+	GeneratedAt    time.Time               `json:"generated_at"`
+	TotalServers   int                     `json:"total_servers"`
+	OnlineServers  int                     `json:"online_servers"`
+	FailedServers  int                     `json:"failed_servers"`
+	UnknownServers int                     `json:"unknown_servers"`
+	TotalOnline    uint32                  `json:"total_online"`
+	TotalMax       uint32                  `json:"total_max"`
+	AverageLatency *uint32                 `json:"average_latency_ms,omitempty"` // 在线服务器延迟均值，无在线服时为 null
+	LastCheckedAt  *time.Time              `json:"last_checked_at,omitempty"`
+	Servers        []MCServerSummaryServer `json:"servers"`
+}
+
 // MCServers 返回全部国际服（含最近一次 ping 状态）。
 func (s *Service) MCServers(ctx context.Context) ([]store.MCServer, error) {
 	return s.store.ListMCServers(ctx)
@@ -53,6 +85,69 @@ func (s *Service) MCServers(ctx context.Context) ([]store.MCServer, error) {
 // MCServer 返回单个国际服。
 func (s *Service) MCServer(ctx context.Context, id uint64) (store.MCServer, error) {
 	return s.store.GetMCServer(ctx, id)
+}
+
+// MCServerSummary 返回全服总览聚合：每台服务器的最新状态 + 汇总统计。
+// 汇总口径：在线总人数/总最大人数只统计最近一次状态为 ok 的服务器；
+// 平均延迟为在线服务器最近一次延迟的算术均值（四舍五入），无在线服时为 nil。
+func (s *Service) MCServerSummary(ctx context.Context) (MCServerSummary, error) {
+	servers, err := s.store.ListMCServers(ctx)
+	if err != nil {
+		return MCServerSummary{}, err
+	}
+	summary := MCServerSummary{
+		GeneratedAt: time.Now().UTC(),
+		Servers:     make([]MCServerSummaryServer, 0, len(servers)),
+	}
+	var latencySum uint64
+	var latencyCount int
+	for _, server := range servers {
+		item := MCServerSummaryServer{
+			ID:            server.ID,
+			Name:          server.Name,
+			ServerKey:     server.ServerKey,
+			Host:          server.Host,
+			Port:          server.Port,
+			Enabled:       server.Enabled,
+			Note:          server.Note,
+			LastStatus:    server.LastStatus,
+			LastVersion:   server.LastVersion,
+			LastError:     server.LastError,
+			LastOnline:    server.LastOnline,
+			LastMax:       server.LastMax,
+			LastLatencyMS: server.LastLatencyMS,
+			LastCheckedAt: server.LastCheckedAt,
+		}
+		summary.TotalServers++
+		switch server.LastStatus {
+		case store.MCServerStatusOK:
+			summary.OnlineServers++
+			if server.LastOnline != nil {
+				summary.TotalOnline += *server.LastOnline
+			}
+			if server.LastMax != nil {
+				summary.TotalMax += *server.LastMax
+			}
+			if server.LastLatencyMS != nil {
+				latencySum += uint64(*server.LastLatencyMS)
+				latencyCount++
+			}
+		case store.MCServerStatusFailed:
+			summary.FailedServers++
+		default:
+			summary.UnknownServers++
+		}
+		if server.LastCheckedAt != nil &&
+			(summary.LastCheckedAt == nil || server.LastCheckedAt.After(*summary.LastCheckedAt)) {
+			summary.LastCheckedAt = server.LastCheckedAt
+		}
+		summary.Servers = append(summary.Servers, item)
+	}
+	if latencyCount > 0 {
+		average := uint32((latencySum + uint64(latencyCount)/2) / uint64(latencyCount))
+		summary.AverageLatency = &average
+	}
+	return summary, nil
 }
 
 // normalizeMCServerInput 校验并规范化创建/更新国际服的输入：

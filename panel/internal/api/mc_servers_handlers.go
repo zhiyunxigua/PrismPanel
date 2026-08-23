@@ -125,6 +125,19 @@ func (s *Server) handleMCServerSeries(writer http.ResponseWriter, request *http.
 	writeSuccess(writer, series)
 }
 
+func (s *Server) handleMCServerSummary(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, "GET")
+		return
+	}
+	summary, err := s.netGames.MCServerSummary(request.Context())
+	if err != nil {
+		writeRequestError(writer, mcPublicError(err))
+		return
+	}
+	writeSuccess(writer, summary)
+}
+
 func (s *Server) handleMCServerCollect(writer http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodPost {
 		methodNotAllowed(writer, "POST")

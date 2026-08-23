@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -196,6 +197,8 @@ func velocityDependencies(data json.RawMessage) []string {
 }
 
 // fabricModDescriptor 对应 jar 根目录的 fabric.mod.json（JSON 格式）。
+// 深度解析字段与 panel/internal/plugins/descriptor.go 的 fabricModDescriptor
+// 为双份对应实现，保持一致，修改需同步。
 type fabricModDescriptor struct {
 	SchemaVersion int      `json:"schemaVersion"`
 	ID            string   `json:"id"`
@@ -203,11 +206,16 @@ type fabricModDescriptor struct {
 	Version       string   `json:"version"`
 	Authors       []string `json:"authors"`
 	Description   string   `json:"description"`
+	Environment   string   `json:"environment"`
+	License       any      `json:"license"`
+	Icon          string   `json:"icon"`
 	Contact       struct {
 		Homepage string `json:"homepage"`
 		Sources  string `json:"sources"`
 	} `json:"contact"`
-	Depends map[string]any `json:"depends"`
+	Depends     map[string]any `json:"depends"`
+	Suggests    map[string]any `json:"suggests"`
+	Entrypoints map[string]any `json:"entrypoints"`
 }
 
 // parseFabricJAR 解析 Fabric mod：读取 jar 根目录的 fabric.mod.json。
@@ -243,6 +251,15 @@ func parseFabricJAR(path string) (map[string]Descriptor, Descriptor, error) {
 		Description:  strings.TrimSpace(raw.Description),
 		Website:      website,
 		Dependencies: dependencyKeys(raw.Depends),
+		ModMetadata: &ModMetadata{
+			ID: id, SchemaVersion: raw.SchemaVersion,
+			Environment: strings.TrimSpace(raw.Environment),
+			License:     fabricLicenseString(raw.License),
+			Icon:        strings.TrimSpace(raw.Icon),
+			Depends:     fabricDependencyList(raw.Depends),
+			Suggests:    fabricDependencyList(raw.Suggests),
+			Entrypoints: fabricEntrypointList(raw.Entrypoints),
+		},
 	}
 	return map[string]Descriptor{"fabric": descriptor}, descriptor, nil
 }
@@ -383,7 +400,8 @@ func splitModNameVersion(base string) (string, string) {
 	return base, ""
 }
 
-// dependencyKeys 提取依赖映射的键列表（fabric.mod.json depends / suggests 等）。
+// dependencyKeys 提取依赖映射的键列表（fabric.mod.json depends / suggests 等），
+// 排序保证输出确定性（与 panel 端 fabricDependencyKeys 一致）。
 func dependencyKeys(mapping map[string]any) []string {
 	result := make([]string, 0, len(mapping))
 	for key := range mapping {
@@ -391,7 +409,143 @@ func dependencyKeys(mapping map[string]any) []string {
 			result = append(result, key)
 		}
 	}
+	sort.Strings(result)
 	return result
+}
+
+// fabricDependencyList / versionRangeString / fabricEntrypointList /
+// entrypointRank / fabricLicenseString 与 panel/internal/plugins/descriptor.go
+// 为双份对应实现（fabric.mod.json 深度解析），保持一致，修改需同步。
+func fabricDependencyList(mapping map[string]any) []ModDependency {
+	if len(mapping) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(mapping))
+	for key := range mapping {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]ModDependency, 0, len(keys))
+	for _, key := range keys {
+		id := strings.TrimSpace(key)
+		if id == "" {
+			continue
+		}
+		rangeText := versionRangeString(mapping[key])
+		if rangeText == "" {
+			rangeText = "*"
+		}
+		result = append(result, ModDependency{ID: id, VersionRange: rangeText})
+	}
+	return result
+}
+
+func versionRangeString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(fmt.Sprint(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " || ")
+	case []string:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " || ")
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func fabricEntrypointList(mapping map[string]any) []ModEntrypoint {
+	if len(mapping) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(mapping))
+	for key := range mapping {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(left, right int) bool {
+		leftRank, rightRank := entrypointRank(keys[left]), entrypointRank(keys[right])
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return keys[left] < keys[right]
+	})
+	result := make([]ModEntrypoint, 0, len(keys))
+	for _, key := range keys {
+		entry := ModEntrypoint{Kind: strings.TrimSpace(key)}
+		switch typed := mapping[key].(type) {
+		case string:
+			if value := strings.TrimSpace(typed); value != "" {
+				entry.Values = []string{value}
+			}
+		case []any:
+			for _, item := range typed {
+				if value := strings.TrimSpace(fmt.Sprint(item)); value != "" {
+					entry.Values = append(entry.Values, value)
+				}
+			}
+		case []string:
+			for _, item := range typed {
+				if value := strings.TrimSpace(item); value != "" {
+					entry.Values = append(entry.Values, value)
+				}
+			}
+		}
+		if len(entry.Values) > 0 {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+func entrypointRank(kind string) int {
+	switch kind {
+	case "main":
+		return 0
+	case "client":
+		return 1
+	case "server":
+		return 2
+	default:
+		return 3
+	}
+}
+
+func fabricLicenseString(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(fmt.Sprint(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case []string:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ", ")
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
 }
 
 // stripTOMLComment 去掉 TOML 行内注释（# 前的内容），忽略引号内的 #。

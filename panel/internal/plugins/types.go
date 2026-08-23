@@ -9,18 +9,47 @@ type Uploader struct {
 }
 
 type Descriptor struct {
-	PluginType   string   `yaml:"plugin_type" json:"plugin_type"`
-	File         string   `yaml:"file" json:"file"`
-	Name         string   `yaml:"name" json:"name"`
-	Version      string   `yaml:"version" json:"version"`
-	Main         string   `yaml:"main,omitempty" json:"main,omitempty"`
-	Bootstrapper string   `yaml:"bootstrapper,omitempty" json:"bootstrapper,omitempty"`
-	Loader       string   `yaml:"loader,omitempty" json:"loader,omitempty"`
-	APIVersion   string   `yaml:"api_version,omitempty" json:"api_version,omitempty"`
-	Authors      []string `yaml:"authors,omitempty" json:"authors,omitempty"`
-	Description  string   `yaml:"description,omitempty" json:"description,omitempty"`
-	Website      string   `yaml:"website,omitempty" json:"website,omitempty"`
-	Dependencies []string `yaml:"dependencies,omitempty" json:"dependencies,omitempty"`
+	PluginType   string       `yaml:"plugin_type" json:"plugin_type"`
+	ID           string       `yaml:"id,omitempty" json:"id,omitempty"`
+	File         string       `yaml:"file" json:"file"`
+	Name         string       `yaml:"name" json:"name"`
+	Version      string       `yaml:"version" json:"version"`
+	Main         string       `yaml:"main,omitempty" json:"main,omitempty"`
+	Bootstrapper string       `yaml:"bootstrapper,omitempty" json:"bootstrapper,omitempty"`
+	Loader       string       `yaml:"loader,omitempty" json:"loader,omitempty"`
+	APIVersion   string       `yaml:"api_version,omitempty" json:"api_version,omitempty"`
+	Authors      []string     `yaml:"authors,omitempty" json:"authors,omitempty"`
+	Description  string       `yaml:"description,omitempty" json:"description,omitempty"`
+	Website      string       `yaml:"website,omitempty" json:"website,omitempty"`
+	Dependencies []string     `yaml:"dependencies,omitempty" json:"dependencies,omitempty"`
+	ModMetadata  *ModMetadata `yaml:"mod_metadata,omitempty" json:"mod_metadata,omitempty"`
+}
+
+// ModDependency 是 mod 依赖项（fabric.mod.json depends/suggests 的单个条目）：
+// modid + 版本约束（*、>=1.20、[1.19,1.21) 等；多约束用 " || " 连接）。
+type ModDependency struct {
+	ID           string `yaml:"id" json:"id"`
+	VersionRange string `yaml:"version_range,omitempty" json:"version_range,omitempty"`
+}
+
+// ModEntrypoint 是 mod 入口点（fabric.mod.json entrypoints 的单个 kind）。
+type ModEntrypoint struct {
+	Kind   string   `yaml:"kind" json:"kind"`
+	Values []string `yaml:"values,omitempty" json:"values,omitempty"`
+}
+
+// ModMetadata 保存 Fabric mod 的深度元数据（fabric.mod.json 解析产物）。
+// 依赖解析以 panel 为准（仓库展示与关联），daemon 端 descriptor_platform.go
+// 有同结构实现，修改需同步。
+type ModMetadata struct {
+	ID            string          `yaml:"id,omitempty" json:"id,omitempty"`
+	SchemaVersion int             `yaml:"schema_version,omitempty" json:"schema_version,omitempty"`
+	Environment   string          `yaml:"environment,omitempty" json:"environment,omitempty"`
+	License       string          `yaml:"license,omitempty" json:"license,omitempty"`
+	Icon          string          `yaml:"icon,omitempty" json:"icon,omitempty"`
+	Depends       []ModDependency `yaml:"depends,omitempty" json:"depends,omitempty"`
+	Suggests      []ModDependency `yaml:"suggests,omitempty" json:"suggests,omitempty"`
+	Entrypoints   []ModEntrypoint `yaml:"entrypoints,omitempty" json:"entrypoints,omitempty"`
 }
 
 type ArtifactFile struct {
@@ -50,6 +79,7 @@ type Manifest struct {
 	Authors       []string              `yaml:"authors,omitempty" json:"authors,omitempty"`
 	Description   string                `yaml:"description,omitempty" json:"description,omitempty"`
 	Website       string                `yaml:"website,omitempty" json:"website,omitempty"`
+	ModMetadata   *ModMetadata          `yaml:"mod_metadata,omitempty" json:"mod_metadata,omitempty"`
 	Descriptors   map[string]Descriptor `yaml:"descriptors" json:"descriptors"`
 	Artifact      ArtifactFile          `yaml:"artifact" json:"artifact"`
 	Config        ConfigSnapshot        `yaml:"config" json:"config"`

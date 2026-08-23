@@ -3,9 +3,7 @@ package main
 import (
 	"embed"
 	"log"
-	"os"
 
-	"PrismPanel-winapp/internal/updater"
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
@@ -17,15 +15,6 @@ var assets embed.FS
 var appVersion = "0.0.1"
 
 func main() {
-	if updater.IsApplyMode(os.Args[1:]) {
-		if err := updater.Apply(os.Args[1:]); err != nil {
-			updater.RecordFailure(err)
-		}
-		return
-	}
-	if executable, err := os.Executable(); err == nil {
-		go updater.CleanupPrevious(executable)
-	}
 	app, err := newApp()
 	if err != nil {
 		log.Fatal(err)

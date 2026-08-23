@@ -16,7 +16,6 @@ const ScheduledTasksView = () => import("./views/ScheduledTasksView.vue");
 const PluginsView = () => import("./views/PluginsView.vue");
 const NetGamesView = () => import("./views/NetGamesView.vue");
 const FirewallView = () => import("./views/FirewallView.vue");
-const WinAppUpdatesView = () => import("./views/WinAppUpdatesView.vue");
 const SettingsView = () => import("./views/SettingsView.vue");
 
 const routes = [
@@ -103,12 +102,6 @@ const routes = [
         name: "node-detail",
         component: NodeDetailView,
         meta: { title: "节点详情", permission: "node.view" },
-      },
-      {
-        path: "winapp-updates",
-        name: "winapp-updates",
-        component: WinAppUpdatesView,
-        meta: { title: "客户端更新", superAdmin: true },
       },
     ],
   },

@@ -3,19 +3,45 @@ package plugins
 import "time"
 
 type Descriptor struct {
-	PluginType   string   `json:"plugin_type"`
-	ID           string   `json:"id,omitempty"`
-	File         string   `json:"file"`
-	Name         string   `json:"name"`
-	Version      string   `json:"version"`
-	Main         string   `json:"main,omitempty"`
-	Bootstrapper string   `json:"bootstrapper,omitempty"`
-	Loader       string   `json:"loader,omitempty"`
-	APIVersion   string   `json:"api_version,omitempty"`
-	Authors      []string `json:"authors,omitempty"`
-	Description  string   `json:"description,omitempty"`
-	Website      string   `json:"website,omitempty"`
-	Dependencies []string `json:"dependencies,omitempty"`
+	PluginType   string       `json:"plugin_type"`
+	ID           string       `json:"id,omitempty"`
+	File         string       `json:"file"`
+	Name         string       `json:"name"`
+	Version      string       `json:"version"`
+	Main         string       `json:"main,omitempty"`
+	Bootstrapper string       `json:"bootstrapper,omitempty"`
+	Loader       string       `json:"loader,omitempty"`
+	APIVersion   string       `json:"api_version,omitempty"`
+	Authors      []string     `json:"authors,omitempty"`
+	Description  string       `json:"description,omitempty"`
+	Website      string       `json:"website,omitempty"`
+	Dependencies []string     `json:"dependencies,omitempty"`
+	ModMetadata  *ModMetadata `json:"mod_metadata,omitempty"`
+}
+
+// ModDependency / ModEntrypoint / ModMetadata 与
+// panel/internal/plugins/types.go 为双份对应实现（fabric.mod.json 深度解析），
+// 保持一致，修改需同步。依赖解析以 panel 为准（仓库展示/关联），
+// daemon 仅用于运行时自检与上报，启停仍以 .jar.disabled 重命名为准。
+type ModDependency struct {
+	ID           string `json:"id"`
+	VersionRange string `json:"version_range,omitempty"`
+}
+
+type ModEntrypoint struct {
+	Kind   string   `json:"kind"`
+	Values []string `json:"values,omitempty"`
+}
+
+type ModMetadata struct {
+	ID            string          `json:"id,omitempty"`
+	SchemaVersion int             `json:"schema_version,omitempty"`
+	Environment   string          `json:"environment,omitempty"`
+	License       string          `json:"license,omitempty"`
+	Icon          string          `json:"icon,omitempty"`
+	Depends       []ModDependency `json:"depends,omitempty"`
+	Suggests      []ModDependency `json:"suggests,omitempty"`
+	Entrypoints   []ModEntrypoint `json:"entrypoints,omitempty"`
 }
 
 type FilePlugin struct {

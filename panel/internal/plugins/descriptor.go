@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -176,7 +177,7 @@ func parseVelocityJAR(contents []byte) (map[string]Descriptor, Descriptor, error
 		return nil, Descriptor{}, errors.New("velocity-plugin.json requires id, version and main")
 	}
 	descriptor := Descriptor{
-		PluginType: PluginTypeVelocity, File: "velocity-plugin.json",
+		PluginType: PluginTypeVelocity, ID: strings.TrimSpace(raw.ID), File: "velocity-plugin.json",
 		Name: strings.TrimSpace(raw.ID), Version: strings.TrimSpace(raw.Version),
 		Main: strings.TrimSpace(raw.Main), Authors: append([]string(nil), raw.Authors...),
 		Description: strings.TrimSpace(raw.Description), Website: strings.TrimSpace(raw.URL),
@@ -285,6 +286,8 @@ func stringList(values ...any) []string {
 }
 
 // fabricModDescriptor 对应 jar 根目录的 fabric.mod.json（JSON 格式）。
+// 深度解析字段与 daemon/internal/plugins/descriptor_platform.go 的 fabricModDescriptor
+// 为双份对应实现，保持一致，修改需同步。
 type fabricModDescriptor struct {
 	SchemaVersion int      `json:"schemaVersion"`
 	ID            string   `json:"id"`
@@ -292,11 +295,16 @@ type fabricModDescriptor struct {
 	Version       string   `json:"version"`
 	Authors       []string `json:"authors"`
 	Description   string   `json:"description"`
+	Environment   string   `json:"environment"`
+	License       any      `json:"license"`
+	Icon          string   `json:"icon"`
 	Contact       struct {
 		Homepage string `json:"homepage"`
 		Sources  string `json:"sources"`
 	} `json:"contact"`
-	Depends map[string]any `json:"depends"`
+	Depends     map[string]any `json:"depends"`
+	Suggests    map[string]any `json:"suggests"`
+	Entrypoints map[string]any `json:"entrypoints"`
 }
 
 func parseFabricModJAR(contents []byte) (map[string]Descriptor, Descriptor, error) {
@@ -322,10 +330,19 @@ func parseFabricModJAR(contents []byte) (map[string]Descriptor, Descriptor, erro
 		website = strings.TrimSpace(raw.Contact.Sources)
 	}
 	descriptor := Descriptor{
-		PluginType: PluginTypeFabric, File: "fabric.mod.json",
+		PluginType: PluginTypeFabric, ID: id, File: "fabric.mod.json",
 		Name: name, Version: version, Authors: append([]string(nil), raw.Authors...),
 		Description: strings.TrimSpace(raw.Description), Website: website,
 		Dependencies: fabricDependencyKeys(raw.Depends),
+		ModMetadata: &ModMetadata{
+			ID: id, SchemaVersion: raw.SchemaVersion,
+			Environment: strings.TrimSpace(raw.Environment),
+			License:     fabricLicenseString(raw.License),
+			Icon:        strings.TrimSpace(raw.Icon),
+			Depends:     fabricDependencyList(raw.Depends),
+			Suggests:    fabricDependencyList(raw.Suggests),
+			Entrypoints: fabricEntrypointList(raw.Entrypoints),
+		},
 	}
 	return map[string]Descriptor{"fabric": descriptor}, descriptor, nil
 }
@@ -411,7 +428,7 @@ func parseForgeModsTOML(data []byte) (Descriptor, error) {
 		name = modID
 	}
 	descriptor = Descriptor{
-		PluginType: PluginTypeForge, File: "META-INF/mods.toml",
+		PluginType: PluginTypeForge, ID: modID, File: "META-INF/mods.toml",
 		Name: name, Version: version, Authors: splitTOMLList(primary["authors"]),
 		Description: strings.TrimSpace(primary["description"]), Website: strings.TrimSpace(primary["displayURL"]),
 		Dependencies: append([]string(nil), deps[modID]...),
@@ -460,7 +477,147 @@ func fabricDependencyKeys(mapping map[string]any) []string {
 			result = append(result, key)
 		}
 	}
+	sort.Strings(result)
 	return result
+}
+
+// fabricDependencyList 把 fabric.mod.json 的 depends/suggests（modid → 版本约束）
+// 转为结构化依赖列表。版本约束可以是字符串或字符串数组；数组用 " || " 连接
+// （Fabric 版本约束的或语义），保持键序稳定。
+func fabricDependencyList(mapping map[string]any) []ModDependency {
+	if len(mapping) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(mapping))
+	for key := range mapping {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]ModDependency, 0, len(keys))
+	for _, key := range keys {
+		id := strings.TrimSpace(key)
+		if id == "" {
+			continue
+		}
+		rangeText := versionRangeString(mapping[key])
+		if rangeText == "" {
+			rangeText = "*"
+		}
+		result = append(result, ModDependency{ID: id, VersionRange: rangeText})
+	}
+	return result
+}
+
+// versionRangeString 把 fabric.mod.json 依赖的版本约束值归一为字符串。
+func versionRangeString(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(fmt.Sprint(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " || ")
+	case []string:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " || ")
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+// fabricEntrypointList 把 entrypoints（kind → 字符串或字符串数组）转为结构化列表，
+// main/client/server 优先，其余按字典序。
+func fabricEntrypointList(mapping map[string]any) []ModEntrypoint {
+	if len(mapping) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(mapping))
+	for key := range mapping {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(left, right int) bool {
+		leftRank, rightRank := entrypointRank(keys[left]), entrypointRank(keys[right])
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return keys[left] < keys[right]
+	})
+	result := make([]ModEntrypoint, 0, len(keys))
+	for _, key := range keys {
+		entry := ModEntrypoint{Kind: strings.TrimSpace(key)}
+		switch typed := mapping[key].(type) {
+		case string:
+			if value := strings.TrimSpace(typed); value != "" {
+				entry.Values = []string{value}
+			}
+		case []any:
+			for _, item := range typed {
+				if value := strings.TrimSpace(fmt.Sprint(item)); value != "" {
+					entry.Values = append(entry.Values, value)
+				}
+			}
+		case []string:
+			for _, item := range typed {
+				if value := strings.TrimSpace(item); value != "" {
+					entry.Values = append(entry.Values, value)
+				}
+			}
+		}
+		if len(entry.Values) > 0 {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+func entrypointRank(kind string) int {
+	switch kind {
+	case "main":
+		return 0
+	case "client":
+		return 1
+	case "server":
+		return 2
+	default:
+		return 3
+	}
+}
+
+// fabricLicenseString 把 license（字符串或字符串数组）归一为逗号分隔字符串。
+func fabricLicenseString(value any) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(typed)
+	case []any:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(fmt.Sprint(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ", ")
+	case []string:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ", ")
+	default:
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
 }
 
 func stripTOMLComment(line string) string {

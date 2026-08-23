@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -257,6 +258,99 @@ func TestRepositoryRescanVersionsManualReplacement(t *testing.T) {
 	}
 	if _, err := os.Stat(artifactDir + ".stale"); err != nil {
 		t.Fatalf("modified source was not archived: %v", err)
+	}
+}
+
+func TestRepositoryPersistsAndReadsFabricModMetadata(t *testing.T) {
+	repository, err := NewRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	iconBytes := []byte("\x89PNG\r\n\x1a\nfabric-mod-icon-payload")
+	result, err := repository.Upload(UploadInput{
+		PluginType: PluginTypeFabric, JARFilename: "PrismMod-2.1.0.jar",
+		JAR: testZIP(t, map[string]string{
+			"fabric.mod.json":          fullFabricModJSON,
+			"assets/prismmod/icon.png": string(iconBytes),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := result.Artifact.ModMetadata
+	if meta == nil || meta.ID != "prismmod" || meta.Environment != "client" {
+		t.Fatalf("upload must carry fabric mod metadata: %#v", result.Artifact.ModMetadata)
+	}
+	if len(meta.Depends) != 3 || meta.Depends[1].ID != "fabricloader" ||
+		meta.Depends[1].VersionRange != ">=0.14.9 || <=0.15.0" {
+		t.Fatalf("unexpected persisted depends: %#v", meta.Depends)
+	}
+
+	// 从仓库读回：Artifact 与 List 都应携带相同元数据。
+	manifest, _, err := repository.Artifact(result.Plugin.PluginID, result.Artifact.ArtifactID, PluginTypeFabric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ModMetadata == nil || manifest.ModMetadata.ID != "prismmod" {
+		t.Fatalf("artifact read back lost mod metadata: %#v", manifest.ModMetadata)
+	}
+	catalog, err := repository.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *Plugin
+	for index := range catalog {
+		if catalog[index].PluginID == result.Plugin.PluginID && catalog[index].PluginType == PluginTypeFabric {
+			found = &catalog[index]
+			break
+		}
+	}
+	if found == nil || len(found.Artifacts) != 1 || found.Artifacts[0].ModMetadata == nil ||
+		found.Artifacts[0].ModMetadata.License != "MIT, Apache-2.0" {
+		t.Fatalf("catalog lost fabric mod metadata: %#v", found)
+	}
+
+	// 图标提取：路径来自 fabric.mod.json icon 字段。
+	icon, contentType, err := repository.Icon(result.Plugin.PluginID, result.Artifact.ArtifactID, PluginTypeFabric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(icon) != string(iconBytes) || contentType != "image/png" {
+		t.Fatalf("unexpected icon extraction: %q (%d bytes) %q", icon, len(icon), contentType)
+	}
+}
+
+func TestRepositoryIconFallbackReparsesJar(t *testing.T) {
+	repository, err := NewRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := repository.Upload(UploadInput{
+		PluginType: PluginTypeFabric, JARFilename: "OldMod-1.0.jar",
+		JAR: testZIP(t, map[string]string{
+			"fabric.mod.json":       `{"schemaVersion":1,"id":"oldmod","name":"Old Mod","version":"1.0","icon":"assets/oldmod/old.png"}`,
+			"assets/oldmod/old.png": "old-icon-bytes",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟老 manifest：抹掉持久化的元数据，验证回退重新解析 jar。
+	manifestPath := filepath.Join(repository.root, PluginTypeFabric, result.Plugin.PluginID,
+		strconv.FormatInt(result.Artifact.ArtifactID, 10), "manifest.yaml")
+	if err := os.Remove(manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	report, err := repository.Rescan()
+	if err != nil || report.RebuiltManifests != 1 {
+		t.Fatalf("rescan should rebuild manifest: %#v, %v", report, err)
+	}
+	icon, _, err := repository.Icon(result.Plugin.PluginID, result.Artifact.ArtifactID, PluginTypeFabric)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(icon) != "old-icon-bytes" {
+		t.Fatalf("unexpected fallback icon: %q", icon)
 	}
 }
 

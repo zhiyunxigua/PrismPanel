@@ -57,7 +57,7 @@ func inspectArtifact(pluginID string, artifactID int64, artifactDir string, prev
 		SchemaVersion: manifestSchemaVersion, ArtifactID: artifactID, PluginID: pluginID,
 		PluginType: pluginType, Name: primary.Name, Version: primary.Version, Main: mainClass,
 		Authors: append([]string(nil), primary.Authors...), Description: primary.Description,
-		Website: primary.Website, Descriptors: descriptors,
+		Website: primary.Website, ModMetadata: primary.ModMetadata, Descriptors: descriptors,
 		Artifact: ArtifactFile{File: "plugin.jar", OriginalFilename: originalFilename,
 			SHA256: hex.EncodeToString(hash[:]), Size: info.Size()},
 		Config: config, UploadedBy: uploader, UploadedAt: uploadedAt,

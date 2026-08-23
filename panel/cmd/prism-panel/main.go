@@ -25,7 +25,6 @@ import (
 	"PrismPanel/internal/schedule"
 	"PrismPanel/internal/secret"
 	"PrismPanel/internal/store"
-	"PrismPanel/internal/winappupdates"
 )
 
 func main() {
@@ -57,10 +56,6 @@ func run() error {
 		return fmt.Errorf("resolve panel executable: %w", err)
 	}
 	pluginRepository, err := panelplugins.NewRepository(filepath.Join(filepath.Dir(executable), "plugins"))
-	if err != nil {
-		return err
-	}
-	winAppRepository, err := winappupdates.NewRepository(filepath.Join(filepath.Dir(executable), "winapp-updates"))
 	if err != nil {
 		return err
 	}
@@ -177,7 +172,7 @@ func run() error {
 	scheduler.Start(ctx)
 	httpServer := api.NewServer(
 		cfg, authService, repository, nodeService, connectionManager, metricStore,
-		pluginRepository, winAppRepository, netGameService, scheduler, slog.Default(),
+		pluginRepository, netGameService, scheduler, slog.Default(),
 	)
 	serverError := make(chan error, 1)
 	go func() {

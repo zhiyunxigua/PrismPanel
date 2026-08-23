@@ -1,8 +1,9 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
-import { ArchiveRestore, Boxes, FileCode2, Package, Plus, RefreshCw, Save, Search, Upload } from "lucide-vue-next";
+import { ArchiveRestore, Boxes, FileCode2, Info, Package, Plus, RefreshCw, Save, Search, Upload } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { request } from "../api";
+import { apiURL, runtimeConfig, runtimeHeaders } from "../runtime";
 import { hasPermission } from "../session";
 import TargetSelectionTree from "../components/TargetSelectionTree.vue";
 import CodeEditor from "../components/files/CodeEditor.vue";
@@ -13,9 +14,13 @@ const catalog = ref([]);
 const nodeContents = ref([]);
 const search = ref("");
 const typeFilter = ref("");
+const viewMode = ref("plugins");
 const uploadOpen = ref(false);
 const deployOpen = ref(false);
 const configOpen = ref(false);
+const detailOpen = ref(false);
+const detailForm = ref(null);
+const icons = ref({});
 const uploadJAR = ref(null);
 const uploadConfig = ref(null);
 const uploadForm = ref({ pluginType: "spigot", autoInstall: false, configDirectory: "" });
@@ -33,6 +38,7 @@ const configDirty = computed(() => configPath.value && configContent.value !== s
 const filteredCatalog = computed(() => {
   const keyword = search.value.trim().toLowerCase();
   return catalog.value.filter((item) => {
+    if (viewMode.value === "mods" && !["fabric", "forge"].includes(item.plugin_type)) return false;
     const artifact = currentArtifact(item);
     return (!typeFilter.value || item.plugin_type === typeFilter.value)
       && (!keyword || [item.name, item.plugin_id, artifact?.version, artifact?.main]
@@ -45,10 +51,112 @@ const deployPlugin = computed(() => catalog.value.find((item) => (
 const configPlugin = computed(() => catalog.value.find((item) => (
   item.plugin_id === configForm.value.pluginId && item.plugin_type === configForm.value.pluginType
 )));
+// modByID: 仓库内 mod 的 fabric id（小写）→ 仓库条目，用于依赖"已收录"标记与跳转。
+const modByID = computed(() => {
+  const map = new Map();
+  for (const item of catalog.value) {
+    if (!["fabric", "forge"].includes(item.plugin_type)) continue;
+    const id = modID(item);
+    if (id) map.set(String(id).toLowerCase(), item);
+  }
+  return map;
+});
 
 function currentArtifact(plugin) {
   return (plugin?.artifacts || []).find((item) => item.artifact_id === plugin.current_artifact_id)
     || plugin?.artifacts?.[0];
+}
+
+function modMeta(artifact) {
+  return artifact?.mod_metadata || artifact?.descriptors?.fabric?.mod_metadata || null;
+}
+
+// modID 取仓库条目的 mod id：优先持久化元数据（fabric），其次遍历描述符
+// 任意 key（fabric/forge 的 descriptor map key 分别为 "fabric"/"forge"，
+// panel 端 parseForgeModsTOML 已填充 ID），最后回退描述符名称。
+function modID(plugin) {
+  const artifact = currentArtifact(plugin);
+  const meta = modMeta(artifact);
+  if (meta?.id) return meta.id;
+  const descriptors = artifact?.descriptors || {};
+  const entries = Object.values(descriptors).filter(Boolean);
+  for (const descriptor of entries) {
+    if (descriptor.id) return descriptor.id;
+  }
+  for (const descriptor of entries) {
+    if (descriptor.name) return descriptor.name;
+  }
+  return "";
+}
+
+function modIcon(plugin, artifact = currentArtifact(plugin)) {
+  if (!plugin || !artifact) return "";
+  const key = [plugin.plugin_type, plugin.plugin_id, artifact.artifact_id].join(":");
+  if (icons.value[key] !== undefined) return icons.value[key] || "";
+  loadModIcon(key, plugin, artifact);
+  return "";
+}
+
+function loadModIcon(key, plugin, artifact) {
+  icons.value[key] = null;
+  const url = apiURL("/api/v1/plugins/" + encodeURIComponent(plugin.plugin_type) + "/"
+    + encodeURIComponent(plugin.plugin_id) + "/" + encodeURIComponent(artifact.artifact_id) + "/icon");
+  fetch(url, {
+    headers: runtimeHeaders(),
+    credentials: runtimeConfig.proxySession ? "omit" : "same-origin",
+  })
+    .then((response) => {
+      if (!response.ok) throw new Error(String(response.status));
+      return response.blob();
+    })
+    .then((blob) => { icons.value[key] = URL.createObjectURL(blob); })
+    .catch(() => { icons.value[key] = ""; });
+}
+
+function environmentLabel(value) {
+  switch (value) {
+    case "client": return "客户端";
+    case "server": return "服务端";
+    case "*": return "双端";
+    default: return value || "未知";
+  }
+}
+
+function environmentTagType(value) {
+  switch (value) {
+    case "client": return "warning";
+    case "server": return "success";
+    case "*": return "info";
+    default: return "info";
+  }
+}
+
+// collectedDep: 依赖 id 在仓库内已有对应 mod 时返回其条目，否则 null。
+function collectedDep(dep) {
+  if (!dep?.id) return null;
+  return modByID.value.get(String(dep.id).toLowerCase()) || null;
+}
+
+function dependencyCounts(meta) {
+  return {
+    depends: (meta?.depends || []).length,
+    suggests: (meta?.suggests || []).length,
+    collected: (meta?.depends || []).filter((dep) => collectedDep(dep)).length,
+  };
+}
+
+function openDetail(plugin, artifact = currentArtifact(plugin)) {
+  detailForm.value = { plugin, artifact };
+  detailOpen.value = true;
+  modIcon(plugin, artifact);
+}
+
+// 从详情里的依赖跳转到仓库内已收录 mod。
+function jumpToMod(item) {
+  if (!item) return;
+  detailOpen.value = false;
+  if (viewMode.value !== "mods") viewMode.value = "mods";
+  openDetail(item, currentArtifact(item));
 }
 
 async function load(silent = false) {
@@ -75,7 +183,11 @@ function clearConfig() { uploadConfig.value = null; }
 function resetUpload() {
   uploadJAR.value = null;
   uploadConfig.value = null;
-  uploadForm.value = { pluginType: "spigot", autoInstall: false, configDirectory: "" };
+  uploadForm.value = {
+    pluginType: viewMode.value === "mods" ? "fabric" : "spigot",
+    autoInstall: false,
+    configDirectory: "",
+  };
 }
 
 async function uploadPlugin() {
@@ -295,21 +407,37 @@ onMounted(load);
           <ArchiveRestore :size="16" />重新扫描
         </el-button>
         <el-button v-if="canUpload" type="primary" @click="uploadOpen = true">
-          <Plus :size="16" />上传插件
+          <Plus :size="16" />{{ viewMode === "mods" ? "上传 Mod" : "上传插件" }}
         </el-button>
       </div>
     </div>
 
+    <el-tabs v-model="viewMode" class="repo-tabs">
+      <el-tab-pane label="插件仓库" name="plugins" />
+      <el-tab-pane label="Mod 仓库" name="mods" />
+    </el-tabs>
+
     <div class="table-toolbar">
-      <el-input v-model="search" class="search-input" clearable placeholder="搜索名称、版本或主类">
+      <el-input
+        v-model="search"
+        class="search-input"
+        clearable
+        :placeholder="viewMode === 'mods' ? '搜索模组名称、ID 或版本' : '搜索名称、版本或主类'"
+      >
         <template #prefix><Search :size="15" /></template>
       </el-input>
-      <el-select v-model="typeFilter" class="status-filter" clearable placeholder="全部平台">
-        <el-option label="Spigot / Paper" value="spigot" />
-        <el-option label="Velocity" value="velocity" />
-        <el-option label="BungeeCord" value="bungee" />
-        <el-option label="Fabric 模组" value="fabric" />
-        <el-option label="Forge 模组" value="forge" />
+      <el-select v-model="typeFilter" class="status-filter" clearable :placeholder="viewMode === 'mods' ? '全部 Mod 平台' : '全部平台'">
+        <template v-if="viewMode === 'mods'">
+          <el-option label="Fabric 模组" value="fabric" />
+          <el-option label="Forge 模组" value="forge" />
+        </template>
+        <template v-else>
+          <el-option label="Spigot / Paper" value="spigot" />
+          <el-option label="Velocity" value="velocity" />
+          <el-option label="BungeeCord" value="bungee" />
+          <el-option label="Fabric 模组" value="fabric" />
+          <el-option label="Forge 模组" value="forge" />
+        </template>
       </el-select>
     </div>
 
@@ -329,17 +457,31 @@ onMounted(load);
                   <FileCode2 :size="14" />配置
                 </el-button>
                 <el-button v-if="canDeploy" size="small" plain @click="openDeploy(row, artifact)">
-                  <Upload :size="14" />部署插件
+                  <Upload :size="14" />部署{{ viewMode === "mods" ? " Mod" : "" }}
                 </el-button>
               </div>
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="插件" min-width="230">
+        <el-table-column v-if="viewMode === 'plugins'" label="插件" min-width="230">
           <template #default="{ row }">
             <div class="node-cell">
               <span class="node-symbol"><Package :size="16" /></span>
               <div><strong>{{ row.name }}</strong><small>{{ currentArtifact(row)?.main || row.plugin_id }}</small></div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="viewMode === 'mods'" label="模组" min-width="240">
+          <template #default="{ row }">
+            <div class="node-cell">
+              <span class="mod-icon-wrap">
+                <img v-if="modIcon(row)" :src="modIcon(row)" class="mod-icon" alt="" />
+                <Package v-else :size="18" />
+              </span>
+              <div>
+                <strong>{{ row.name }}</strong>
+                <small><code>{{ modID(row) }}</code> · {{ currentArtifact(row)?.version || "-" }}</small>
+              </div>
             </div>
           </template>
         </el-table-column>
@@ -348,7 +490,14 @@ onMounted(load);
             <el-tag effect="plain">{{ platformLabel(row.plugin_type) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="新服安装" width="110">
+        <el-table-column v-if="viewMode === 'mods'" label="环境" width="90">
+          <template #default="{ row }">
+            <el-tag :type="environmentTagType(modMeta(currentArtifact(row))?.environment)" effect="plain">
+              {{ environmentLabel(modMeta(currentArtifact(row))?.environment) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="viewMode === 'plugins'" label="新服安装" width="110">
           <template #default="{ row }">
             <el-tag :type="row.auto_install ? 'success' : 'info'" effect="plain">
               {{ row.auto_install ? "自动" : "手动" }}
@@ -361,7 +510,26 @@ onMounted(load);
         <el-table-column label="作者" min-width="160">
           <template #default="{ row }">{{ currentArtifact(row)?.authors?.join(", ") || "-" }}</template>
         </el-table-column>
-        <el-table-column label="配置" width="130">
+        <el-table-column v-if="viewMode === 'mods'" label="依赖" width="120">
+          <template #default="{ row }">
+            <span v-if="dependencyCounts(modMeta(currentArtifact(row))).depends" class="mod-dep-count">
+              必装 {{ dependencyCounts(modMeta(currentArtifact(row))).depends }}
+              <small v-if="dependencyCounts(modMeta(currentArtifact(row))).suggests">+ 建议 {{ dependencyCounts(modMeta(currentArtifact(row))).suggests }}</small>
+            </span>
+            <span v-else class="mod-dep-count muted">无必装依赖</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="viewMode === 'mods'" label="已收录" width="100">
+          <template #default="{ row }">
+            <template v-if="dependencyCounts(modMeta(currentArtifact(row))).depends">
+              <el-tag :type="dependencyCounts(modMeta(currentArtifact(row))).collected === dependencyCounts(modMeta(currentArtifact(row))).depends ? 'success' : 'warning'" effect="plain">
+                {{ dependencyCounts(modMeta(currentArtifact(row))).collected }}/{{ dependencyCounts(modMeta(currentArtifact(row))).depends }}
+              </el-tag>
+            </template>
+            <span v-else class="table-muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="viewMode === 'plugins'" label="配置" width="130">
           <template #default="{ row }">
             <el-tag :type="currentArtifact(row)?.config?.present ? 'success' : 'info'" effect="plain">
               {{ currentArtifact(row)?.config?.present ? currentArtifact(row).config.files + " 个文件" : "无快照" }}
@@ -369,33 +537,45 @@ onMounted(load);
           </template>
         </el-table-column>
         <el-table-column label="制品" width="90"><template #default="{ row }">{{ row.artifacts?.length || 0 }}</template></el-table-column>
-        <el-table-column label="操作" width="110" align="right">
+        <el-table-column label="操作" :width="viewMode === 'mods' ? 170 : 110" align="right">
           <template #default="{ row }">
+            <el-button v-if="viewMode === 'mods'" type="primary" link @click="openDetail(row)"><Info :size="14" />详情</el-button>
             <el-button v-if="canDeploy" type="primary" link @click="openDeploy(row)"><Upload :size="14" />部署</el-button>
           </template>
         </el-table-column>
-        <template #empty><div class="table-empty"><Package :size="24" /><span>仓库中暂无插件</span></div></template>
+        <template #empty>
+          <div class="table-empty">
+            <Package :size="24" />
+            <span>{{ viewMode === "mods" ? "仓库中暂无 Mod" : "仓库中暂无插件" }}</span>
+          </div>
+        </template>
       </el-table>
     </div>
   </div>
 
-  <el-dialog v-model="uploadOpen" title="上传插件制品" width="min(560px, 94vw)" @closed="resetUpload">
+  <el-dialog v-model="uploadOpen" :title="viewMode === 'mods' ? '上传 Mod 制品' : '上传插件制品'" width="min(560px, 94vw)" @closed="resetUpload">
     <el-form label-position="top">
       <div class="dialog-form-grid">
-        <el-form-item label="插件平台" required>
+        <el-form-item :label="viewMode === 'mods' ? 'Mod 平台' : '插件平台'" required>
           <el-select v-model="uploadForm.pluginType" class="full-control">
-            <el-option label="Spigot / Paper" value="spigot" />
-            <el-option label="Velocity" value="velocity" />
-            <el-option label="BungeeCord" value="bungee" />
-            <el-option label="Fabric 模组" value="fabric" />
-            <el-option label="Forge 模组" value="forge" />
+            <template v-if="viewMode === 'mods'">
+              <el-option label="Fabric 模组" value="fabric" />
+              <el-option label="Forge 模组" value="forge" />
+            </template>
+            <template v-else>
+              <el-option label="Spigot / Paper" value="spigot" />
+              <el-option label="Velocity" value="velocity" />
+              <el-option label="BungeeCord" value="bungee" />
+              <el-option label="Fabric 模组" value="fabric" />
+              <el-option label="Forge 模组" value="forge" />
+            </template>
           </el-select>
         </el-form-item>
         <el-form-item label="新服务器自动安装">
           <el-switch v-model="uploadForm.autoInstall" />
         </el-form-item>
       </div>
-      <el-form-item label="插件 JAR" required>
+      <el-form-item :label="viewMode === 'mods' ? 'Mod JAR' : '插件 JAR'" required>
         <el-upload :auto-upload="false" :limit="1" accept=".jar" :on-change="handleJAR" :on-remove="clearJAR">
           <el-button><Package :size="15" />选择 JAR</el-button>
         </el-upload>
@@ -412,6 +592,97 @@ onMounted(load);
     <template #footer>
       <el-button @click="uploadOpen = false">取消</el-button>
       <el-button type="primary" :loading="submitting" @click="uploadPlugin">上传</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="detailOpen" title="Mod 详情" width="min(760px, 94vw)">
+    <div v-if="detailForm" class="mod-detail">
+      <div class="mod-detail-head">
+        <span class="mod-icon-wrap detail">
+          <img v-if="modIcon(detailForm.plugin, detailForm.artifact)" :src="modIcon(detailForm.plugin, detailForm.artifact)" class="mod-icon" alt="" />
+          <Package v-else :size="28" />
+        </span>
+        <div class="mod-detail-title">
+          <div class="mod-detail-name">
+            <strong>{{ detailForm.plugin.name }}</strong>
+            <code>{{ modMeta(detailForm.artifact)?.id || modID(detailForm.plugin) }}</code>
+          </div>
+          <div class="mod-detail-tags">
+            <el-tag effect="plain">{{ platformLabel(detailForm.plugin.plugin_type) }}</el-tag>
+            <el-tag :type="environmentTagType(modMeta(detailForm.artifact)?.environment)" effect="plain">
+              {{ environmentLabel(modMeta(detailForm.artifact)?.environment) }}
+            </el-tag>
+            <el-tag type="primary" effect="plain"><code>{{ detailForm.artifact.version }}</code></el-tag>
+            <el-tag v-if="modMeta(detailForm.artifact)?.license" effect="plain">{{ modMeta(detailForm.artifact).license }}</el-tag>
+            <el-tag v-if="modMeta(detailForm.artifact)?.schema_version" effect="plain">schema v{{ modMeta(detailForm.artifact).schema_version }}</el-tag>
+          </div>
+        </div>
+      </div>
+
+      <p v-if="detailForm.artifact.description" class="mod-detail-description">{{ detailForm.artifact.description }}</p>
+      <p v-else class="mod-detail-description muted">该 Mod 未提供描述。</p>
+
+      <div class="mod-detail-section">
+        <h4>必装依赖（depends）</h4>
+        <div v-if="(modMeta(detailForm.artifact)?.depends || []).length" class="mod-dep-list">
+          <div v-for="dep in modMeta(detailForm.artifact).depends" :key="dep.id" class="mod-dep-item">
+            <template v-if="collectedDep(dep)">
+              <el-button link type="primary" @click="jumpToMod(collectedDep(dep))">
+                <span class="dep-id">{{ dep.id }}</span>
+                <span class="dep-range">{{ dep.version_range || "*" }}</span>
+              </el-button>
+              <el-tag type="success" effect="plain" size="small">已收录</el-tag>
+            </template>
+            <template v-else>
+              <span class="dep-id">{{ dep.id }}</span>
+              <span class="dep-range">{{ dep.version_range || "*" }}</span>
+              <el-tag type="info" effect="plain" size="small">未收录</el-tag>
+            </template>
+          </div>
+        </div>
+        <div v-else class="mod-detail-empty">无必装依赖</div>
+      </div>
+
+      <div class="mod-detail-section">
+        <h4>建议依赖（suggests）</h4>
+        <div v-if="(modMeta(detailForm.artifact)?.suggests || []).length" class="mod-dep-list">
+          <div v-for="dep in modMeta(detailForm.artifact).suggests" :key="dep.id" class="mod-dep-item">
+            <template v-if="collectedDep(dep)">
+              <el-button link type="primary" @click="jumpToMod(collectedDep(dep))">
+                <span class="dep-id">{{ dep.id }}</span>
+                <span class="dep-range">{{ dep.version_range || "*" }}</span>
+              </el-button>
+              <el-tag type="success" effect="plain" size="small">已收录</el-tag>
+            </template>
+            <template v-else>
+              <span class="dep-id">{{ dep.id }}</span>
+              <span class="dep-range">{{ dep.version_range || "*" }}</span>
+              <el-tag type="info" effect="plain" size="small">未收录</el-tag>
+            </template>
+          </div>
+        </div>
+        <div v-else class="mod-detail-empty">无建议依赖</div>
+      </div>
+
+      <div v-if="(modMeta(detailForm.artifact)?.entrypoints || []).length" class="mod-detail-section">
+        <h4>入口点（entrypoints）</h4>
+        <div class="mod-entrypoint-list">
+          <div v-for="entry in modMeta(detailForm.artifact).entrypoints" :key="entry.kind" class="mod-entrypoint-item">
+            <el-tag effect="plain" size="small">{{ entry.kind }}</el-tag>
+            <code>{{ entry.values?.join(", ") }}</code>
+          </div>
+        </div>
+      </div>
+
+      <div class="mod-detail-meta">
+        <span v-if="modMeta(detailForm.artifact)?.icon">图标：<code>{{ modMeta(detailForm.artifact).icon }}</code></span>
+        <span v-if="detailForm.artifact.website"><a :href="detailForm.artifact.website" target="_blank" rel="noreferrer">{{ detailForm.artifact.website }}</a></span>
+        <span v-if="detailForm.artifact.artifact?.original_filename"><code>{{ detailForm.artifact.artifact.original_filename }}</code></span>
+      </div>
+    </div>
+    <template #footer>
+      <el-button @click="detailOpen = false">关闭</el-button>
+      <el-button v-if="canDeploy" type="primary" @click="detailOpen = false; openDeploy(detailForm.plugin, detailForm.artifact)"><Upload :size="15" />部署此版本</el-button>
     </template>
   </el-dialog>
 
@@ -498,5 +769,31 @@ onMounted(load);
 .plugin-config-heading { min-height: 40px; border-bottom: 1px solid var(--app-border); padding: 11px 13px; color: var(--app-text); font-size: 12px; }
 .plugin-config-content :deep(.code-editor), .plugin-config-content :deep(.cm-editor), .plugin-config-content :deep(.cm-scroller) { min-height: 438px; height: 100%; }
 .plugin-config-targets { margin-top: 16px; }
+.repo-tabs { margin-bottom: 12px; }
+.mod-icon-wrap { display: inline-flex; width: 34px; height: 34px; flex: none; align-items: center; justify-content: center; border: 1px solid var(--app-border); border-radius: 6px; overflow: hidden; color: var(--app-text-muted); background: var(--app-surface-muted); }
+.mod-icon-wrap.detail { width: 52px; height: 52px; border-radius: 8px; }
+.mod-icon { width: 100%; height: 100%; object-fit: contain; }
+.mod-dep-count { font-size: 12px; color: var(--app-text); }
+.mod-dep-count.muted, .table-muted { color: var(--app-text-muted); }
+.mod-detail { display: flex; flex-direction: column; gap: 14px; }
+.mod-detail-head { display: flex; align-items: center; gap: 14px; }
+.mod-detail-title { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+.mod-detail-name { display: flex; align-items: center; gap: 10px; }
+.mod-detail-name code { color: var(--app-text-secondary); }
+.mod-detail-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.mod-detail-description { margin: 0; color: var(--app-text); font-size: 13px; line-height: 1.6; }
+.mod-detail-description.muted { color: var(--app-text-muted); }
+.mod-detail-section h4 { margin: 0 0 8px; font-size: 12px; color: var(--app-text-secondary); }
+.mod-dep-list { display: flex; flex-direction: column; gap: 6px; }
+.mod-dep-item { display: flex; align-items: center; gap: 8px; min-height: 28px; }
+.mod-dep-item .el-button { min-height: 26px; padding: 0 4px; }
+.dep-id { font: 12px/1.4 Consolas, monospace; color: var(--app-text); }
+.dep-range { font: 12px/1.4 Consolas, monospace; color: var(--app-text-muted); }
+.mod-detail-empty { color: var(--app-text-muted); font-size: 12px; }
+.mod-entrypoint-list { display: flex; flex-direction: column; gap: 6px; }
+.mod-entrypoint-item { display: flex; align-items: center; gap: 10px; min-height: 26px; }
+.mod-entrypoint-item code { font-size: 12px; color: var(--app-text-secondary); }
+.mod-detail-meta { display: flex; flex-wrap: wrap; gap: 6px 18px; padding-top: 10px; border-top: 1px solid var(--app-border); color: var(--app-text-muted); font-size: 12px; }
+.mod-detail-meta a { color: var(--app-accent); }
 @media (max-width: 720px) { .plugin-config-editor { min-height: 580px; grid-template-columns: 1fr; grid-template-rows: minmax(108px, auto) minmax(0, 1fr); } .plugin-config-files { max-height: 150px; border-right: 0; border-bottom: 1px solid var(--app-border); overflow-y: auto; } .plugin-config-content :deep(.code-editor), .plugin-config-content :deep(.cm-editor), .plugin-config-content :deep(.cm-scroller) { min-height: 390px; } }
 </style>

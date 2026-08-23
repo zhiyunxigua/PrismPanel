@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   Activity,
@@ -7,12 +7,10 @@ import {
   Boxes,
   CalendarClock,
   ChevronDown,
-  Download,
   Gamepad2,
   Gauge,
   Inbox,
   ListTodo,
-  Laptop,
   LogOut,
   Menu,
   Moon,
@@ -28,7 +26,7 @@ import {
 } from "lucide-vue-next";
 import { ElMessage } from "element-plus";
 import { changePassword, hasPermission, logout, sessionState } from "../session";
-import { checkWinAppUpdate, installWinAppUpdate, isWinApp } from "../runtime";
+import { isWinApp } from "../runtime";
 import { currentTheme, toggleTheme } from "../theme";
 import TaskRunDrawer from "../components/TaskRunDrawer.vue";
 
@@ -41,48 +39,12 @@ const taskDrawerOpen = ref(false);
 const taskRunningCount = ref(0);
 const alertDrawerOpen = ref(false);
 const passwordSubmitting = ref(false);
-const winAppUpdateOpen = ref(false);
-const winAppUpdateInstalling = ref(false);
-const winAppUpdateRelease = ref(null);
 const passwordFormRef = ref();
 const passwordForm = ref({
   currentPassword: "",
   newPassword: "",
   confirmPassword: "",
 });
-
-onMounted(checkForWinAppUpdate);
-
-async function checkForWinAppUpdate() {
-  if (!isWinApp()) return;
-  try {
-    const status = await checkWinAppUpdate();
-    const release = status?.update_available ? status.latest : null;
-    if (!release || window.sessionStorage.getItem("prism:winapp-update-dismissed") === release.version) return;
-    winAppUpdateRelease.value = release;
-    winAppUpdateOpen.value = true;
-  } catch {
-    // Update checks must not block normal startup when the Panel is offline.
-  }
-}
-
-function postponeWinAppUpdate() {
-  if (winAppUpdateRelease.value?.version) {
-    window.sessionStorage.setItem("prism:winapp-update-dismissed", winAppUpdateRelease.value.version);
-  }
-  winAppUpdateOpen.value = false;
-}
-
-async function installAvailableWinAppUpdate() {
-  if (!winAppUpdateRelease.value || winAppUpdateInstalling.value) return;
-  winAppUpdateInstalling.value = true;
-  try {
-    await installWinAppUpdate(winAppUpdateRelease.value.version);
-  } catch (error) {
-    winAppUpdateInstalling.value = false;
-    ElMessage.error(error.message || "WinApp 更新失败");
-  }
-}
 
 const navigation = computed(() => [
   { label: "总览", route: "overview", icon: Gauge },
@@ -95,7 +57,6 @@ const navigation = computed(() => [
   { label: "用户", route: "users", icon: Users, permission: "user.view" },
   { label: "网络白名单", route: "firewall", icon: ShieldCheck, permission: "firewall.view" },
   { label: "节点", route: "nodes", icon: Network, permission: "node.view" },
-  { label: "客户端更新", route: "winapp-updates", icon: Laptop, superAdmin: true },
 ].filter((item) => (!item.winAppOnly || isWinApp())
   && (!item.permission || hasPermission(item.permission))
   && (!item.superAdmin || sessionState.user?.group_code === "super_admin")));
@@ -307,37 +268,4 @@ async function submitPassword() {
   <el-drawer v-model="alertDrawerOpen" title="告警" size="min(420px, 92vw)">
     <div class="drawer-empty"><Inbox :size="24" /><span>暂无未处理告警</span></div>
   </el-drawer>
-
-  <el-dialog
-    v-model="winAppUpdateOpen"
-    title="发现 WinApp 新版本"
-    width="min(520px, 94vw)"
-    :show-close="false"
-    :close-on-click-modal="false"
-    :close-on-press-escape="false"
-  >
-    <div v-if="winAppUpdateRelease" class="winapp-update-dialog">
-      <div class="winapp-update-version">
-        <Download :size="20" />
-        <div><strong>{{ winAppUpdateRelease.version }}</strong><span>{{ (winAppUpdateRelease.size / 1024 / 1024).toFixed(2) }} MiB</span></div>
-      </div>
-      <div class="winapp-update-notes">{{ winAppUpdateRelease.notes || "本次版本未填写更新日志。" }}</div>
-    </div>
-    <template #footer>
-      <el-button :disabled="winAppUpdateInstalling" @click="postponeWinAppUpdate">下次启动时再提醒我</el-button>
-      <el-button type="primary" :loading="winAppUpdateInstalling" @click="installAvailableWinAppUpdate">
-        立即更新
-      </el-button>
-    </template>
-  </el-dialog>
 </template>
-
-<style scoped>
-.winapp-update-dialog { display: grid; gap: 14px; }
-.winapp-update-version { display: flex; align-items: center; gap: 10px; color: #2563a8; }
-.winapp-update-version strong, .winapp-update-version span { display: block; }
-.winapp-update-version strong { font-size: 18px; }
-.winapp-update-version span { margin-top: 2px; color: #6e7871; font-size: 12px; }
-.winapp-update-notes { max-height: 240px; overflow: auto; padding: 12px; color: #3d4941; background: #f5f7f5; border: 1px solid #dce2dd; border-radius: 6px; white-space: pre-wrap; word-break: break-word; }
-:global(html.dark) .winapp-update-notes { color: #d5dcd7; background: #222824; border-color: #3b453e; }
-</style>

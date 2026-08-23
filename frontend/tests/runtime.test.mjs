@@ -14,11 +14,9 @@ globalThis.window = {
 const {
   apiURL,
   consoleWebSocketURL,
-  checkWinAppUpdate,
   deleteSavedAccountWinApp,
   isProxyURL,
   isWinApp,
-  installWinAppUpdate,
   loginSavedAccountWinApp,
   loginWinApp,
   runtimeConfig,
@@ -97,20 +95,5 @@ test("WinApp account operations use the Wails bridge", async () => {
     ["saved", "account-a"],
     ["delete", "account-a"],
     ["password", "admin", "new-secret"],
-  ]);
-});
-
-test("WinApp client update operations use the Wails bridge", async () => {
-  const calls = [];
-  window.go = { main: { App: {
-    CheckWinAppUpdate: async (...args) => { calls.push(["update-check", ...args]); return { update_available: false }; },
-    InstallWinAppUpdate: async (...args) => { calls.push(["update-install", ...args]); },
-  } } };
-
-  await checkWinAppUpdate();
-  await installWinAppUpdate("0.0.2");
-  assert.deepEqual(calls, [
-    ["update-check"],
-    ["update-install", "0.0.2"],
   ]);
 });

@@ -7,6 +7,7 @@ const props = defineProps({
   windowStart: { type: [String, Date], default: null },
   windowEnd: { type: [String, Date], default: null },
   loading: { type: Boolean, default: false },
+  title: { type: String, default: "在线人数趋势" },
 });
 
 const emit = defineEmits(["open-game"]);
@@ -304,7 +305,7 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
   <section class="series-chart">
     <header class="series-chart-head">
       <div>
-        <h3>在线人数趋势</h3>
+        <h3>{{ title }}</h3>
         <p>{{ formatDateTime(visibleBounds.start) }} - {{ formatDateTime(visibleBounds.end) }}</p>
       </div>
       <div class="series-chart-controls">
@@ -316,6 +317,21 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
         </el-tooltip>
       </div>
     </header>
+
+    <div v-if="normalizedGames.length" class="series-legend" aria-label="图例">
+      <button
+        v-for="game in normalizedGames"
+        :key="'legend-' + game.game_id"
+        type="button"
+        class="series-legend-item"
+        :title="`${game.name || game.game_id}：最新 ${formatCount(game.latest_online_count ?? 0)} 人`"
+        @click="emit('open-game', game.game_id)"
+      >
+        <span :style="{ backgroundColor: game.color }"></span>
+        <strong>{{ game.name || game.game_id }}</strong>
+        <em>{{ formatCount(game.latest_online_count ?? 0) }}</em>
+      </button>
+    </div>
 
     <div
       ref="chartCanvas"
@@ -495,6 +511,46 @@ onBeforeUnmount(() => resizeObserver?.disconnect());
 .series-chart-controls input:focus {
   outline: 2px solid rgba(57, 126, 175, 0.18);
   border-color: #397eaf;
+}
+.series-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 10px;
+}
+.series-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid #e2e7e3;
+  border-radius: 12px;
+  background: #fff;
+  cursor: pointer;
+}
+.series-legend-item > span {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+.series-legend-item strong {
+  overflow: hidden;
+  color: #44524a;
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.series-legend-item em {
+  flex: 0 0 auto;
+  color: #7b857e;
+  font-size: 10px;
+  font-style: normal;
+}
+.series-legend-item:hover {
+  border-color: #b9c6bd;
+  background: #f6f9f7;
 }
 .chart-tooltip button {
   display: flex;

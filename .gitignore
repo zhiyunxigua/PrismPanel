@@ -12,6 +12,7 @@ target/
 run/
 frontend/node_modules/
 frontend/dist/
+.npm-cache/
 winapp/build/
 winapp/assets/*
 !winapp/assets/.gitignore

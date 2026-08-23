@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +14,6 @@ import (
 	"PrismPanel-winapp/internal/fileopen"
 	"PrismPanel-winapp/internal/game"
 	"PrismPanel-winapp/internal/settings"
-	"PrismPanel-winapp/internal/updater"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -111,59 +109,6 @@ func (a *App) RuntimeConfig() application.RuntimeConfig {
 	}
 	a.mu.Unlock()
 	return runtime
-}
-
-func (a *App) CheckWinAppUpdate() (updater.Status, error) {
-	runtime := a.service.RuntimeConfig()
-	if !runtime.Configured || runtime.PanelURL == "" {
-		return updater.Status{CurrentVersion: appVersion}, nil
-	}
-	ctx, cancel := a.operationContext(20 * time.Second)
-	defer cancel()
-	return updater.Check(ctx, runtime.PanelURL, appVersion)
-}
-
-func (a *App) InstallWinAppUpdate(version string) error {
-	if a.processes.AnyRunning() {
-		return errors.New("游戏正在运行，请退出游戏后再更新 WinApp")
-	}
-	runtime := a.service.RuntimeConfig()
-	if !runtime.Configured || runtime.PanelURL == "" {
-		return errors.New("尚未配置 Panel 地址")
-	}
-	checkContext, checkCancel := a.operationContext(20 * time.Second)
-	status, err := updater.Check(checkContext, runtime.PanelURL, appVersion)
-	checkCancel()
-	if err != nil {
-		return err
-	}
-	if !status.UpdateAvailable || status.Latest == nil || status.Latest.Version != version {
-		return errors.New("指定的 WinApp 更新已不可用，请重新检查")
-	}
-	downloadContext, downloadCancel := a.operationContext(15 * time.Minute)
-	downloaded, err := updater.Download(downloadContext, runtime.PanelURL, *status.Latest)
-	downloadCancel()
-	if err != nil {
-		return err
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	a.mu.Lock()
-	appContext := a.ctx
-	a.mu.Unlock()
-	if appContext == nil {
-		return errors.New("WinApp 尚未完成启动")
-	}
-	if err := updater.BeginApply(downloaded, executable, os.Getpid()); err != nil {
-		return err
-	}
-	go func() {
-		time.Sleep(250 * time.Millisecond)
-		wailsRuntime.Quit(appContext)
-	}()
-	return nil
 }
 
 func (a *App) waitForStartup() {

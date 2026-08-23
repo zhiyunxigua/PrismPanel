@@ -223,6 +223,98 @@ func TestMCServerSeriesSelectsByKey(t *testing.T) {
 	_ = serverB
 }
 
+func TestMCServerSummaryAggregation(t *testing.T) {
+	service, repository := newTestService(t)
+	ctx := context.Background()
+
+	// 服务器 A：在线（12/100，20ms）
+	serverA, err := repository.CreateMCServer(ctx, store.MCServerInput{Name: "A", Host: "a.example.com", Port: 25565})
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	// 服务器 B：离线（采集失败）
+	serverB, err := repository.CreateMCServer(ctx, store.MCServerInput{Name: "B", Host: "b.example.com", Port: 25566})
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	// 服务器 C：从未采集（unknown）
+	if _, err := repository.CreateMCServer(ctx, store.MCServerInput{Name: "C", Host: "c.example.com", Port: 25567}); err != nil {
+		t.Fatalf("create C: %v", err)
+	}
+
+	online := uint32(12)
+	maximum := uint32(100)
+	latency := uint32(20)
+	// 直接写最近一次结果，避免真实网络 ping
+	if err := repository.UpdateMCServerResult(ctx, serverA.ID, store.MCServerStatusOK, &online, &maximum, &latency, "1.20.4", ""); err != nil {
+		t.Fatalf("result A: %v", err)
+	}
+	if err := repository.UpdateMCServerResult(ctx, serverB.ID, store.MCServerStatusFailed, nil, nil, nil, "", "connection refused"); err != nil {
+		t.Fatalf("result B: %v", err)
+	}
+
+	summary, err := service.MCServerSummary(ctx)
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if summary.TotalServers != 3 || summary.OnlineServers != 1 || summary.FailedServers != 1 || summary.UnknownServers != 1 {
+		t.Fatalf("counts = %+v", summary)
+	}
+	if summary.TotalOnline != 12 || summary.TotalMax != 100 {
+		t.Fatalf("totals online/max = %d/%d", summary.TotalOnline, summary.TotalMax)
+	}
+	if summary.AverageLatency == nil || *summary.AverageLatency != 20 {
+		t.Fatalf("average latency = %v", summary.AverageLatency)
+	}
+	if summary.LastCheckedAt == nil {
+		t.Fatal("last checked at is nil")
+	}
+	if len(summary.Servers) != 3 {
+		t.Fatalf("servers len = %d", len(summary.Servers))
+	}
+	byKey := map[string]MCServerSummaryServer{}
+	for _, item := range summary.Servers {
+		byKey[item.ServerKey] = item
+	}
+	if item := byKey[serverA.ServerKey]; item.LastStatus != store.MCServerStatusOK ||
+		item.LastOnline == nil || *item.LastOnline != 12 ||
+		item.LastMax == nil || *item.LastMax != 100 ||
+		item.LastLatencyMS == nil || *item.LastLatencyMS != 20 {
+		t.Fatalf("server A summary = %+v", item)
+	}
+	if item := byKey[serverB.ServerKey]; item.LastStatus != store.MCServerStatusFailed || item.LastError == "" {
+		t.Fatalf("server B summary = %+v", item)
+	}
+	if item := byKey["c.example.com:25567"]; item.LastStatus != store.MCServerStatusUnknown {
+		t.Fatalf("server C summary = %+v", item)
+	}
+}
+
+func TestMCServerSummaryAverageLatencyNilWhenNoOnline(t *testing.T) {
+	service, repository := newTestService(t)
+	ctx := context.Background()
+
+	if _, err := repository.CreateMCServer(ctx, store.MCServerInput{Name: "D", Host: "d.example.com", Port: 25565}); err != nil {
+		t.Fatalf("create D: %v", err)
+	}
+	summary, err := service.MCServerSummary(ctx)
+	if err != nil {
+		t.Fatalf("summary: %v", err)
+	}
+	if summary.TotalServers != 1 || summary.OnlineServers != 0 {
+		t.Fatalf("counts = %+v", summary)
+	}
+	if summary.AverageLatency != nil {
+		t.Fatalf("average latency should be nil, got %v", *summary.AverageLatency)
+	}
+	if summary.TotalOnline != 0 || summary.TotalMax != 0 {
+		t.Fatalf("totals = %d/%d", summary.TotalOnline, summary.TotalMax)
+	}
+	if summary.LastCheckedAt != nil {
+		t.Fatalf("last checked at should be nil, got %v", summary.LastCheckedAt)
+	}
+}
+
 // closedLocalPort 返回一个 127.0.0.1 上不可达的空闲端口（先监听再关闭）。
 func closedLocalPort() (uint16, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

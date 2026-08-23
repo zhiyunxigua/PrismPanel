@@ -24,8 +24,6 @@ export async function updateSavedPasswordWinApp(username, password) { return cal
 export async function openRemoteFileWinApp(input, chooseApplication = false) { return callWinApp("OpenRemoteFile", input, Boolean(chooseApplication)); }
 export async function fileOpenLimitWinApp() { return callWinApp("FileOpenLimit"); }
 
-export async function checkWinAppUpdate() { return callWinApp("CheckWinAppUpdate"); }
-export async function installWinAppUpdate(version) { return callWinApp("InstallWinAppUpdate", version); }
 export async function selectMCGameDirectory() { return callWinApp("SelectMCGameDirectory"); }
 export async function selectJavaExecutable() { return callWinApp("SelectJavaExecutable"); }
 

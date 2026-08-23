@@ -25,7 +25,6 @@ import (
 	panelplugins "PrismPanel/internal/plugins"
 	"PrismPanel/internal/schedule"
 	"PrismPanel/internal/store"
-	"PrismPanel/internal/winappupdates"
 )
 
 type Server struct {
@@ -36,7 +35,6 @@ type Server struct {
 	nodes       *panelnodes.Service
 	metrics     *panelmetrics.Store
 	plugins     *panelplugins.Repository
-	winApp      *winappupdates.Repository
 	netGames    *netgames.Service
 	scheduler   *schedule.Service
 	fileProxies *fileProxyStore
@@ -61,14 +59,13 @@ func NewServer(
 	connectionManager *daemon.Manager,
 	metricStore *panelmetrics.Store,
 	pluginRepository *panelplugins.Repository,
-	winAppRepository *winappupdates.Repository,
 	netGameService *netgames.Service,
 	scheduler *schedule.Service,
 	logger *slog.Logger,
 ) *Server {
 	server := &Server{
 		config: cfg, auth: authService, store: repository, connections: connectionManager,
-		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, winApp: winAppRepository, netGames: netGameService,
+		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, netGames: netGameService,
 		scheduler: scheduler, fileProxies: newFileProxyStore(), logger: logger,
 	}
 	connectionManager.AddStatusCallback(func(_ string, status daemon.RuntimeStatus) {
@@ -112,14 +109,12 @@ func NewServer(
 	mux.HandleFunc("/api/v1/net-games/settings", server.requireSuperAdmin(server.handleMCSettings))
 	mux.HandleFunc("/api/v1/net-games/mc-servers", server.requirePermission("dashboard.view", server.handleMCServers))
 	mux.HandleFunc("/api/v1/net-games/mc-servers/series", server.requirePermission("dashboard.view", server.handleMCServerSeries))
+	mux.HandleFunc("/api/v1/net-games/mc-servers/summary", server.requirePermission("dashboard.view", server.handleMCServerSummary))
 	mux.HandleFunc("/api/v1/net-games/mc-servers/collect", server.requireSuperAdmin(server.handleMCServerCollect))
 	mux.HandleFunc("/api/v1/net-games/mc-servers/", server.requirePermission("dashboard.view", server.handleMCServer))
 	mux.HandleFunc("/api/v1/players/transfer", server.requireAuth(server.handlePlayerTransfer))
 	mux.HandleFunc("/api/v1/operators", server.requireSuperAdmin(server.handleOperators))
 	mux.HandleFunc("/api/v1/operators/", server.requireSuperAdmin(server.handleOperator))
-	mux.HandleFunc("/api/v1/winapp/update", server.handleWinAppUpdate)
-	mux.HandleFunc("/api/v1/winapp/releases", server.requireSuperAdmin(server.handleWinAppReleases))
-	mux.HandleFunc("/api/v1/winapp/releases/", server.handleWinAppReleaseDownload)
 	mux.HandleFunc("/api/v1/firewall/nodes", server.requireAuth(server.handleFirewall))
 	mux.HandleFunc("/api/v1/firewall/nodes/", server.requireAuth(server.handleFirewall))
 	mux.HandleFunc("/api/v1/files/authorize", server.requireAuth(server.handleFileAuthorize))

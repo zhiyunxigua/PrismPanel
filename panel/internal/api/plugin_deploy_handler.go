@@ -36,7 +36,41 @@ func (s *Server) handlePluginArtifact(writer http.ResponseWriter, request *http.
 		s.handlePluginDeployment(writer, request, pluginType, pluginID, artifactPart, true)
 		return
 	}
+	if parts[3] == "icon" && len(parts) == 4 {
+		s.handlePluginIcon(writer, request, pluginType, pluginID, artifactPart)
+		return
+	}
 	http.NotFound(writer, request)
+}
+
+// handlePluginIcon 返回制品 jar 内的 mod 图标（fabric.mod.json 的 icon 字段）。
+func (s *Server) handlePluginIcon(writer http.ResponseWriter, request *http.Request, pluginType, pluginID, artifactPart string) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(writer, "GET")
+		return
+	}
+	if err := s.authorize(request, "plugin.view"); err != nil {
+		writeRequestError(writer, err)
+		return
+	}
+	artifactID, err := strconv.ParseInt(artifactPart, 10, 64)
+	if err != nil || artifactID < 1 || !panelplugins.ValidPluginType(pluginType) {
+		writeRequestError(writer, apiError("INVALID_REQUEST", "invalid plugin artifact"))
+		return
+	}
+	contents, contentType, err := s.plugins.Icon(pluginID, artifactID, pluginType)
+	if err != nil {
+		writeError(writer, err)
+		return
+	}
+	if len(contents) == 0 {
+		http.NotFound(writer, request)
+		return
+	}
+	writer.Header().Set("Content-Type", contentType)
+	writer.Header().Set("Cache-Control", "private, max-age=3600")
+	writer.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = writer.Write(contents)
 }
 
 func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *http.Request, pluginType, pluginID, artifactPart string, configOnly bool) {
