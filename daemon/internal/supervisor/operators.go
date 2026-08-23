@@ -179,6 +179,8 @@ func (m *Manager) operatorStatusLocked(panelID string) OperatorRegistryStatus {
 	m.mu.RUnlock()
 	for _, current := range instances {
 		current.mu.RLock()
+		// Targets 只含支持 OP 同步的子服；proxy 平台不参与。
+		// mod 平台（fabric/forge）是否参与由插件声明的 operators.sync capability 驱动。
 		if !model.IsProxyPlatform(current.cfg.Platform) && current.managed {
 			target := current.operatorSync
 			if target.State == "" {
@@ -205,6 +207,9 @@ func (m *Manager) RestoreOperators(instanceID string) {
 	current.mu.RLock()
 	platform := current.cfg.Platform
 	current.mu.RUnlock()
+	// OP 同步由插件声明的 operators.sync capability 驱动（daemon 恢复时向
+	// 已连接且声明 capability 的实例补发 operators.replace）；仅 proxy 平台无插件
+	// OP 管理能力，跳过。未声明 capability 的插件由 Request 的 capability 检查自然拒绝。
 	if model.IsProxyPlatform(platform) {
 		return
 	}
@@ -232,6 +237,9 @@ func (m *Manager) applyOperatorCatalog(ctx context.Context, catalog OperatorCata
 		managed := current.managed
 		platform := current.cfg.Platform
 		current.mu.RUnlock()
+		// 仅 proxy 平台跳过；mod 平台（fabric/forge）在插件声明 operators.sync 后
+		// 自动参与 OP 同步，未声明 capability 的插件由 connection.Request 的
+		// capability 检查自然拒绝（标 failed 而非误报成功）。
 		if !managed || model.IsProxyPlatform(platform) {
 			continue
 		}

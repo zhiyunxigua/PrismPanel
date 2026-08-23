@@ -7,6 +7,7 @@ public record BackendCatalog(long revision, List<BackendServer> servers) {
         if (revision < 0) {
             throw new IllegalArgumentException("revision must not be negative");
         }
-        servers = List.copyOf(servers);
+        // daemon 在无后端配置时可能发送 servers:null，防御性视为空列表，避免 List.copyOf(null) NPE。
+        servers = servers == null ? List.of() : List.copyOf(servers);
     }
 }

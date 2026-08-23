@@ -127,6 +127,11 @@ func (m *Manager) applyProxyCatalog(
 	current.proxySync.UpdatedAt = time.Now().UTC()
 	current.mu.Unlock()
 	m.publishState(current)
+	// 序列化前保证 Servers 非 nil：nil 切片会序列化为 "servers": null，
+	// 插件端 BackendCatalog record 反序列化将因 List.copyOf(null) 抛 NPE。
+	if catalog.Servers == nil {
+		catalog.Servers = []ProxyBackend{}
+	}
 	var result ProxyBackendResult
 	err := connection.Request(ctx, "proxy.backends.replace", catalog, &result)
 	current.mu.Lock()

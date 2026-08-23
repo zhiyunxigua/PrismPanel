@@ -2,12 +2,15 @@ package com.xigua.prism.fabric;
 
 import com.xigua.prism.core.PrismCore;
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.loader.api.FabricLoader;
 
 /**
  * PrismPanel Fabric 运行态上报入口。
  *
  * <p>通过 Fabric Loader 的 ModInitializer 入口在服务端启动时执行：读取 daemon 注入的
- * PRISM_* 环境变量，可用则连接 daemon 的 /api/v1/ws/plugin 上报已加载 mod 列表；
+ * PRISM_* 环境变量，可用则连接 daemon 的 /api/v1/ws/plugin 上报已加载 mod 列表，
+ * 并注册 {@link FabricOperatorRegistry}（读写服务端 ops.json 实现全服 OP 管理，
+ * DaemonBridge 检测到非空 operatorRegistry 时自动声明 operators.sync capability）；
  * 环境变量缺失（例如客户端误装）时静默禁用，不影响游戏运行。
  */
 public final class PrismFabric implements ModInitializer {
@@ -16,19 +19,27 @@ public final class PrismFabric implements ModInitializer {
     @Override
     public void onInitialize() {
         FabricLogger logger = new FabricLogger();
+        FabricScheduler scheduler = new FabricScheduler();
+        FabricOperatorRegistry operators = new FabricOperatorRegistry(
+                FabricLoader.getInstance().getGameDir().resolve("ops.json"),
+                scheduler,
+                logger
+        );
         core = PrismCore.create(
                 "fabric",
                 logger,
-                new FabricScheduler(),
+                scheduler,
                 new FabricTelemetry(),
                 null,
                 null,
-                null
+                operators
         ).orElse(null);
         if (core == null) {
+            operators.close();
             logger.info("Prism daemon environment is unavailable; integration is disabled.");
             return;
         }
+        operators.start();
         Runtime.getRuntime().addShutdownHook(new Thread(this::close, "prism-fabric-shutdown"));
         core.start();
         logger.info("Prism Fabric integration enabled; reporting loaded mods to daemon.");

@@ -12,6 +12,7 @@ dependencies {
     // 不引用任何 Minecraft 类，因此无需 fabric-loom / yarn mappings，
     // 产物可跨 MC 版本使用（要求 loader >= 0.14，Fabric Loader 0.15+ 本身要求 Java 17）。
     compileOnly("net.fabricmc:fabric-loader:0.16.9")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
 }
 
 tasks.processResources {

@@ -4,7 +4,8 @@ plugins {
 
 dependencies {
     implementation(project(":core"))
-    compileOnly("net.md-5:bungeecord-proxy:1.21-R0.1-SNAPSHOT")
+    // Waterfall 是 BungeeCord 兼容分支，提供同名 net.md_5.bungee API（papermc 仓库可达）。
+    compileOnly("io.github.waterfallmc:waterfall-api:1.21-R0.1-SNAPSHOT")
 }
 
 tasks.processResources {
