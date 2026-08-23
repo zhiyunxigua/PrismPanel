@@ -29,6 +29,9 @@ panel/panel.yaml
 panel/panel.db
 *.db
 
+# ---- 第三方参考源码（不推送） ----
+EG/
+
 # ---- 工作区会话缓存/临时（本工作区产生，可随时重建） ----
 .gocache/
 .gomodcache/
