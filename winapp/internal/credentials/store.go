@@ -26,6 +26,8 @@ type Store interface {
 	Get(panelURL, accountID string) (Credential, error)
 	Save(panelURL, username, password string, lastLoginAt time.Time) (Account, error)
 	Delete(panelURL, accountID string) error
+	// ClearAll 删除指定面板 URL 范围下的全部已保存账号与自动登录标记（不触碰其他面板/游戏账号）。
+	ClearAll(panelURL string) error
 	AutoLoginAccount(panelURL string) (string, error)
 	SetAutoLoginAccount(panelURL, accountID string) error
 }

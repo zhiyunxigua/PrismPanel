@@ -54,6 +54,8 @@ export async function mcDevLogList() { return callWinApp("MCDevLogList"); }
 export async function mcDevLogClear() { return callWinApp("MCDevLogClear"); }
 export async function mcOpenDevLog() { return callWinApp("MCOpenDevLog"); }
 export async function mcDevLogPath() { return callWinApp("MCDevLogPath"); }
+export async function mcCacheList() { return callWinApp("MCCacheList"); }
+export async function mcCacheClear(ids) { return callWinApp("MCCacheClear", ids || []); }
 export async function mcInstallVersion(versionID) { return callWinApp("MCInstallVersion", versionID); }
 export async function mcInstallFabric(gameVersion, loaderVersion) { return callWinApp("MCInstallFabric", gameVersion, loaderVersion); }
 export async function mcAddDownload(kind, versionID, loader) { return callWinApp("MCAddDownload", kind, versionID, loader || ""); }
@@ -116,6 +118,13 @@ function replaceRuntime(value) {
 
 const devLogSkipMethods = new Set(["MCPushDevLog", "MCLaunchProgress", "MCPollDeviceLogin", "MCDevLogList", "MCDevLogPath", "MCDevModeEnabled"]);
 
+// 需脱敏的参数索引（按方法名）：密码/令牌类参数在日志摘要中一律显示 ***。
+const devLogMaskedArgIndexes = {
+  Login: [1], // username, password, remember
+  MCThirdPartyLogin: [2], // server, username, password
+  UpdateSavedPassword: [1], // username, password
+};
+
 function callWinApp(method, ...args) {
   const operation = window.go?.main?.App?.[method];
   if (typeof operation !== "function") {
@@ -125,7 +134,11 @@ function callWinApp(method, ...args) {
   const result = operation(...args);
   if (!devLogSkipMethods.has(method) && devLoggingEnabled()) {
     let detail = method;
-    const summary = args.map(summarizeArg).filter(Boolean).join(", ");
+    const maskedIndexes = devLogMaskedArgIndexes[method] || [];
+    const summary = args
+      .map((arg, index) => (maskedIndexes.includes(index) ? "***" : summarizeArg(arg)))
+      .filter(Boolean)
+      .join(", ");
     if (summary) detail += `(${summary})`;
     const elapsedMs = Math.round(performance.now() - started);
     if (result && typeof result.then === "function") {
@@ -149,19 +162,40 @@ function devLoggingEnabled() {
   return devLogging === true;
 }
 
+// 对象摘要中纳入的字段（补充 filename/loader/instance_id/server_id/targets 等）。
+const devLogObjectKeys = [
+  "id", "version", "version_id", "name", "project_id", "game_version", "server_ip",
+  "server_port", "filename", "loader", "instance_id", "server_id", "targets",
+  "kind", "state_id", "account_id", "query", "status", "stage", "width", "height",
+  "max_memory_mb",
+];
+// 永不输出到日志的值：即使出现在对象字段里也一律打码。
+const devLogSensitiveValues = new Set(["password", "passwd", "access_token", "refresh_token", "client_token", "token", "secret", "***"]);
+
 function summarizeArg(value) {
   if (value === undefined || value === null) return "";
   if (typeof value === "string") {
     const trimmed = value.trim();
+    if (devLogSensitiveValues.has(trimmed.toLowerCase())) return "***";
     return trimmed.length > 60 ? trimmed.slice(0, 57) + "..." : trimmed;
   }
   if (typeof value === "object") {
     try {
       const plain = {};
-      for (const key of ["id", "version", "version_id", "name", "project_id", "game_version", "server_ip"]) {
-        if (value[key] !== undefined && value[key] !== null && value[key] !== "") {
-          plain[key] = String(value[key]);
+      for (const key of devLogObjectKeys) {
+        if (value[key] === undefined || value[key] === null || value[key] === "") continue;
+        const raw = value[key];
+        const lowerKey = key.toLowerCase();
+        if (devLogSensitiveValues.has(lowerKey)) {
+          plain[key] = "***";
+          continue;
         }
+        if (Array.isArray(raw)) {
+          plain[key] = `[${raw.length}项]`;
+          continue;
+        }
+        const text = String(raw);
+        plain[key] = text.length > 40 ? text.slice(0, 37) + "..." : text;
       }
       const text = JSON.stringify(plain);
       return text.length > 120 ? text.slice(0, 117) + "..." : text;

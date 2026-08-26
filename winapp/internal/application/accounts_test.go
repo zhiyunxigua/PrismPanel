@@ -223,6 +223,12 @@ func (s *memoryCredentialStore) Delete(panelURL, accountID string) error {
 	return nil
 }
 
+func (s *memoryCredentialStore) ClearAll(panelURL string) error {
+	delete(s.accounts, panelURL)
+	delete(s.auto, panelURL)
+	return nil
+}
+
 func (s *memoryCredentialStore) AutoLoginAccount(panelURL string) (string, error) {
 	return s.auto[panelURL], nil
 }

@@ -18,10 +18,11 @@ import (
 )
 
 type App struct {
-	service   *application.Service
-	joins     *game.JoinManager
-	processes *game.ProcessManager
-	files     *fileopen.Service
+	service    *application.Service
+	joins      *game.JoinManager
+	processes  *game.ProcessManager
+	files      *fileopen.Service
+	savedCreds credentials.Store
 
 	mu          sync.Mutex
 	ctx         context.Context
@@ -39,8 +40,10 @@ func newApp() (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	credStore := credentials.NewStore()
 	app := &App{
-		service:     application.New(settings.NewStore(settingsPath), credentials.NewStore()),
+		service:     application.New(settings.NewStore(settingsPath), credStore),
+		savedCreds:  credStore,
 		joins:       game.NewJoinManager(),
 		processes:   game.NewProcessManager(),
 		startupDone: make(chan struct{}),
@@ -54,6 +57,7 @@ func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
 	a.ctx = ctx
 	a.mu.Unlock()
+	game.SetDevLogAppVersion(appVersion)
 	game.SetDevLogEmitter(func(entry game.DevLogEntry) {
 		a.mu.Lock()
 		current := a.ctx
@@ -123,10 +127,13 @@ func (a *App) waitForStartup() {
 	}
 }
 
+// ConfigurePanelURL 配置面板地址（DevLog 记录，含脱敏后的 URL）。
 func (a *App) ConfigurePanelURL(panelURL string) (application.RuntimeConfig, error) {
+	started := time.Now()
 	configureContext, cancel := a.operationContext(15 * time.Second)
 	defer cancel()
 	runtime, err := a.service.ConfigurePanelURL(configureContext, panelURL)
+	game.DevLog("panel-config", "配置面板地址", time.Since(started), err, game.DevLogOpt{Input: panelURL})
 	if err == nil {
 		a.mu.Lock()
 		a.startErr = ""
@@ -226,6 +233,31 @@ func (a *App) MCOpenDevLog() error { return game.OpenDevLog() }
 // MCDevLogPath 返回开发者日志文件路径。
 func (a *App) MCDevLogPath() string { return game.DevLogPath() }
 
+// MCCacheList 返回设置页可清理的缓存项清单（含大小与存在性）。
+func (a *App) MCCacheList() []game.CacheEntry {
+	return game.ListCacheEntries(a.savedCreds, a.service.RuntimeConfig().PanelURL)
+}
+
+// MCCacheClear 删除用户勾选的缓存项，逐项返回结果（devOp 记录 kind "cache-clear"）。
+// 清理国际版账号后无需额外刷新：账号为即时读取，下一次 MCAuthStatus 即反映已退出登录。
+func (a *App) MCCacheClear(ids []string) []game.CacheClearResult {
+	var results []game.CacheClearResult
+	_ = a.devOp("cache-clear", "清理缓存："+strings.Join(ids, ", "), func() error {
+		results = game.ClearCacheEntries(a.savedCreds, a.service.RuntimeConfig().PanelURL, ids)
+		var failed []string
+		for _, result := range results {
+			if !result.OK {
+				failed = append(failed, result.ID+": "+result.Error)
+			}
+		}
+		if len(failed) > 0 {
+			return errors.New(strings.Join(failed, "；"))
+		}
+		return nil
+	})
+	return results
+}
+
 // MCPushDevLog 前端通用操作日志：所有界面操作与反馈都通过这里写入日志文件。
 func (a *App) MCPushDevLog(kind, detail string, elapsedMs int64, ok bool, errorText string) {
 	if !game.DevModeEnabled() {
@@ -240,13 +272,17 @@ func (a *App) MCPushDevLog(kind, detail string, elapsedMs int64, ok bool, errorT
 
 // MCAuthStatus 返回当前国际版账号（离线或微软）。
 func (a *App) MCAuthStatus() (game.MCAccountSummary, error) {
+	started := time.Now()
 	account, err := game.NewMCLocalStore().Load()
 	if err != nil {
 		if errors.Is(err, game.ErrMCNone) {
+			game.DevLog("auth-status", "查询国际版账号状态（未登录）", time.Since(started), nil)
 			return game.MCAccountSummary{}, nil
 		}
+		game.DevLog("auth-status", "查询国际版账号状态", time.Since(started), err)
 		return game.MCAccountSummary{}, err
 	}
+	game.DevLog("auth-status", "查询国际版账号状态", time.Since(started), nil, game.DevLogOpt{Input: "mode=" + string(account.Mode) + " name=" + account.Name})
 	return account.Summary(), nil
 }
 
@@ -318,21 +354,29 @@ func (a *App) MCLogout() error {
 
 // MCAvailableVersions 拉取 Mojang 可用版本。
 func (a *App) MCAvailableVersions() ([]game.MCVersionEntry, error) {
+	started := time.Now()
 	ctx, cancel := a.operationContext(30 * time.Second)
 	defer cancel()
-	return game.FetchMCVersions(ctx)
+	versions, err := game.FetchMCVersions(ctx)
+	game.DevLog("versions-list", "拉取 Mojang 可用版本列表", time.Since(started), err, game.DevLogOpt{Input: fmt.Sprintf("count=%d", len(versions))})
+	return versions, err
 }
 
 // MCFabricLoaders 拉取指定版本可用的 Fabric Loader。
 func (a *App) MCFabricLoaders(gameVersion string) ([]game.MCFabricLoader, error) {
+	started := time.Now()
 	ctx, cancel := a.operationContext(30 * time.Second)
 	defer cancel()
-	return game.FetchMCFabricLoaders(ctx, gameVersion)
+	loaders, err := game.FetchMCFabricLoaders(ctx, gameVersion)
+	game.DevLog("fabric-loaders", "拉取 Fabric Loader "+gameVersion, time.Since(started), err, game.DevLogOpt{Input: fmt.Sprintf("game=%s count=%d", gameVersion, len(loaders))})
+	return loaders, err
 }
 
 // MCInstalledVersions 列出本地已安装的国际版版本。
 func (a *App) MCInstalledVersions() []game.MCInstalledVersion {
+	started := time.Now()
 	versions, err := game.InstalledMCVersions()
+	game.DevLog("versions-local", "列出本地已安装版本", time.Since(started), err, game.DevLogOpt{Input: fmt.Sprintf("count=%d", len(versions))})
 	if err != nil {
 		return nil
 	}
@@ -348,12 +392,17 @@ func (a *App) MCDeleteVersion(versionID string) error {
 
 // MCIsFabricInstalled 判断指定版本是否已安装 Fabric Loader。
 func (a *App) MCIsFabricInstalled(gameVersion string) (bool, error) {
-	return game.MCFabricInstalled(gameVersion)
+	started := time.Now()
+	installed, err := game.MCFabricInstalled(gameVersion)
+	game.DevLog("fabric-check", "检查 Fabric 安装状态 "+gameVersion, time.Since(started), err, game.DevLogOpt{Input: fmt.Sprintf("game=%s installed=%v", gameVersion, installed)})
+	return installed, err
 }
 
 // MCGetVersionSettings 读取版本特定设置（不存在时返回空值）。
 func (a *App) MCGetVersionSettings(versionID string) (game.MCVersionSettings, error) {
+	started := time.Now()
 	settings, _, err := game.LoadMCVersionSettings(versionID)
+	game.DevLog("version-settings-read", "读取版本设置 "+versionID, time.Since(started), err, game.DevLogOpt{Input: "version=" + versionID})
 	return settings, err
 }
 
@@ -418,7 +467,12 @@ func (a *App) MCAddDownload(kind, versionID, loader string) (game.MCDownloadTask
 }
 
 // MCDownloadList 返回下载队列中的全部任务。
-func (a *App) MCDownloadList() []game.MCDownloadTask { return game.MCDownloadList() }
+func (a *App) MCDownloadList() []game.MCDownloadTask {
+	started := time.Now()
+	list := game.MCDownloadList()
+	game.DevLog("download-list", "查询下载队列", time.Since(started), nil, game.DevLogOpt{Input: fmt.Sprintf("count=%d", len(list))})
+	return list
+}
 
 // MCDownloadActiveCount 返回排队中 + 下载中的任务数。
 func (a *App) MCDownloadActiveCount() int { return game.MCDownloadActiveCount() }
@@ -439,7 +493,9 @@ func (a *App) MCRemoveDownload(id string) error {
 
 // MCClearDownloads 清空已完成/失败/已取消的任务。
 func (a *App) MCClearDownloads() {
+	started := time.Now()
 	game.MCDownloadClearFinished()
+	game.DevLog("download-queue", "清空下载队列（已完成/失败/取消）", time.Since(started), nil)
 }
 
 // MCLaunch 启动国际版/离线客户端（异步，通过 MCLaunchProgress 查询状态）。
@@ -462,7 +518,9 @@ func (a *App) MCLaunch(input game.MCLaunchRequest) (game.JoinProgress, error) {
 	progress := a.joins.Start(ctx, server, func(taskCtx context.Context, _ game.ServerConfig, report func(string, string, float64)) (game.LaunchResult, error) {
 		started := time.Now()
 		result, launchErr := game.LaunchMC(taskCtx, input, account, a.processes, report)
-		game.DevLog("launch", fmt.Sprintf("启动 %s → %s:%d", input.VersionID, server.IP, server.Port), time.Since(started), launchErr)
+		launchInput := fmt.Sprintf("version=%s server=%s:%d memory=%dMB fabric=%v jvm=%s",
+			input.VersionID, server.IP, server.Port, input.MaxMemoryMB, input.Fabric, input.JVMArgs)
+		game.DevLog("launch", fmt.Sprintf("启动 %s → %s:%d", input.VersionID, server.IP, server.Port), time.Since(started), launchErr, game.DevLogOpt{Input: launchInput})
 		return result, launchErr
 	})
 	return progress, nil
@@ -480,7 +538,10 @@ func (a *App) MCLaunchProgress(id string) game.JoinProgress { return a.joins.Sta
 
 // MCModsList 列出指定版本已安装的 mod。
 func (a *App) MCModsList(versionID string) ([]game.MCModEntry, error) {
-	return game.MCModsList(versionID)
+	started := time.Now()
+	mods, err := game.MCModsList(versionID)
+	game.DevLog("mods-list", "列出 mods "+versionID, time.Since(started), err, game.DevLogOpt{Input: fmt.Sprintf("version=%s count=%d", versionID, len(mods))})
+	return mods, err
 }
 
 // MCModsToggle 启用/禁用指定 mod。

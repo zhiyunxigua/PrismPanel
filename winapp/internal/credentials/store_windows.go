@@ -161,6 +161,27 @@ func (WindowsStore) Delete(panelURL, accountID string) error {
 	return nil
 }
 
+// ClearAll 删除指定面板 URL 范围下的全部已保存账号与自动登录标记。
+// 仅枚举当前面板 scope（PrismPanel/<scope>/account/* + auto-login），
+// 不会触碰其他面板或国际版游戏账号（PrismPanel/game/mc-account）。
+func (WindowsStore) ClearAll(panelURL string) error {
+	store := WindowsStore{}
+	accounts, err := store.List(panelURL)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, account := range accounts {
+		if err := store.Delete(panelURL, account.ID); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := store.SetAutoLoginAccount(panelURL, ""); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
 func (WindowsStore) AutoLoginAccount(panelURL string) (string, error) {
 	item, err := readCredential(autoLoginTarget(panelURL))
 	if err != nil {

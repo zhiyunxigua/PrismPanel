@@ -1,8 +1,10 @@
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import { Bug, FolderOpen, RefreshCw, Search, Settings, Trash2 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import {
+  mcCacheClear,
+  mcCacheList,
   mcDevLogClear,
   mcDevLogList,
   mcDevLogPath,
@@ -28,7 +30,18 @@ const devLogListener = ref(null);
 const launcherSettings = reactive({ concurrency: 8, mirror: "auto", game_dir: "", default_java: "", default_memory_mb: 2048 });
 const customMirror = ref("");
 
-onMounted(loadPage);
+const cacheEntries = ref([]);
+const cacheLoading = ref(false);
+const cacheClearing = ref(false);
+const cacheSelected = ref([]);
+const cacheTableRef = ref(null);
+const cacheSelectableCount = computed(() => cacheEntries.value.filter((entry) => entry.exists).length);
+const cacheAllSelected = computed(() => cacheSelectableCount.value > 0 && cacheSelected.value.length === cacheSelectableCount.value);
+
+onMounted(() => {
+  loadPage();
+  refreshCacheList();
+});
 onBeforeUnmount(() => {
   if (devLogListener.value) {
     if (window.runtime && typeof window.runtime.EventsOff === "function") {
@@ -132,6 +145,75 @@ async function clearDevLog() {
   }
 }
 
+async function refreshCacheList() {
+  cacheLoading.value = true;
+  try {
+    cacheEntries.value = await mcCacheList() || [];
+  } catch (error) {
+    ElMessage.error(error.message || "读取缓存清单失败");
+  } finally {
+    cacheLoading.value = false;
+  }
+}
+
+function onCacheSelectionChange(rows) {
+  cacheSelected.value = rows;
+}
+
+function toggleCacheAll() {
+  if (cacheAllSelected.value) {
+    cacheEntries.value.forEach((row) => cacheTableRef.value?.toggleRowSelection(row, false));
+  } else {
+    cacheEntries.value.filter((entry) => entry.exists).forEach((row) => cacheTableRef.value?.toggleRowSelection(row, true));
+  }
+}
+
+function formatCacheSize(row) {
+  if (row.size_text) return row.size_text;
+  const bytes = Number(row.size_bytes) || 0;
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const digits = value >= 100 || unit === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unit]}`;
+}
+
+async function clearSelectedCaches() {
+  const ids = cacheSelected.value.map((entry) => entry.id);
+  if (!ids.length) return;
+  const labels = cacheSelected.value.map((entry) => entry.name).join("、");
+  try {
+    await ElMessageBox.confirm(
+      `确定删除以下 ${ids.length} 项缓存？\n${labels}\n\n国际版账号与面板登录账号删除后需重新登录；下载缓存 / Java 运行时 / 日志删除后可重新生成。`,
+      "删除缓存",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消", distinguishCancelAndClose: true },
+    );
+  } catch {
+    return;
+  }
+  cacheClearing.value = true;
+  try {
+    const results = await mcCacheClear(ids) || [];
+    const failed = results.filter((result) => !result.ok);
+    const succeeded = results.filter((result) => result.ok).length;
+    if (failed.length) {
+      ElMessage.warning(`已删除 ${succeeded} 项，${failed.length} 项失败：` + failed.map((result) => `${result.id}: ${result.error || "未知错误"}`).join("；"));
+    } else {
+      ElMessage.success(`已删除 ${succeeded} 项缓存`);
+    }
+    await refreshCacheList();
+  } catch (error) {
+    ElMessage.error(error.message || "删除缓存失败");
+  } finally {
+    cacheClearing.value = false;
+  }
+}
+
 async function openDevLogFile() {
   try {
     await mcOpenDevLog();
@@ -176,7 +258,7 @@ function formatDevTime(value) {
     <div class="page-toolbar">
       <div>
         <h2>总设置</h2>
-        <p>开发者模式与全局下载/启动设置</p>
+        <p>开发者模式、缓存清理与全局下载/启动设置</p>
       </div>
     </div>
 
@@ -199,6 +281,48 @@ function formatDevTime(value) {
         <div class="settings-row">
           <el-button plain @click="openDevLog"><Search :size="15" />开发者日志</el-button>
           <el-button plain @click="openDevLogFile"><FolderOpen :size="15" />打开日志文件</el-button>
+        </div>
+      </div>
+    </section>
+
+    <section class="settings-card">
+      <div class="settings-card-head">
+        <Trash2 :size="18" />
+        <div>
+          <h3>缓存清理</h3>
+          <p>勾选要清理的缓存项后删除（仅删除勾选项，需二次确认）。游戏版本与 mods 不会被删除。</p>
+        </div>
+      </div>
+      <div class="settings-card-body">
+        <el-table
+          ref="cacheTableRef"
+          :data="cacheEntries"
+          v-loading="cacheLoading"
+          size="small"
+          @selection-change="onCacheSelectionChange"
+        >
+          <el-table-column type="selection" width="40" :selectable="(row) => row.exists" />
+          <el-table-column label="缓存项" min-width="180">
+            <template #default="{ row }">
+              <div class="cache-name">{{ row.name }}</div>
+              <div class="cache-path" :title="row.path">{{ row.path || "—" }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="description" label="说明" min-width="260" show-overflow-tooltip />
+          <el-table-column label="大小" width="110" align="right">
+            <template #default="{ row }">{{ formatCacheSize(row) }}</template>
+          </el-table-column>
+        </el-table>
+        <div class="settings-actions cache-actions">
+          <div class="cache-actions-left">
+            <el-button plain size="small" :loading="cacheLoading" @click="refreshCacheList"><RefreshCw :size="14" />刷新</el-button>
+            <el-button plain size="small" :disabled="!cacheSelectableCount" @click="toggleCacheAll">
+              {{ cacheAllSelected ? "取消全选" : "全选" }}
+            </el-button>
+          </div>
+          <el-button type="danger" plain :disabled="!cacheSelected.length" :loading="cacheClearing" @click="clearSelectedCaches">
+            <Trash2 :size="14" />删除选中（{{ cacheSelected.length }}）
+          </el-button>
         </div>
       </div>
     </section>
@@ -273,8 +397,11 @@ function formatDevTime(value) {
         <span class="dev-log-kind">{{ entry.kind }}</span>
         <span class="dev-log-detail">{{ entry.detail }}</span>
         <span class="dev-log-result" :class="devLogClass(entry)">{{ entry.ok ? "OK" : "FAIL" }}</span>
+        <span v-if="entry.input" class="dev-log-input">输入：{{ entry.input }}</span>
         <span v-if="!entry.ok" class="dev-log-error">{{ entry.error }}</span>
-        <span class="dev-log-elapsed">{{ entry.elapsed }}</span>
+        <span v-if="!entry.ok && entry.error_detail" class="dev-log-error">{{ entry.error_detail }}</span>
+        <span class="dev-log-elapsed">{{ entry.elapsed }}<template v-if="entry.elapsed_ms != null"> ({{ entry.elapsed_ms }}ms)</template></span>
+        <span v-if="entry.app_version || entry.goos" class="dev-log-env">{{ [entry.app_version, entry.goos && entry.goarch ? `${entry.goos}/${entry.goarch}` : ""].filter(Boolean).join(" · ") }}</span>
       </div>
     </div>
     <template #footer>
@@ -300,6 +427,10 @@ function formatDevTime(value) {
 .path-input-row { display: flex; width: 100%; gap: 8px; }
 .path-input-row .el-input { flex: 1; }
 .settings-actions { display: flex; justify-content: flex-end; }
+.cache-actions { align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.cache-actions-left { display: flex; align-items: center; gap: 6px; }
+.cache-name { color: var(--app-text-primary); font-size: 13px; font-weight: 600; }
+.cache-path { color: var(--app-text-secondary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
 .mods-toolbar { display: flex; gap: 8px; }
 .mods-toolbar-actions { display: flex; align-items: center; gap: 6px; }
 .dev-log-toolbar { align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
@@ -312,8 +443,10 @@ function formatDevTime(value) {
 .dev-log-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--app-text-primary); }
 .dev-log-result.ok { color: var(--el-color-success); font-weight: 600; }
 .dev-log-result.fail { color: var(--el-color-danger); font-weight: 600; }
+.dev-log-input { grid-column: 1 / -1; color: var(--app-text-secondary); overflow-wrap: anywhere; font-family: var(--app-font-mono, monospace); }
 .dev-log-error { grid-column: 1 / -1; color: var(--el-color-danger); overflow-wrap: anywhere; }
 .dev-log-elapsed { color: var(--app-text-secondary); font-variant-numeric: tabular-nums; text-align: right; }
+.dev-log-env { grid-column: 1 / -1; color: var(--app-text-muted); font-size: 11px; }
 .mods-empty { display: grid; place-items: center; gap: 8px; padding: 24px; color: var(--app-text-muted); border: 1px dashed var(--app-border); border-radius: 6px; text-align: center; }
 @media (max-width: 900px) {
   .settings-grid { grid-template-columns: 1fr; }

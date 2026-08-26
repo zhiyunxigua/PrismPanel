@@ -14,5 +14,6 @@ func (unsupportedStore) Save(string, string, string, time.Time) (Account, error)
 	return Account{}, ErrUnsupported
 }
 func (unsupportedStore) Delete(string, string) error              { return ErrUnsupported }
+func (unsupportedStore) ClearAll(string) error                    { return ErrUnsupported }
 func (unsupportedStore) AutoLoginAccount(string) (string, error)  { return "", ErrUnsupported }
 func (unsupportedStore) SetAutoLoginAccount(string, string) error { return ErrUnsupported }

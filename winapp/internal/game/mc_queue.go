@@ -256,6 +256,7 @@ func (m *MCDownloadManager) run(ctx context.Context, id string) {
 		return
 	}
 	defer task.cancel()
+	started := time.Now()
 
 	report := func(stage, message string, percent float64) {
 		m.mu.Lock()
@@ -298,6 +299,11 @@ func (m *MCDownloadManager) run(ctx context.Context, id string) {
 	copy := *task
 	m.running--
 	m.mu.Unlock()
+	// 失败时记录开发者日志：附带任务上下文（kind/版本/loader）与错误明细。
+	if copy.Status == MCTaskFailed {
+		DevLog("download", fmt.Sprintf("下载任务失败 %s %s %s", copy.Kind, copy.VersionID, copy.Loader),
+			time.Since(started), err, DevLogOpt{Input: fmt.Sprintf("task=%s kind=%s version=%s loader=%s", copy.ID, copy.Kind, copy.VersionID, copy.Loader)})
+	}
 	m.emit(&copy)
 	m.schedule()
 }

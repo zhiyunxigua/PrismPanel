@@ -19,6 +19,8 @@ const {
   isWinApp,
   loginSavedAccountWinApp,
   loginWinApp,
+  mcCacheClear,
+  mcCacheList,
   runtimeConfig,
   savedAccounts,
   updateSavedPasswordWinApp,
@@ -96,4 +98,21 @@ test("WinApp account operations use the Wails bridge", async () => {
     ["delete", "account-a"],
     ["password", "admin", "new-secret"],
   ]);
+});
+
+test("cache clean operations use the Wails bridge", async () => {
+  const calls = [];
+  window.go = { main: { App: {
+    MCCacheList: async () => [{ id: "game-cache", name: "下载缓存", size_bytes: 1024 }],
+    MCCacheClear: async (...args) => { calls.push(["clear", ...args]); return [{ id: "game-cache", ok: true }]; },
+  } } };
+
+  const entries = await mcCacheList();
+  assert.equal(entries[0].id, "game-cache");
+  const results = await mcCacheClear(["game-cache", "dev-log"]);
+  assert.equal(results[0].ok, true);
+  assert.deepEqual(calls, [["clear", ["game-cache", "dev-log"]]]);
+  const cleared = await mcCacheClear();
+  assert.deepEqual(cleared, [{ id: "game-cache", ok: true }]);
+  assert.deepEqual(calls[1], ["clear", []]);
 });
