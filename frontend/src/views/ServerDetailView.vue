@@ -8,6 +8,13 @@ import {
 import { ElMessage, ElMessageBox } from "element-plus";
 import { request } from "../api";
 import { hasPermission } from "../session";
+import { showUploadResult } from "../uploadResult";
+import {
+  SERVER_LIST_RETRIES,
+  SERVER_LIST_RETRY_DELAY_MS,
+  resolveServerList,
+  sleep,
+} from "./server-detail-resolve";
 import ConsoleOutput from "../components/servers/ConsoleOutput.vue";
 import MetricLineChart from "../components/metrics/MetricLineChart.vue";
 import ServerEditorDialog from "../components/servers/ServerEditorDialog.vue";
@@ -17,6 +24,7 @@ import TargetSelectionTree from "../components/TargetSelectionTree.vue";
 const route = useRoute();
 const router = useRouter();
 const loading = ref(false);
+const loadError = ref("");
 const submitting = ref(false);
 const server = ref(null);
 const instances = ref([]);
@@ -30,7 +38,7 @@ const pluginActionLoading = ref("");
 const pluginUploadInput = ref(null);
 const pluginUploadState = ref({
   active: false, completed: 0, total: 0, name: "",
-  installed: 0, replaced: 0, skipped: 0, failed: 0,
+  installed: 0, replaced: 0, skipped: 0, failed: 0, failures: [],
 });
 const pluginDropActive = ref(false);
 const pluginConflictOpen = ref(false);
@@ -398,7 +406,7 @@ async function handlePluginDrop(event) {
   pluginDropActive.value = false;
   const dropped = Array.from(event.dataTransfer?.files || []);
   const files = dropped.filter((file) => file.name.toLowerCase().endsWith(".jar"));
-  if (files.length !== dropped.length) ElMessage.warning("已忽略非 JAR 文件");
+  if (files.length !== dropped.length) ElMessage.warning("已忽略 " + (dropped.length - files.length) + " 个非 JAR 文件");
   await uploadPluginFiles(files);
 }
 
@@ -441,7 +449,7 @@ async function uploadPluginFiles(files) {
   let restartRequested = false;
   pluginUploadState.value = {
     active: true, completed: 0, total: files.length, name: files[0].name,
-    installed: 0, replaced: 0, skipped: 0, failed: 0,
+    installed: 0, replaced: 0, skipped: 0, failed: 0, failures: [],
   };
   for (const file of files) {
     pluginUploadState.value.name = file.name;
@@ -463,7 +471,7 @@ async function uploadPluginFiles(files) {
       else pluginUploadState.value.installed += 1;
     } catch (error) {
       pluginUploadState.value.failed += 1;
-      ElMessage.error(file.name + "：" + (error.message || "上传失败"));
+      pluginUploadState.value.failures.push({ name: file.name, error: error.message || "上传失败" });
     } finally {
       pluginUploadState.value.completed += 1;
     }
@@ -477,13 +485,17 @@ async function uploadPluginFiles(files) {
 function showPluginUploadSummary() {
   const state = pluginUploadState.value;
   const parts = [];
-  if (state.installed) parts.push("安装 " + state.installed);
-  if (state.replaced) parts.push("替换 " + state.replaced);
-  if (state.skipped) parts.push("跳过 " + state.skipped);
-  if (state.failed) parts.push("失败 " + state.failed);
-  const message = parts.join("，") || "未上传插件";
-  if (state.failed) ElMessage.warning(message);
-  else ElMessage.success(message);
+  if (state.installed) parts.push("已安装 " + state.installed + " 个插件");
+  if (state.replaced) parts.push("已替换 " + state.replaced + " 个插件");
+  if (state.skipped) parts.push("跳过 " + state.skipped + " 个插件");
+  showUploadResult(ElMessage, {
+    parts,
+    successEmpty: "未上传插件",
+    failed: state.failed || 0,
+    failures: state.failures || [],
+    succeeded: (state.installed || 0) + (state.replaced || 0),
+    noun: "插件",
+  });
 }
 
 async function restartAfterPluginUpload(instanceID) {
@@ -558,15 +570,39 @@ function beforeWindowUnload(event) {
 async function load(silent = false) {
   if (!silent) loading.value = true;
   try {
-    const data = await request(`/api/v1/servers?node_id=${encodeURIComponent(nodeId.value)}`);
-    const target = (data.servers || []).find((item) => item.server_id === serverId.value);
-    if (!target) {
-      ElMessage.error("服务器不存在");
+    // 目标缺失/列表为空时短暂重试，避免节点刚重连、daemon 忙碌或
+    // 面板返回空 payload 时把「暂时读不到」误判为「服务器不存在」。
+    let outcome = null;
+    for (let attempt = 0; attempt <= SERVER_LIST_RETRIES; attempt += 1) {
+      if (attempt > 0) await sleep(SERVER_LIST_RETRY_DELAY_MS);
+      const data = await request(`/api/v1/servers?node_id=${encodeURIComponent(nodeId.value)}`);
+      outcome = resolveServerList(data, serverId.value);
+      if (outcome.status === "ok" || outcome.status === "node_error" || outcome.status === "missing") {
+        break;
+      }
+      // status === "empty"：列表为空且无节点错误，继续重试。
+    }
+    if (outcome.status === "node_error") {
+      // 节点离线/接口异常：显示节点错误并允许重试，不跳转。
+      loadError.value = outcome.message;
+      if (!silent) ElMessage.error(outcome.message);
+      return;
+    }
+    if (outcome.status === "empty") {
+      // 列表为空但无错误：节点可能刚重连/未就绪，提示刷新重试而不是踢回列表。
+      loadError.value = "节点服务器列表暂时为空，节点可能正在重连，请点击刷新重试";
+      if (!silent) ElMessage.warning(loadError.value);
+      return;
+    }
+    if (outcome.status === "missing") {
+      // 服务器确实不存在（已被删除或路由参数错误）：允许提示并跳回列表。
+      if (!silent) ElMessage.warning("服务器不存在，可能已被删除");
       await router.replace({ name: "servers" });
       return;
     }
-    server.value = target;
-    instances.value = (data.instances || []).filter((item) => item.server_id === serverId.value);
+    loadError.value = "";
+    server.value = outcome.server;
+    instances.value = outcome.instances;
     if (!instances.value.some((item) => item.instance_id === selectedInstanceId.value)) {
       selectedInstanceId.value = instances.value[0]?.instance_id || "";
     }
@@ -576,12 +612,13 @@ async function load(silent = false) {
     if (!healthInstanceId.value) healthInstanceId.value = instances.value[0]?.instance_id || "";
     await loadMetrics();
     if (
-      target.type === "mirror" && canReadDeployment.value &&
+      outcome.server.type === "mirror" && canReadDeployment.value &&
       instances.value.some((item) => item.deployment_locked || item.state === "deploying") && !deploymentTask.value
     ) {
       await recoverActiveDeployment();
     }
   } catch (error) {
+    loadError.value = error.message;
     if (!silent) ElMessage.error(error.message);
   } finally {
     if (!silent) loading.value = false;
@@ -648,7 +685,7 @@ async function invoke(instance, action) {
       `/api/v1/instances/${encodeURIComponent(instance.instance_id)}/${action}?node_id=${encodeURIComponent(nodeId.value)}`,
       { method: "POST", body: "{}" },
     );
-    ElMessage.success("操作已提交");
+    ElMessage.success("已提交" + labels[action] + "请求：" + instance.name);
     await load(true);
     if (action === "restart" && canViewPlugins.value) await loadPlugins(true);
   } catch (error) {
@@ -1094,6 +1131,20 @@ onBeforeRouteLeave(async () => {
         </el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="loadError"
+      :title="loadError"
+      type="error"
+      :closable="false"
+      show-icon
+      class="detail-load-error"
+    >
+      <template #default>
+        <el-button size="small" :loading="loading" @click="load()">刷新重试</el-button>
+        <el-button size="small" @click="router.replace({ name: 'servers' })">返回列表</el-button>
+      </template>
+    </el-alert>
 
     <el-tabs v-model="activeTab" class="management-tabs server-detail-tabs">
       <el-tab-pane v-if="canReadConsole" label="控制台" name="console">

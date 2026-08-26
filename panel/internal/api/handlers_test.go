@@ -85,3 +85,27 @@ func TestSanitizeInstanceMessagesProtectsPlayerAndPluginDetails(t *testing.T) {
 		t.Fatal("expected aggregate player count to remain available")
 	}
 }
+
+func TestServerListPayloadValid(t *testing.T) {
+	cases := []struct {
+		name  string
+		raw   string
+		valid bool
+	}{
+		{name: "nil payload", raw: "", valid: false},
+		{name: "null payload", raw: "null", valid: false},
+		{name: "empty object", raw: "{}", valid: false},
+		{name: "missing servers field", raw: `{"instances":[]}`, valid: false},
+		{name: "null servers", raw: `{"servers":null,"instances":[]}`, valid: false},
+		{name: "empty servers array", raw: `{"servers":[],"instances":[]}`, valid: true},
+		{name: "populated servers", raw: `{"servers":[{"server_id":"a"}],"instances":[]}`, valid: true},
+		{name: "malformed json", raw: `{not-json`, valid: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serverListPayloadValid(json.RawMessage(tc.raw)); got != tc.valid {
+				t.Fatalf("serverListPayloadValid(%q) = %v, want %v", tc.raw, got, tc.valid)
+			}
+		})
+	}
+}

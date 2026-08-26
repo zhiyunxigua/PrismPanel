@@ -1,11 +1,12 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { Activity, Boxes, Cpu, MemoryStick, Network, Plus, RefreshCw, Search, Server, Users } from "lucide-vue-next";
-import { ElMessage } from "element-plus";
+import { Activity, ArrowDown, Boxes, CheckSquare, Cpu, ListChecks, MemoryStick, Network, OctagonX, Plus, Power, RefreshCw, Search, Server, Square, SquarePower, Trash2, Users } from "lucide-vue-next";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { request } from "../api";
 import { importArchive } from "../fileApi";
 import { hasPermission, sessionState } from "../session";
+import { summarizeBatchResult } from "../batchResult";
 import ServerEditorDialog from "../components/servers/ServerEditorDialog.vue";
 import OperatorManagementPanel from "../components/operators/OperatorManagementPanel.vue";
 import { mergeOnlinePlayers } from "../components/operators/operator-management";
@@ -53,6 +54,128 @@ const runningCount = computed(() => rows.value.reduce(
 ));
 const onlinePlayers = computed(() => mergeOnlinePlayers(nodeContents.value));
 
+// —— 批量操作：勾选服务器组后批量 启停/重启/强停/删除 ——
+const selectedKeys = ref(new Set());
+const batchSubmitting = ref(false);
+const batchActionLabels = { start: "启动", stop: "停止", restart: "重启", kill: "强制停止", delete: "删除" };
+const canBatchStart = computed(() => hasPermission("instance.start"));
+const canBatchStop = computed(() => hasPermission("instance.stop"));
+const canBatchRestart = computed(() => hasPermission("instance.restart"));
+const canBatchKill = computed(() => hasPermission("instance.kill"));
+const canBatchDelete = computed(() => hasPermission("server.delete"));
+const hasBatchActions = computed(() => canBatchStart.value || canBatchStop.value || canBatchRestart.value || canBatchKill.value || canBatchDelete.value);
+const selectedRows = computed(() => filteredRows.value.filter((row) => selectedKeys.value.has(selectKey(row))));
+const allFilteredSelected = computed(() => (
+  filteredRows.value.length > 0 && filteredRows.value.every((row) => selectedKeys.value.has(selectKey(row)))
+));
+
+function selectKey(row) {
+  return row.node.id + ":" + row.server_id;
+}
+
+function isSelected(row) {
+  return selectedKeys.value.has(selectKey(row));
+}
+
+function toggleSelect(row, value) {
+  const next = new Set(selectedKeys.value);
+  if (value) next.add(selectKey(row));
+  else next.delete(selectKey(row));
+  selectedKeys.value = next;
+}
+
+function toggleSelectAll() {
+  if (allFilteredSelected.value) {
+    selectedKeys.value = new Set();
+    return;
+  }
+  selectedKeys.value = new Set(filteredRows.value.map(selectKey));
+}
+
+function pruneSelection() {
+  const valid = new Set(rows.value.map(selectKey));
+  const next = new Set([...selectedKeys.value].filter((key) => valid.has(key)));
+  if (next.size !== selectedKeys.value.size) selectedKeys.value = next;
+}
+
+async function confirmBatch(action) {
+  const count = selectedRows.value.length;
+  const names = selectedRows.value.map((row) => row.name).join("、");
+  const label = batchActionLabels[action];
+  if (action === "kill") {
+    const result = await ElMessageBox.prompt(
+      "强制停止可能导致未保存的数据丢失。",
+      "批量强制停止 " + count + " 个服务器组",
+      {
+        type: "error",
+        inputPlaceholder: "输入「强制停止」确认",
+        inputValidator: (value) => value === "强制停止" || "请输入「强制停止」",
+        confirmButtonText: "强制停止",
+        cancelButtonText: "取消",
+      },
+    );
+    return result.value === "强制停止";
+  }
+  if (action === "delete") {
+    const first = await ElMessageBox.confirm(
+      "将删除 " + count + " 个服务器组：" + names + "。\n删除会移除 daemon 上的服务器配置，工作目录和文件不会被删除；仅当组内全部子服已停止时才允许删除。",
+      "批量删除服务器组",
+      { type: "error", confirmButtonText: "继续", cancelButtonText: "取消" },
+    );
+    const second = await ElMessageBox.prompt(
+      "高风险操作，请输入「删除」完成二次确认。",
+      "确认批量删除",
+      {
+        type: "error",
+        inputPlaceholder: "输入「删除」确认",
+        inputValidator: (value) => value === "删除" || "请输入「删除」",
+        confirmButtonText: "确认删除",
+        cancelButtonText: "取消",
+      },
+    );
+    return second.value === "删除";
+  }
+  const impact = count + " 个服务器组";
+  await ElMessageBox.confirm(
+    "确认" + label + "选中的" + impact + "（" + names + "）？",
+    "批量" + label,
+    { type: "warning", confirmButtonText: label, cancelButtonText: "取消" },
+  );
+  return true;
+}
+
+// 批量结果提示：summarizeBatchResult 为共享纯函数（frontend/src/batchResult.js），
+// 风格与 t5 的 uploadResult.js 一致（全成功→success、部分失败→warning 带明细、全失败→error）。
+async function runBatch(action) {
+  if (batchSubmitting.value || !selectedRows.value.length) return;
+  const targets = selectedRows.value.map((row) => ({ node_id: row.node.id, server_id: row.server_id }));
+  const label = batchActionLabels[action];
+  try {
+    if (action !== "start") {
+      if (!await confirmBatch(action)) return;
+    }
+  } catch {
+    return; // 用户取消
+  }
+  batchSubmitting.value = true;
+  try {
+    const data = await request("/api/v1/instances/batch", {
+      method: "POST",
+      body: JSON.stringify({ action, targets, confirm: action === "delete" }),
+    });
+    const summary = data?.summary || { total: targets.length, succeeded: 0, failed: targets.length };
+    const failures = (data?.results || []).filter((item) => !item.success);
+    const result = summarizeBatchResult(summary, failures);
+    ElMessage[result.type]("批量" + label + "：" + result.message);
+    if (action === "delete") selectedKeys.value = new Set();
+    await load(true);
+  } catch (error) {
+    ElMessage.error("批量" + label + "失败：" + error.message);
+  } finally {
+    batchSubmitting.value = false;
+  }
+}
+
 const stateLabels = {
   stopped: "已停止",
   starting: "启动中",
@@ -88,6 +211,7 @@ async function load(silent = false) {
     const data = await request("/api/v1/servers");
     nodeContents.value = data.nodes || [];
     validateRememberedNode();
+    pruneSelection();
   } catch (error) {
     if (!silent) ElMessage.error(error.message);
   } finally {
@@ -264,6 +388,53 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
         <p v-else>{{ rows.length }} 个服务器组 · {{ runningCount }} 个运行实例</p>
       </div>
       <div class="toolbar-actions">
+        <template v-if="activeSection === 'servers' && hasBatchActions">
+          <el-tooltip :content="allFilteredSelected ? '取消全选' : '全选当前列表'">
+            <el-button
+              class="square-button"
+              :disabled="!filteredRows.length"
+              :aria-label="allFilteredSelected ? '取消全选' : '全选'"
+              @click="toggleSelectAll"
+            >
+              <CheckSquare v-if="allFilteredSelected" :size="16" />
+              <Square v-else :size="16" />
+            </el-button>
+          </el-tooltip>
+          <el-dropdown
+            trigger="click"
+            :disabled="!selectedRows.length || batchSubmitting"
+            @command="runBatch"
+          >
+            <el-button :loading="batchSubmitting" :disabled="!selectedRows.length">
+              <ListChecks :size="16" />批量操作<template v-if="selectedRows.length">（{{ selectedRows.length }}）</template><el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item v-if="canBatchStart" command="start" :disabled="batchSubmitting">
+                  <Power :size="14" />批量启动
+                </el-dropdown-item>
+                <el-dropdown-item v-if="canBatchStop" command="stop" :disabled="batchSubmitting">
+                  <SquarePower :size="14" />批量停止
+                </el-dropdown-item>
+                <el-dropdown-item v-if="canBatchRestart" command="restart" :disabled="batchSubmitting">
+                  <RefreshCw :size="14" />批量重启
+                </el-dropdown-item>
+                <el-dropdown-item v-if="canBatchKill" command="kill" :disabled="batchSubmitting" divided>
+                  <OctagonX :size="14" />批量强制停止
+                </el-dropdown-item>
+                <el-dropdown-item
+                  v-if="canBatchDelete"
+                  command="delete"
+                  :disabled="batchSubmitting"
+                  divided
+                  class="batch-delete-item"
+                >
+                  <Trash2 :size="14" />批量删除（高风险）
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </template>
         <el-tooltip v-if="activeSection === 'servers'" content="刷新">
           <el-button class="square-button" :loading="loading" aria-label="刷新" @click="load()">
             <RefreshCw v-if="!loading" :size="16" />
@@ -304,13 +475,25 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
         </div>
 
         <div v-loading="loading" class="server-group-grid">
-      <button
+      <div
         v-for="row in filteredRows"
         :key="row.node.id + ':' + row.server_id"
-        class="server-group-card"
-        type="button"
-        @click="openDetail(row)"
+        class="server-group-card-slot"
+        :class="{ 'is-selected': isSelected(row) }"
       >
+        <el-checkbox
+          v-if="hasBatchActions"
+          class="server-group-check"
+          :model-value="isSelected(row)"
+          :aria-label="'选择 ' + row.name"
+          @click.stop
+          @change="(value) => toggleSelect(row, value)"
+        />
+        <button
+          class="server-group-card"
+          type="button"
+          @click="openDetail(row)"
+        >
         <div class="server-card-head">
           <span class="server-card-symbol">
             <Boxes v-if="row.type === 'mirror'" :size="20" />
@@ -341,7 +524,8 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
           <div><Users :size="14" /><span>玩家</span><strong>{{ playerSummary(row) }}</strong></div>
           <div><Activity :size="14" /><span>TPS</span><strong>{{ tpsSummary(row) }}</strong></div>
         </div>
-      </button>
+        </button>
+      </div>
       <div v-if="!loading && !filteredRows.length" class="empty-resource server-grid-empty">
         <Server :size="26" />
         <strong>暂无服务器</strong>

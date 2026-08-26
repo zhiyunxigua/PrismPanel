@@ -11,6 +11,7 @@ import { hasPermission } from "../../session";
 import { downloadFile, fileExportURL, fileJSON, importArchive, uploadFile } from "../../fileApi";
 import { isExternalFileDrag, plainUploadItems, scanDroppedItems } from "../../fileDrop";
 import { isWinApp, openRemoteFileWinApp, runtimeConfig } from "../../runtime";
+import { showUploadResult } from "../../uploadResult";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
 
 const CodeEditor = defineAsyncComponent(() => import("./CodeEditor.vue"));
@@ -35,6 +36,7 @@ const dragTargetPath = ref("");
 const uploadState = ref({
   active: false, completed: 0, total: 0, name: "", scanning: false,
   directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
+  failures: [],
 });
 const archiveImporting = ref(false);
 const archiveCreating = ref(false);
@@ -631,6 +633,7 @@ async function uploadItems(items, baseDirectory) {
   uploadState.value = {
     active: true, completed: 0, total: items.files.length, name: items.files[0]?.path || "创建目录",
     scanning: false, directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
+    failures: [],
   };
   let overwriteAll = false;
   try {
@@ -641,17 +644,21 @@ async function uploadItems(items, baseDirectory) {
         uploadState.value.directories += 1;
       } catch (error) {
         uploadState.value.failed += 1;
+        uploadState.value.failures.push({ name: directory, error: error.message || "创建目录失败" });
       }
     }
     for (const item of items.files) {
       uploadState.value.name = item.path;
       const targetPath = joinPath(baseDirectory, item.path);
       const result = await uploadOneFile(target, targetPath, item.file, overwriteAll);
-      if (result === "overwrite-all") overwriteAll = true;
-      if (result === "uploaded") uploadState.value.uploaded += 1;
-      if (result === "overwritten" || result === "overwrite-all") uploadState.value.overwritten += 1;
-      if (result === "skipped") uploadState.value.skipped += 1;
-      if (result === "failed") uploadState.value.failed += 1;
+      if (result.status === "overwrite-all") overwriteAll = true;
+      if (result.status === "uploaded") uploadState.value.uploaded += 1;
+      if (result.status === "overwritten" || result.status === "overwrite-all") uploadState.value.overwritten += 1;
+      if (result.status === "skipped") uploadState.value.skipped += 1;
+      if (result.status === "failed") {
+        uploadState.value.failed += 1;
+        uploadState.value.failures.push({ name: item.path, error: result.error || "上传失败" });
+      }
       uploadState.value.completed += 1;
     }
     showUploadSummary(uploadState.value);
@@ -666,11 +673,11 @@ async function uploadItems(items, baseDirectory) {
 async function uploadOneFile(target, targetPath, file, overwriteAll) {
   try {
     await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, overwriteAll);
-    return overwriteAll ? "overwritten" : "uploaded";
+    return { status: overwriteAll ? "overwritten" : "uploaded" };
   } catch (error) {
     if (error.code !== "FILE_EXISTS") {
       if (["RESULT_UNKNOWN", "UNAUTHENTICATED"].includes(error.code)) throw error;
-      return "failed";
+      return { status: "failed", error: error.message || "上传失败" };
     }
   }
   const action = await conflictDialog.value.ask({
@@ -679,26 +686,30 @@ async function uploadOneFile(target, targetPath, file, overwriteAll) {
     detail: "“全部覆盖”仅对本次拖入或选择的后续重复文件生效。",
     allowOverwriteAll: true,
   });
-  if (action === "skip") return "skipped";
+  if (action === "skip") return { status: "skipped" };
   try {
     await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, true);
-    return action === "overwrite-all" ? "overwrite-all" : "overwritten";
+    return { status: action === "overwrite-all" ? "overwrite-all" : "overwritten" };
   } catch (error) {
     if (["RESULT_UNKNOWN", "UNAUTHENTICATED"].includes(error.code)) throw error;
-    return "failed";
+    return { status: "failed", error: error.message || "上传失败" };
   }
 }
 
 function showUploadSummary(state) {
   const parts = [];
-  if (state.directories) parts.push("目录 " + state.directories);
-  if (state.uploaded) parts.push("上传 " + state.uploaded);
-  if (state.overwritten) parts.push("覆盖 " + state.overwritten);
-  if (state.skipped) parts.push("跳过 " + state.skipped);
-  if (state.failed) parts.push("失败 " + state.failed);
-  const message = parts.length ? parts.join("，") : "未上传文件";
-  if (state.failed) ElMessage.warning(message);
-  else ElMessage.success(message);
+  if (state.directories) parts.push(`已创建 ${state.directories} 个目录`);
+  if (state.uploaded) parts.push(`已上传 ${state.uploaded} 个文件`);
+  if (state.overwritten) parts.push(`已覆盖 ${state.overwritten} 个文件`);
+  if (state.skipped) parts.push(`跳过 ${state.skipped} 个文件`);
+  showUploadResult(ElMessage, {
+    parts,
+    successEmpty: "未上传文件",
+    failed: state.failed || 0,
+    failures: state.failures || [],
+    succeeded: (state.directories || 0) + (state.uploaded || 0) + (state.overwritten || 0),
+    noun: "文件",
+  });
 }
 
 function dropDirectory(entry) {

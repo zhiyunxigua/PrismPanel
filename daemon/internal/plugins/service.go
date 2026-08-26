@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"PrismPanel-daemon/internal/apperr"
 	"PrismPanel-daemon/internal/model"
 	serverservice "PrismPanel-daemon/internal/server"
 	"PrismPanel-daemon/internal/supervisor"
@@ -338,6 +339,60 @@ func (s *Service) beforeStart(instanceID, workspace string) error {
 	s.baselineMu.Unlock()
 	s.supervisor.SetPluginFilesChanged(instanceID, false)
 	return nil
+}
+
+// PendingList 查询实例（instanceID 非空）或全部实例（instanceID 为空）的
+// 插件 pending 队列与 failed 侧写，供 pending.list 管理命令使用。
+func (s *Service) PendingList(instanceID string) (any, error) {
+	if instanceID != "" {
+		pending, failed, err := s.pending.list(instanceID)
+		if err != nil {
+			return nil, err
+		}
+		return pendingListResult(instanceID, pending, failed), nil
+	}
+	views, err := s.pending.listAll()
+	if err != nil {
+		return nil, err
+	}
+	instances := make([]map[string]any, 0, len(views))
+	for _, view := range views {
+		instances = append(instances, pendingListResult(view.InstanceID, view.Pending, view.Failed))
+	}
+	sort.Slice(instances, func(left, right int) bool {
+		return instances[left]["instance_id"].(string) < instances[right]["instance_id"].(string)
+	})
+	return map[string]any{"instances": instances}, nil
+}
+
+// PendingClear 清除指定实例的 pending 队列与 failed 侧写，
+// index/failedIndex 均为 nil 时整队清除，否则删除单条，供 pending.clear 管理命令使用。
+func (s *Service) PendingClear(instanceID string, index, failedIndex *int) error {
+	if strings.TrimSpace(instanceID) == "" {
+		return apperr.New("INVALID_REQUEST", "instance_id 不能为空")
+	}
+	return s.pending.clear(instanceID, index, failedIndex)
+}
+
+func pendingListResult(instanceID string, pending, failed []pendingOperation) map[string]any {
+	toItems := func(items []pendingOperation, status string) []PendingItem {
+		result := make([]PendingItem, len(items))
+		for index, item := range items {
+			result[index] = PendingItem{
+				Type: item.Type, PluginType: item.PluginType, PluginName: item.PluginName,
+				OriginalFilename: item.OriginalFilename, ConfigDirectory: item.ConfigDirectory,
+				DeleteConfig: item.DeleteConfig, Directory: item.Directory, BundleFile: item.BundleFile,
+				BackupSnapshot: item.BackupSnapshot, CreatedAt: item.CreatedAt,
+				Status: status, Attempts: item.Attempts, LastError: item.LastError, FailedAt: item.FailedAt,
+			}
+		}
+		return result
+	}
+	return map[string]any{
+		"instance_id": instanceID,
+		"pending":     toItems(pending, "pending"),
+		"failed":      toItems(failed, "failed"),
+	}
 }
 
 func (s *Service) scanRunningInstances() {

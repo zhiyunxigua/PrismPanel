@@ -355,7 +355,16 @@ async function mcCollectNow() {
   try {
     const data = await request("/api/v1/net-games/mc-servers/collect", { method: "POST", body: "{}" });
     const summary = data.summary || {};
-    ElMessage.success(`采集完成：检查 ${summary.checked ?? 0} 台，在线 ${summary.online ?? 0} 台，失败 ${summary.failed ?? 0} 台`);
+    const checked = summary.checked ?? 0;
+    const online = summary.online ?? 0;
+    const failed = summary.failed ?? 0;
+    if (failed && failed >= checked) {
+      ElMessage.error(`采集失败：检查 ${checked} 台全部失败`);
+    } else if (failed) {
+      ElMessage.warning(`采集完成：检查 ${checked} 台，在线 ${online} 台，失败 ${failed} 台`);
+    } else {
+      ElMessage.success(`采集完成：检查 ${checked} 台，在线 ${online} 台`);
+    }
     await loadMCOverview(true);
   } catch (error) {
     ElMessage.error(error.message);

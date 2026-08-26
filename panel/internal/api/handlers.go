@@ -44,6 +44,12 @@ func (s *Server) handleServers(writer http.ResponseWriter, request *http.Request
 			writeError(writer, err)
 			return
 		}
+		// 防御：daemon 返回了无法解析或缺少 servers 数组的 payload 时显式报错，
+		// 避免前端把「空列表」误判为「服务器不存在」并把用户踢回列表页。
+		if !serverListPayloadValid(result) {
+			writeError(writer, apiError("DAEMON_INVALID_RESPONSE", "守护进程返回了无效的服务器列表"))
+			return
+		}
 		result = sanitizeServerListResult(
 			result, s.allow(request, "player.view"), s.allow(request, "plugin.view"),
 		)
@@ -144,6 +150,22 @@ func (s *Server) handleAllServers(writer http.ResponseWriter, request *http.Requ
 	}
 	wait.Wait()
 	writeSuccess(writer, map[string]any{"nodes": items})
+}
+
+// serverListPayloadValid 校验 daemon server.list 返回的 payload 是包含
+// servers 数组的合法 JSON 对象；nil/空/缺字段都视为无效，调用方应显式报错，
+// 避免前端把空列表误判为「服务器不存在」。
+func serverListPayloadValid(result json.RawMessage) bool {
+	if len(result) == 0 {
+		return false
+	}
+	var payload struct {
+		Servers []json.RawMessage `json:"servers"`
+	}
+	if err := json.Unmarshal(result, &payload); err != nil {
+		return false
+	}
+	return payload.Servers != nil
 }
 
 func sanitizeServerListResult(result json.RawMessage, canViewPlayers, canViewPlugins bool) json.RawMessage {
@@ -603,6 +625,48 @@ func (s *Server) handleInstance(writer http.ResponseWriter, request *http.Reques
 			writeSuccess(writer, result)
 			return
 		}
+	}
+	if action == "pending" {
+		if request.Method == http.MethodGet {
+			if !s.authorizeServerRequest(writer, request, "plugin.view") {
+				return
+			}
+			var result json.RawMessage
+			err := s.callNode(request, "pending.list", map[string]any{"instance_id": instanceID}, &result)
+			if err != nil {
+				writeError(writer, err)
+				return
+			}
+			writeSuccess(writer, result)
+			return
+		}
+		if request.Method == http.MethodPost {
+			if !s.authorizeServerRequest(writer, request, "plugin.deploy") {
+				return
+			}
+			var input struct {
+				Index       *int `json:"index,omitempty"`
+				FailedIndex *int `json:"failed_index,omitempty"`
+			}
+			body, err := readBody(request)
+			if err == nil {
+				err = json.Unmarshal(body, &input)
+			}
+			if err == nil {
+				err = s.callNode(request, "pending.clear", map[string]any{
+					"instance_id": instanceID, "index": input.Index, "failed_index": input.FailedIndex,
+				}, nil)
+			}
+			s.record(request, "pending.clear", instanceID, input, err)
+			if err != nil {
+				writeError(writer, err)
+				return
+			}
+			writeSuccess(writer, map[string]any{})
+			return
+		}
+		methodNotAllowed(writer, "GET, POST")
+		return
 	}
 	if request.Method != http.MethodPost {
 		methodNotAllowed(writer, "GET, POST")

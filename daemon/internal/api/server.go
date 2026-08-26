@@ -269,6 +269,24 @@ func (s *Server) executeFrom(callerSource, messageType string, raw json.RawMessa
 			return nil, invalidJSON(err)
 		}
 		return s.plugins.List(input.InstanceID)
+	case "pending.list":
+		var input struct {
+			InstanceID string `json:"instance_id,omitempty"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		return s.plugins.PendingList(input.InstanceID)
+	case "pending.clear":
+		var input struct {
+			InstanceID  string `json:"instance_id"`
+			Index       *int   `json:"index,omitempty"`
+			FailedIndex *int   `json:"failed_index,omitempty"`
+		}
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, invalidJSON(err)
+		}
+		return map[string]any{}, s.plugins.PendingClear(input.InstanceID, input.Index, input.FailedIndex)
 	case "plugin.enable", "plugin.disable", "plugin.uninstall", "mods.enable", "mods.disable", "mods.uninstall":
 		var input pluginservice.OperationInput
 		if err := json.Unmarshal(raw, &input); err != nil {

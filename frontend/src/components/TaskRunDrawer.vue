@@ -259,9 +259,9 @@ onBeforeUnmount(() => window.clearInterval(refreshTimer));
                 · {{ run.trigger_type === "manual" ? "手动" : "定时" }}
                 · {{ formatDate(run.created_at) }}
               </span>
-              <span class="task-log-result">
-                {{ run.success_targets }} 成功 · {{ run.failed_targets }} 失败 · {{ run.total_targets }} 个目标
-                <template v-if="duration(run)"> · {{ duration(run) }}</template>
+              <span class="task-log-result" :class="{ failed: Number(run.failed_targets) > 0 }">
+                共 {{ run.total_targets }} 个目标：成功 {{ run.success_targets }}，失败 {{ run.failed_targets }}
+                <template v-if="duration(run)"> · 用时 {{ duration(run) }}</template>
               </span>
             </span>
           </button>

@@ -40,7 +40,9 @@ func (s *Server) handlePluginBundleDeploy(writer http.ResponseWriter, request *h
 		writeJSON(writer, http.StatusUnauthorized, map[string]any{"success": false, "error": apperr.From(err)})
 		return
 	}
-	if request.ContentLength < 1 || request.ContentLength > created.MaxBytes {
+	// ContentLength == -1 表示 chunked 传输，无法预知大小，交由 io.LimitReader 上限与
+	// 写后校验兜底；ContentLength == 0 的空 body 直接拒绝（与既有行为一致）。
+	if request.ContentLength == 0 || request.ContentLength > created.MaxBytes {
 		writeJSON(writer, http.StatusRequestEntityTooLarge, map[string]any{"success": false,
 			"error": apperr.New("INVALID_PLUGIN_BUNDLE", "plugin bundle size does not match ticket")})
 		return
@@ -55,9 +57,22 @@ func (s *Server) handlePluginBundleDeploy(writer http.ResponseWriter, request *h
 	hash := sha256.New()
 	written, copyErr := io.Copy(io.MultiWriter(temp, hash), io.LimitReader(request.Body, created.MaxBytes+1))
 	closeErr := temp.Close()
-	if copyErr != nil || closeErr != nil || written != request.ContentLength || written > created.MaxBytes {
+	if copyErr != nil || closeErr != nil {
 		writePluginDeployError(writer, errors.Join(copyErr, closeErr,
 			fmt.Errorf("received %d bytes", written)))
+		return
+	}
+	// 长度校验：chunked（ContentLength<0）时跳过相等校验（written != -1 恒成立），
+	// 仅保留 written > MaxBytes 上限；显式声明长度时仍强制相等。
+	if written > created.MaxBytes {
+		writeJSON(writer, http.StatusRequestEntityTooLarge, map[string]any{"success": false,
+			"error": apperr.New("INVALID_PLUGIN_BUNDLE", "plugin bundle size does not match ticket")})
+		return
+	}
+	if request.ContentLength >= 0 && written != request.ContentLength {
+		writeJSON(writer, http.StatusBadRequest, map[string]any{"success": false,
+			"error": apperr.New("INVALID_PLUGIN_BUNDLE",
+				fmt.Sprintf("plugin bundle size does not match ticket (received %d bytes)", written))})
 		return
 	}
 	if hex.EncodeToString(hash.Sum(nil)) != created.SHA256 {

@@ -125,7 +125,12 @@ func mcLibraryPaths(mcDir string, libraries []mcLibrary) []string {
 		if library.Downloads.Artifact.Path == "" {
 			continue
 		}
-		paths = append(paths, filepath.Join(mcDir, "libraries", filepath.FromSlash(library.Downloads.Artifact.Path)))
+		p := filepath.Join(mcDir, "libraries", filepath.FromSlash(library.Downloads.Artifact.Path))
+		// P2-2：拒绝版本 JSON 推导的越界库路径进入 classpath
+		if mcTargetWithin(mcDir, p) != nil {
+			continue
+		}
+		paths = append(paths, p)
 	}
 	return paths
 }
@@ -136,7 +141,11 @@ func fabricLibraryPaths(mcDir string, libraries []mcLibrary) []string {
 		if library.Name == "" {
 			continue
 		}
-		paths = append(paths, filepath.Join(mcDir, "libraries", filepath.FromSlash(fabricLibraryPath(library.Name))))
+		rel, err := fabricLibraryPathChecked(library.Name)
+		if err != nil {
+			continue
+		}
+		paths = append(paths, filepath.Join(mcDir, "libraries", rel))
 	}
 	return paths
 }
@@ -1019,6 +1028,10 @@ func mcLaunchFilePlan(mcDir string, profile *mcLaunchProfile) map[string]mcCompl
 				continue
 			}
 			p := filepath.Join(mcDir, "libraries", filepath.FromSlash(a.Path))
+			// P2-2：版本 JSON 推导的库目标必须位于 .minecraft 内，否则不进补全计划
+			if mcTargetWithin(mcDir, p) != nil {
+				continue
+			}
 			plan[p] = mcCompleteFile{path: p, url: a.URL, size: a.Size, sha1: a.SHA1}
 		}
 	}
@@ -1030,8 +1043,12 @@ func mcLaunchFilePlan(mcDir string, profile *mcLaunchProfile) map[string]mcCompl
 				if lib.Name == "" {
 					continue
 				}
+				rel, err := fabricLibraryPathChecked(lib.Name)
+				if err != nil {
+					continue
+				}
 				if u := fabricLibraryURL(lib.Name, lib.URL); u != "" {
-					p := filepath.Join(mcDir, "libraries", filepath.FromSlash(fabricLibraryPath(lib.Name)))
+					p := filepath.Join(mcDir, "libraries", rel)
 					plan[p] = mcCompleteFile{path: p, url: u}
 				}
 			}
@@ -1082,6 +1099,15 @@ func mcCompleteLaunchFiles(ctx context.Context, mcDir string, profile *mcLaunchP
 		go func(f mcCompleteFile) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// P2-2：补全下载前再次校验目标在 .minecraft 内（防线兜底，正常路径不受影响）
+			if err := mcTargetWithin(mcDir, f.path); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
 			if err := downloadURLChecked(ctx, f.url, f.path, f.size, f.sha1); err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -1143,6 +1169,10 @@ func mcNativesPlan(mcDir string, profile *mcLaunchProfile) ([]mcNativesArchive, 
 				continue
 			}
 			archivePath := filepath.Join(mcDir, "libraries", filepath.FromSlash(a.Path))
+			// P2-2：natives 压缩包目标必须位于 .minecraft 内，越界直接拒绝
+			if err := mcTargetWithin(mcDir, archivePath); err != nil {
+				return nil, err
+			}
 			if seen[archivePath] {
 				continue
 			}

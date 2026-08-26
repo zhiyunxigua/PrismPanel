@@ -288,8 +288,14 @@ func (c *Client) Call(ctx context.Context, messageType string, input any, output
 		if response.err != nil {
 			return response.err
 		}
-		if output == nil || len(response.data) == 0 {
+		if output == nil {
 			return nil
+		}
+		// 请求方期望返回数据，但 daemon 返回了空 payload：必须显式报错，
+		// 否则调用方（如 server.list）会拿到 nil 结果并静默当作成功，
+		// 前端进而把「空列表」误判为「服务器不存在」。
+		if len(response.data) == 0 {
+			return errors.New("daemon returned an empty response")
 		}
 		return json.Unmarshal(response.data, output)
 	}
@@ -511,6 +517,19 @@ func (c *Client) UploadInstancePlugin(
 		return errors.New("daemon instance plugin upload failed")
 	}
 	return nil
+}
+
+// PendingList 查询实例（instanceID 为空时查询全部实例）的插件 pending 队列与失败侧写。
+func (c *Client) PendingList(ctx context.Context, instanceID string, output any) error {
+	return c.Call(ctx, "pending.list", map[string]any{"instance_id": instanceID}, output)
+}
+
+// PendingClear 清除实例的插件 pending 队列；index/failedIndex 均为 nil 时整队清除，
+// 否则删除对应下标的单条（index 针对 pending 队列，failedIndex 针对失败侧写）。
+func (c *Client) PendingClear(ctx context.Context, instanceID string, index, failedIndex *int, output any) error {
+	return c.Call(ctx, "pending.clear", map[string]any{
+		"instance_id": instanceID, "index": index, "failed_index": failedIndex,
+	}, output)
 }
 
 func websocketEndpoint(base, path string) (string, error) {

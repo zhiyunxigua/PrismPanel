@@ -335,7 +335,7 @@ func (s *Service) applyOrQueue(target operationTarget, operation pendingOperatio
 }
 
 func (s *Service) applyPending(instanceID, workspace string) error {
-	err := s.pending.apply(instanceID, func(operation pendingOperation, bundlePath string) error {
+	drained, err := s.pending.apply(instanceID, func(operation pendingOperation, bundlePath string) error {
 		directory := operation.Directory
 		if directory == "" {
 			directory = "plugins"
@@ -381,10 +381,17 @@ func (s *Service) applyPending(instanceID, workspace string) error {
 			return fmt.Errorf("unknown pending plugin operation: %s", operation.Type)
 		}
 	})
-	if err == nil {
-		s.supervisor.SetPluginPendingRestart(instanceID, false)
+	if err != nil {
+		return err
 	}
-	return err
+	if drained {
+		s.supervisor.SetPluginPendingRestart(instanceID, false)
+		return nil
+	}
+	// 队列仍有可重试项：阻止本次启动，保留队列供下次启动重试，
+	// 连续失败达 pendingRetryThreshold 后自动移入 failed 侧写，避免无限毒化。
+	return apperr.New("PLUGIN_OPERATION_PENDING",
+		"部分插件操作暂缓（文件占用等），实例启动已阻止；可稍后重试，或通过 pending.clear 清除队列")
 }
 
 func deployBundleToWorkspace(workspace string, bundle *preparedBundle) error {

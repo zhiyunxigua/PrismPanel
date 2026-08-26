@@ -63,3 +63,21 @@ func pathWithin(root, target string) bool {
 	relative, err := filepath.Rel(root, target)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
+
+// mcTargetWithin 校验版本 JSON 推导的写盘目标位于 mcDir（.minecraft）之内，
+// 与 DeleteMCVersion 同强度（abs + pathWithin）：拒绝含 ../ 段或绝对路径的逃逸目标
+// （P2-2 下载侧路径穿越防护）。错误统一以「版本 JSON 含非法路径」开头。
+func mcTargetWithin(mcDir, target string) error {
+	absRoot, err := filepath.Abs(mcDir)
+	if err != nil {
+		return err
+	}
+	absTarget, err := filepath.Abs(target)
+	if err != nil {
+		return err
+	}
+	if !pathWithin(absRoot, absTarget) {
+		return fmt.Errorf("版本 JSON 含非法路径: %s", filepath.ToSlash(target))
+	}
+	return nil
+}

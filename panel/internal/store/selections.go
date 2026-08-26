@@ -134,6 +134,17 @@ func (s *Store) PluginDeployPreferences(
 	return scanTargetRules(rows)
 }
 
+// RemovePluginDeployPreferences 删除某个仓库条目（插件/模组）的全部部署偏好行。
+// 条目级删除或最后制品删除（条目整体移除）时调用，避免重传同名插件时旧规则复活、
+// confirmDeployedDelete 误报「存在部署记录」。
+func (s *Store) RemovePluginDeployPreferences(ctx context.Context, pluginType, pluginID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"DELETE FROM plugin_deploy_preferences WHERE plugin_type = ? AND plugin_id = ?",
+		pluginType, pluginID,
+	)
+	return err
+}
+
 func (s *Store) ReplacePluginDeployPreferences(
 	ctx context.Context,
 	pluginType, pluginID string,

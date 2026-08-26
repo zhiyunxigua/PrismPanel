@@ -403,7 +403,7 @@ async function uploadPlugin() {
     const result = await request("/api/v1/plugins", { method: "POST", body });
     uploadOpen.value = false;
     resetUpload();
-    ElMessage.success(result.duplicate ? "仓库中已有相同制品" : "制品已保存到仓库");
+    ElMessage.success(result.duplicate ? "制品已保存到仓库（内容与现有制品相同）" : "制品已保存到仓库");
     await load(true);
   } catch (error) {
     ElMessage.error(error.message);
@@ -815,6 +815,35 @@ async function saveConfig() {
   }
 }
 
+// deployTargetLabel 将部署结果目标（node_id/server_id）映射为「节点/服务器」展示名。
+function deployTargetLabel(target) {
+  const node = nodeContents.value.find((item) => item?.node?.id === target.node_id);
+  const nodeName = node?.node?.name || target.node_id || "未知节点";
+  if (!node) return nodeName + "/" + (target.server_id || "未知目标");
+  const server = (node.servers || []).find((item) => item.server_id === target.server_id);
+  const serverName = server ? server.name : (target.server_id || "未知目标");
+  return nodeName + "/" + serverName;
+}
+
+// deployResultMessage 汇总部署结果：成功→success；部分失败→warning 并列出失败目标；全失败→error。
+// successPrefix 为全部成功时的完整动词短语（如「配置已部署到」），默认「已部署到」。
+function deployResultMessage(prefix, targets, successPrefix) {
+  const failed = (targets || []).filter((item) => item.error);
+  if (!failed.length) {
+    ElMessage.success((successPrefix || "已部署到 ") + (targets?.length || 0) + " 个服务器");
+    return;
+  }
+  const okCount = (targets?.length || 0) - failed.length;
+  const detail = failed.slice(0, 5)
+    .map((item) => deployTargetLabel(item) + ": " + item.error)
+    .join("；");
+  const more = failed.length > 5 ? "；等 " + failed.length + " 项" : "";
+  const message = prefix + "完成：" + okCount + " 个目标成功，" + failed.length + " 个目标失败"
+    + (detail ? "（" + detail + more + "）" : "");
+  if (okCount === 0) ElMessage.error(message);
+  else ElMessage.warning(message);
+}
+
 async function deployConfig() {
   if (configDirty.value) {
     ElMessage.warning("请先保存配置文件");
@@ -825,9 +854,7 @@ async function deployConfig() {
     const result = await request(pluginArtifactPath(configForm.value) + "/config/deploy", {
       method: "POST", body: JSON.stringify({ rules: configForm.value.rules }),
     });
-    const failed = (result.targets || []).filter((item) => item.error);
-    if (failed.length) ElMessage.warning("配置部署完成，其中 " + failed.length + " 个目标失败");
-    else ElMessage.success("配置已部署到 " + (result.targets?.length || 0) + " 个服务器");
+    deployResultMessage("配置部署", result.targets, "配置已部署到 ");
   } catch (error) {
     ElMessage.error(error.message);
   } finally {
@@ -884,7 +911,7 @@ async function deploy() {
     const targets = result.targets || [];
     const failed = targets.filter((item) => item.error);
     if (failed.length) {
-      ElMessage.warning("部署完成，其中 " + failed.length + " 个目标失败");
+      deployResultMessage("部署", targets);
     } else if (deployForm.value.deployType === "config" || deployForm.value.deployType === "full") {
       // 内容包部署：daemon 每目标回传 applied/overwritten/added，汇总提示。
       const changed = targets.reduce((acc, item) => {

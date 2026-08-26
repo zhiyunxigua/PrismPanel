@@ -222,6 +222,28 @@ func (m *Manager) FileRequest(ctx context.Context, panelNodeID, operation, metho
 	return connection.client.FileRequest(ctx, operation, method, headers, body, contentLength)
 }
 
+// PendingList 查询实例的插件 pending 队列与失败侧写。
+func (m *Manager) PendingList(ctx context.Context, panelNodeID, instanceID string, output any) error {
+	m.mu.RLock()
+	connection, exists := m.connections[panelNodeID]
+	m.mu.RUnlock()
+	if !exists {
+		return ErrDisconnected
+	}
+	return connection.client.PendingList(ctx, instanceID, output)
+}
+
+// PendingClear 清除实例的插件 pending 队列（index/failedIndex 为 nil 时整队清除）。
+func (m *Manager) PendingClear(ctx context.Context, panelNodeID, instanceID string, index, failedIndex *int, output any) error {
+	m.mu.RLock()
+	connection, exists := m.connections[panelNodeID]
+	m.mu.RUnlock()
+	if !exists {
+		return ErrDisconnected
+	}
+	return connection.client.PendingClear(ctx, instanceID, index, failedIndex, output)
+}
+
 func (m *Manager) Close() {
 	m.mu.Lock()
 	connections := m.connections

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
@@ -85,7 +86,7 @@ func (s *Server) handlePluginArtifact(writer http.ResponseWriter, request *http.
 // bundleKind 标识部署的 bundle 类型：插件 jar / 旧配置 bundle / 内容包（单独配置或完全配置）。
 // bundleKindContentAuto 表示内容包类型由请求 body 的 content_type 字段决定。
 const (
-	bundleKindPlugin        = iota
+	bundleKindPlugin = iota
 	bundleKindConfig
 	bundleKindContentConfig
 	bundleKindContentFull
@@ -128,6 +129,10 @@ func (s *Server) handlePluginEntry(writer http.ResponseWriter, request *http.Req
 		err = s.plugins.DeletePlugin(pluginID, pluginType)
 	}
 	if err == nil {
+		// 条目已整体删除：顺带清理部署偏好行，避免重传同名插件时旧规则复活。
+		err = s.store.RemovePluginDeployPreferences(request.Context(), pluginType, pluginID)
+	}
+	if err == nil {
 		var catalog []panelplugins.Plugin
 		catalog, err = s.plugins.List()
 		if err == nil {
@@ -163,6 +168,20 @@ func (s *Server) handlePluginArtifactDelete(writer http.ResponseWriter, request 
 	var plugin panelplugins.Plugin
 	if err == nil {
 		plugin, err = s.plugins.DeleteArtifact(pluginID, artifactID, pluginType)
+	}
+	// DeleteArtifact 返回 os.ErrNotExist 有两种含义：
+	//  1) 最后一个制品被删除，条目整体移除（成功信号）；
+	//  2) 目标制品不存在（os.Stat 失败），条目仍然存在（真实错误）。
+	// 用 Get 区分：条目已不存在 → 视为删除成功，顺带清理部署偏好行（P3-1）；
+	// 条目仍存在 → 保持错误，且不得清理偏好（避免误删仍存在插件的部署规则）。
+	if errors.Is(err, os.ErrNotExist) {
+		if _, getErr := s.plugins.Get(pluginID, pluginType); errors.Is(getErr, os.ErrNotExist) {
+			plugin = panelplugins.Plugin{}
+			err = nil
+			if cleanupErr := s.store.RemovePluginDeployPreferences(request.Context(), pluginType, pluginID); cleanupErr != nil {
+				err = cleanupErr
+			}
+		}
 	}
 	if err == nil {
 		var catalog []panelplugins.Plugin
@@ -433,7 +452,10 @@ func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *htt
 		}
 	}
 	nodeID := strings.TrimSpace(request.URL.Query().Get("node_id"))
-	if err == nil && input.Rules != nil {
+	// rulesMode 记录是否走部署规则路径（input.Rules != nil）：规则解析后 targets 为空
+	// 与 nodeID 直连参数缺失是两种原因，错误信息需区分。
+	rulesMode := input.Rules != nil
+	if err == nil && rulesMode {
 		err = s.store.ReplacePluginDeployPreferences(
 			request.Context(), pluginType, pluginID, input.Rules,
 		)
@@ -449,7 +471,11 @@ func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *htt
 		input.Targets = append(input.Targets, deploymentTarget{NodeID: nodeID, ServerID: input.ServerID})
 	}
 	if err == nil && len(input.Targets) == 0 {
-		err = apiError("INVALID_REQUEST", "node_id and server_id are required")
+		if rulesMode {
+			err = apiError("INVALID_REQUEST", "部署规则未选中任何可用的目标服务器（节点可能离线）")
+		} else {
+			err = apiError("INVALID_REQUEST", "node_id and server_id are required")
+		}
 	}
 	type deploymentResult struct {
 		NodeID   string          `json:"node_id"`

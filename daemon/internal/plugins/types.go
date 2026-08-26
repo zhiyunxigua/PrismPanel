@@ -124,3 +124,22 @@ type InstanceUploadResult struct {
 	PendingRestart  bool   `json:"pending_restart"`
 	Directory       string `json:"directory,omitempty"`
 }
+
+// PendingItem 是 pending.list 返回的单个队列项视图。
+// Status 为 "pending"（待重试）或 "failed"（永久失败/重试达阈值，移入侧写）。
+type PendingItem struct {
+	Type             string    `json:"type"`
+	PluginType       string    `json:"plugin_type,omitempty"`
+	PluginName       string    `json:"plugin_name,omitempty"`
+	OriginalFilename string    `json:"original_filename,omitempty"`
+	ConfigDirectory  string    `json:"config_directory,omitempty"`
+	DeleteConfig     bool      `json:"delete_config,omitempty"`
+	Directory        string    `json:"directory,omitempty"`
+	BundleFile       string    `json:"bundle_file,omitempty"`
+	BackupSnapshot   bool      `json:"backup_snapshot,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	Status           string    `json:"status"`
+	Attempts         int       `json:"attempts,omitempty"`
+	LastError        string    `json:"last_error,omitempty"`
+	FailedAt         time.Time `json:"failed_at,omitempty"`
+}

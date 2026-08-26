@@ -96,6 +96,7 @@ func NewServer(
 	mux.HandleFunc("/api/v1/servers", server.requireAuth(server.handleServers))
 	mux.HandleFunc("/api/v1/servers/", server.requireAuth(server.handleServer))
 	mux.HandleFunc("/api/v1/instances/", server.requireAuth(server.handleInstance))
+	mux.HandleFunc("/api/v1/instances/batch", server.requireAuth(server.handleInstancesBatch))
 	mux.HandleFunc("/api/v1/scheduled-tasks", server.requireAuth(server.handleScheduledTasks))
 	mux.HandleFunc("/api/v1/scheduled-tasks/", server.requireAuth(server.handleScheduledTask))
 	mux.HandleFunc("/api/v1/task-runs", server.requireAuth(server.handleTaskRuns))

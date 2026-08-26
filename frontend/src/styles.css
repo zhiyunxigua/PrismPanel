@@ -502,6 +502,7 @@ h1, h2, h3, p { margin: 0; }
 .task-log-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .task-log-title strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .task-log-meta, .task-log-result { margin-top: 4px; color: #78837b; font-size: 10px; }
+.task-log-result.failed { color: #a34a42; font-weight: 600; }
 .task-log-targets { padding: 0 4px 10px 59px; }
 .task-log-target {
   display: grid;
@@ -735,6 +736,28 @@ code {
   transform: translateY(-1px);
 }
 .server-group-card:focus-visible { outline: 2px solid #4a83b7; outline-offset: 2px; }
+/* 批量操作：勾选列 + 选中态 */
+.server-group-card-slot {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  min-width: 0;
+}
+.server-group-check {
+  align-self: center;
+  flex: 0 0 auto;
+}
+.server-group-card-slot .server-group-card {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.server-group-card-slot.is-selected .server-group-card {
+  border-color: #4a83b7;
+  box-shadow: 0 0 0 1px #4a83b7 inset;
+}
+.batch-delete-item { color: #c4564d; }
+.batch-delete-item:focus,
+.batch-delete-item:hover { background: #fbeae8 !important; color: #c4564d !important; }
 .server-card-head, .server-card-title, .server-card-state,
 .instance-control-bar, .instance-control-identity, .instance-lifecycle-actions,
 .instance-overview-head, .instance-overview-foot, .plugin-toolbar, .plugin-toolbar > div {
@@ -1344,6 +1367,10 @@ html.dark .metric-chart,
 html.dark .file-manager,
 html.dark .explorer-pane,
 html.dark .editor-pane { background: var(--app-surface); border-color: var(--app-border); }
+html.dark .server-group-card-slot.is-selected .server-group-card {
+  border-color: #6da3c9;
+  box-shadow: 0 0 0 1px #6da3c9 inset;
+}
 html.dark .section-title,
 html.dark .detail-summary > div,
 html.dark .overview-node-head,

@@ -86,11 +86,21 @@ func InstallMCFabric(ctx context.Context, gameVersion, loaderVersion string, rep
 		if library.Name == "" {
 			continue
 		}
+		// P2-2：maven 坐标推导目标前先校验坐标段安全，拒绝 .. / 分隔符 / 空段
+		rel, err := fabricLibraryPathChecked(library.Name)
+		if err != nil {
+			mu.Lock()
+			if firstErr == nil {
+				firstErr = err
+			}
+			mu.Unlock()
+			continue
+		}
 		url := fabricLibraryURL(library.Name, library.URL)
 		if url == "" {
 			continue
 		}
-		target := filepath.Join(libRoot, filepath.FromSlash(fabricLibraryPath(library.Name)))
+		target := filepath.Join(libRoot, rel)
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(name, url, target string) {
@@ -163,6 +173,39 @@ func fabricLibraryPath(name string) string {
 		fileName = artifact + "-" + version + "-" + parts[3] + ".jar"
 	}
 	return filepath.Join(group, artifact, version, fileName)
+}
+
+// fabricLibraryPathChecked 由 maven 坐标推导本地库路径，并校验坐标段安全
+// （P2-2：拒绝 group/artifact/version/classifier 中的 .. 段、路径分隔符与空段，
+// 防止坐标含 ../ 时把文件写出 libraries 根）。
+func fabricLibraryPathChecked(name string) (string, error) {
+	parts := strings.Split(name, ":")
+	if len(parts) < 3 {
+		return "", fmt.Errorf("版本 JSON 含非法 maven 坐标: %s", name)
+	}
+	group, artifact, version := parts[0], parts[1], parts[2]
+	if group == "" || artifact == "" || version == "" {
+		return "", fmt.Errorf("版本 JSON 含非法 maven 坐标: %s", name)
+	}
+	// group 点分隔展开为路径段后逐段校验（拒绝 .. / 空段 / 分隔符）
+	for _, seg := range strings.Split(group, ".") {
+		if seg == "" || seg == ".." || strings.ContainsAny(seg, `/\`) {
+			return "", fmt.Errorf("版本 JSON 含非法 maven 坐标: %s", name)
+		}
+	}
+	for _, seg := range []string{artifact, version} {
+		if seg == ".." || strings.ContainsAny(seg, `/\`) {
+			return "", fmt.Errorf("版本 JSON 含非法 maven 坐标: %s", name)
+		}
+	}
+	fileName := artifact + "-" + version + ".jar"
+	if len(parts) >= 4 && parts[3] != "" {
+		if parts[3] == ".." || strings.ContainsAny(parts[3], `/\`) {
+			return "", fmt.Errorf("版本 JSON 含非法 maven 坐标: %s", name)
+		}
+		fileName = artifact + "-" + version + "-" + parts[3] + ".jar"
+	}
+	return filepath.Join(strings.ReplaceAll(group, ".", "/"), artifact, version, fileName), nil
 }
 
 func fabricProfileExists(mcDir, versionID string) bool {

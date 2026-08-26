@@ -232,6 +232,10 @@ func InstallMCVersion(ctx context.Context, versionID string, report func(stage, 
 		return err
 	}
 	versionDir := filepath.Join(mcDir, "versions", versionID)
+	// P2-2：versionID 来自版本 JSON（自定义直链），写盘前校验版本目录在 .minecraft 内
+	if err := mcTargetWithin(mcDir, versionDir); err != nil {
+		return err
+	}
 	versionJSONPath := filepath.Join(versionDir, versionID+".json")
 	if err := downloadURLTo(ctx, versionJSONURL, versionJSONPath); err != nil {
 		return err
@@ -251,10 +255,15 @@ func InstallMCVersion(ctx context.Context, versionID string, report func(stage, 
 	if assetIndexID == "" {
 		assetIndexID = versionID
 	}
-	if err := downloadURLChecked(ctx, version.AssetIndex.URL, filepath.Join(mcDir, "assets", "indexes", assetIndexID+".json"), version.AssetIndex.Size, version.AssetIndex.SHA1); err != nil {
+	indexTarget := filepath.Join(mcDir, "assets", "indexes", assetIndexID+".json")
+	// P2-2：assetIndex.id 来自版本 JSON，写盘前校验目标在 .minecraft 内
+	if err := mcTargetWithin(mcDir, indexTarget); err != nil {
 		return err
 	}
-	if err := downloadMCAssets(ctx, mcDir, filepath.Join(mcDir, "assets", "indexes", assetIndexID+".json"), report); err != nil {
+	if err := downloadURLChecked(ctx, version.AssetIndex.URL, indexTarget, version.AssetIndex.Size, version.AssetIndex.SHA1); err != nil {
+		return err
+	}
+	if err := downloadMCAssets(ctx, mcDir, indexTarget, report); err != nil {
 		return err
 	}
 
@@ -432,6 +441,15 @@ func downloadMCLibraries(ctx context.Context, mcDir string, libraries []mcLibrar
 			defer func() { <-sem }()
 			artifact := lib.Downloads.Artifact
 			target := filepath.Join(libRoot, filepath.FromSlash(artifact.Path))
+			// P2-2：版本 JSON 推导的下载目标必须位于 .minecraft 内，拒绝 ../ 逃逸
+			if err := mcTargetWithin(mcDir, target); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
 			if err := downloadURLChecked(ctx, artifact.URL, target, artifact.Size, artifact.SHA1); err != nil {
 				mu.Lock()
 				if firstErr == nil {
@@ -521,6 +539,10 @@ func downloadMCNatives(ctx context.Context, mcDir string, libraries []mcLibrary,
 				continue
 			}
 			archive := filepath.Join(mcDir, "libraries", filepath.FromSlash(artifact.Path))
+			// P2-2：natives 压缩包目标同样必须位于 .minecraft 内
+			if err := mcTargetWithin(mcDir, archive); err != nil {
+				return err
+			}
 			if err := downloadURLChecked(ctx, artifact.URL, archive, artifact.Size, artifact.SHA1); err != nil {
 				return err
 			}
@@ -537,6 +559,10 @@ func downloadMCNatives(ctx context.Context, mcDir string, libraries []mcLibrary,
 			continue
 		}
 		archive := filepath.Join(mcDir, "libraries", filepath.FromSlash(classifier.Path))
+		// P2-2：classifier 压缩包目标同样必须位于 .minecraft 内
+		if err := mcTargetWithin(mcDir, archive); err != nil {
+			return err
+		}
 		if err := downloadURLChecked(ctx, classifier.URL, archive, classifier.Size, classifier.SHA1); err != nil {
 			return err
 		}
