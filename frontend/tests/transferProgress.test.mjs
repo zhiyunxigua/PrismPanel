@@ -89,7 +89,7 @@ async function waitForXHR() {
   }
 }
 
-function grantResponse() {
+function grantResponse(path = "/data") {
   return {
     ok: true,
     status: 200,
@@ -101,16 +101,42 @@ function grantResponse() {
         endpoint: "http://node.test/upload",
         resource_type: "instance",
         resource_id: "instance-1",
-        path: "/data",
+        path,
+      },
+    }),
+  };
+}
+
+function proxyGrantResponse(path = "logs/测试.log") {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      success: true,
+      data: {
+        ticket: "ticket-proxy",
+        mode: "proxy",
+        endpoint: "/api/v1/files/proxy/upload?node_id=node-1",
+        resource_type: "instance",
+        resource_id: "instance-1",
+        path,
       },
     }),
   };
 }
 
 let lastFetchURL = "";
-globalThis.fetch = async (url) => {
+globalThis.fetch = async (url, options) => {
   lastFetchURL = String(url);
-  if (String(url).includes("/api/v1/files/authorize")) return grantResponse();
+  if (String(url).includes("/api/v1/files/authorize")) {
+    let input = {};
+    try {
+      input = JSON.parse(options?.body || "{}");
+    } catch {
+      input = {};
+    }
+    return grantResponse(input.path);
+  }
   return { ok: true, status: 200, json: async () => ({ success: true, data: {} }) };
 };
 
@@ -141,13 +167,57 @@ test("uploadFileWithProgress fires byte-level progress and resolves data", async
     { loaded: 100, total: 100 },
   ]);
   assert.equal(uploadXHR.method, "POST");
-  assert.equal(uploadXHR.url, "http://node.test/upload");
+  assert.equal(uploadXHR.url, "http://node.test/upload?path=%2Fdata");
   assert.equal(uploadXHR.headers["Authorization"], "Bearer ticket-1");
   assert.equal(uploadXHR.headers["X-Prism-Resource-Type"], "instance");
   assert.equal(uploadXHR.headers["X-Prism-Resource-ID"], "instance-1");
-  assert.equal(uploadXHR.headers["X-Prism-Path"], "/data");
+  assert.equal(uploadXHR.headers["X-Prism-Path"], undefined);
   assert.equal(uploadXHR.headers["X-Prism-Overwrite"], "false");
   assert.equal(uploadXHR.headers["Content-Type"], "application/octet-stream");
+});
+
+test("uploadFileWithProgress percent-encodes a Chinese path in the URL query", async () => {
+  installUploadXHRMock();
+  const promise = fileApi.uploadFileWithProgress(
+    { node_id: "node-1", scope: "file.upload", resource_type: "instance", resource_id: "instance-1", path: "/数据/测试文件.txt" },
+    { name: "测试文件.txt", size: 10, type: "application/octet-stream" },
+    false,
+    (event) => {},
+  );
+  await waitForXHR();
+  assert.ok(uploadXHR, "XHR should be created");
+  uploadXHR.complete();
+  await promise;
+
+  assert.equal(uploadXHR.url, "http://node.test/upload?path=%2F%E6%95%B0%E6%8D%AE%2F%E6%B5%8B%E8%AF%95%E6%96%87%E4%BB%B6.txt");
+  // 中文路径不得再放入任何 header（Headers 构造只允许 ISO-8859-1 字节）
+  assert.equal(uploadXHR.headers["X-Prism-Path"], undefined);
+});
+
+test("uploadFileWithProgress appends path to proxy endpoint without dropping existing query", async () => {
+  installUploadXHRMock();
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/api/v1/files/authorize")) return proxyGrantResponse();
+    return { ok: true, status: 200, json: async () => ({ success: true, data: {} }) };
+  };
+  try {
+    const promise = fileApi.uploadFileWithProgress(
+      { node_id: "node-1", scope: "file.upload", resource_type: "instance", resource_id: "instance-1", path: "logs/测试.log" },
+      { name: "测试.log", size: 10, type: "application/octet-stream" },
+    );
+    await waitForXHR();
+    assert.ok(uploadXHR, "XHR should be created");
+    uploadXHR.complete();
+    await promise;
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+
+  const url = new URL(uploadXHR.url);
+  assert.equal(url.searchParams.get("path"), "logs/测试.log");
+  assert.equal(url.searchParams.get("node_id"), "node-1");
+  assert.equal(uploadXHR.headers["X-Prism-Path"], undefined);
 });
 
 test("uploadFileWithProgress ignores non-computable progress events", async () => {

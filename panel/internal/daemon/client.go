@@ -237,13 +237,23 @@ func (c *Client) readLoop(conn *websocket.Conn) error {
 	}
 }
 
-func (c *Client) FileRequest(ctx context.Context, operation, method string, headers http.Header, body io.Reader, contentLength int64) (*http.Response, error) {
+// FileRequest 向 daemon 的 /api/v1/files/<operation> 发起文件请求。
+// query 中的参数会以 URL query 形式透传（如 path，需百分号编码以支持中文路径），
+// headers 仅用于 ASCII 安全的自定义头。
+func (c *Client) FileRequest(ctx context.Context, operation, method string, headers http.Header, query url.Values, body io.Reader, contentLength int64) (*http.Response, error) {
 	endpoint, err := url.Parse(c.baseURL)
 	if err != nil {
 		return nil, err
 	}
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/api/v1/files/" + strings.Trim(operation, "/")
 	endpoint.RawQuery = ""
+	queryValues := endpoint.Query()
+	for key, values := range query {
+		for _, value := range values {
+			queryValues.Add(key, value)
+		}
+	}
+	endpoint.RawQuery = queryValues.Encode()
 	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
 	if err != nil {
 		return nil, err

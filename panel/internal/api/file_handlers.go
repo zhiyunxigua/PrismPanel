@@ -283,12 +283,13 @@ func (s *Server) handleFileExport(writer http.ResponseWriter, request *http.Requ
 	headers.Set("Authorization", "Bearer "+issued.Ticket)
 	headers.Set("X-Prism-Resource-Type", input.ResourceType)
 	headers.Set("X-Prism-Resource-ID", input.ResourceID)
-	headers.Set("X-Prism-Path", input.Path)
 	if value := request.Header.Get("Range"); value != "" {
 		headers.Set("Range", value)
 	}
+	query := make(url.Values)
+	query.Set("path", input.Path)
 	response, err := s.connections.FileRequest(
-		request.Context(), input.NodeID, "download", http.MethodGet, headers, nil, 0,
+		request.Context(), input.NodeID, "download", http.MethodGet, headers, query, nil, 0,
 	)
 	if err != nil {
 		s.record(request, "file.download", input.ResourceID, map[string]any{"path": input.Path}, err)
@@ -346,7 +347,7 @@ func (s *Server) handleFileProxy(writer http.ResponseWriter, request *http.Reque
 	headers := make(http.Header)
 	for _, name := range []string{
 		"Content-Type", "Range", "X-Prism-Resource-Type",
-		"X-Prism-Resource-ID", "X-Prism-Path", "X-Prism-Overwrite", "X-Prism-Expected-Version",
+		"X-Prism-Resource-ID", "X-Prism-Overwrite", "X-Prism-Expected-Version",
 		"X-Prism-Upload-Offset", "X-Prism-Upload-Final",
 	} {
 		if value := request.Header.Get(name); value != "" {
@@ -354,8 +355,19 @@ func (s *Server) handleFileProxy(writer http.ResponseWriter, request *http.Reque
 		}
 	}
 	headers.Set("Authorization", "Bearer "+grant.DaemonTicket)
+	// 路径经 URL query 透传（百分号编码，支持中文等非 Latin-1 字符）；
+	// header 中的 X-Prism-Path 不复制，避免 Go 写请求时对非 ASCII 头值报错。
+	// 兼容旧客户端：query 缺失时回退读取 X-Prism-Path header（仅 ASCII 路径可用）。
+	query := make(url.Values)
+	path := strings.TrimSpace(request.URL.Query().Get("path"))
+	if path == "" {
+		path = strings.TrimSpace(request.Header.Get("X-Prism-Path"))
+	}
+	if path != "" {
+		query.Set("path", path)
+	}
 	response, err := s.connections.FileRequest(
-		request.Context(), nodeID, operation, request.Method, headers, request.Body, request.ContentLength,
+		request.Context(), nodeID, operation, request.Method, headers, query, request.Body, request.ContentLength,
 	)
 	if err != nil {
 		writeRequestError(writer, err)

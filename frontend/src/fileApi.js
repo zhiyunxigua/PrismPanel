@@ -128,13 +128,14 @@ function fileHeaders(grant, extra = {}) {
     Authorization: `Bearer ${grant.ticket}`,
     "X-Prism-Resource-Type": grant.resource_type,
     "X-Prism-Resource-ID": grant.resource_id,
-    "X-Prism-Path": grant.path,
     ...extra,
   };
 }
 
 function endpointURL(grant) {
-  return grant.mode === "proxy" ? apiURL(grant.endpoint) : grant.endpoint;
+  const url = new URL(grant.mode === "proxy" ? apiURL(grant.endpoint) : grant.endpoint);
+  url.searchParams.set("path", grant.path);
+  return url.toString();
 }
 
 function grantHeaders(grant, extra = {}) {

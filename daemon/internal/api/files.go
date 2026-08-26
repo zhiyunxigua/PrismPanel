@@ -408,11 +408,18 @@ func (s *Server) consumeFileTicket(request *http.Request, scope string, target f
 	return s.tickets.ConsumeRestrictedFrom(token, scope, target.Type, target.ID, relative, request.Method, s.requestSourceIP(request))
 }
 
+// fileTarget 从请求中解析文件资源与相对路径。
+// 路径优先读取 URL query 的 path 参数（百分号编码，支持中文等非 Latin-1 字符），
+// 缺失时回退到 X-Prism-Path header（兼容旧客户端/旧面板，仅 ASCII 路径可用）。
 func fileTarget(request *http.Request) (fileservice.Target, string) {
+	relative := strings.TrimSpace(request.URL.Query().Get("path"))
+	if relative == "" {
+		relative = strings.TrimSpace(request.Header.Get(filePathHeader))
+	}
 	return fileservice.Target{
 		Type: strings.TrimSpace(request.Header.Get(resourceTypeHeader)),
 		ID:   strings.TrimSpace(request.Header.Get(resourceIDHeader)),
-	}, strings.TrimSpace(request.Header.Get(filePathHeader))
+	}, relative
 }
 
 func (s *Server) publishFileResult(created ticket.Ticket, target fileservice.Target, paths []string, err error) {

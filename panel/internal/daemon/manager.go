@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"sort"
 	"sync"
 )
@@ -212,14 +213,14 @@ func (m *Manager) UploadInstancePlugin(
 	)
 }
 
-func (m *Manager) FileRequest(ctx context.Context, panelNodeID, operation, method string, headers http.Header, body io.Reader, contentLength int64) (*http.Response, error) {
+func (m *Manager) FileRequest(ctx context.Context, panelNodeID, operation, method string, headers http.Header, query url.Values, body io.Reader, contentLength int64) (*http.Response, error) {
 	m.mu.RLock()
 	connection, exists := m.connections[panelNodeID]
 	m.mu.RUnlock()
 	if !exists {
 		return nil, ErrDisconnected
 	}
-	return connection.client.FileRequest(ctx, operation, method, headers, body, contentLength)
+	return connection.client.FileRequest(ctx, operation, method, headers, query, body, contentLength)
 }
 
 // PendingList 查询实例的插件 pending 队列与失败侧写。

@@ -518,7 +518,16 @@ func resolveGrantEndpoint(apiBaseURL, endpoint string) (string, error) {
 func (s *Service) sendUploadChunk(ctx context.Context, task *watchTask, uploadGrant grant, endpoint string, chunk []byte, offset int64, final bool) error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(chunk))
+		// 路径经 URL query 传递（百分号编码，支持中文等非 Latin-1 字符）：
+		// X-Prism-Path header 会被 Go 客户端在写请求时拒绝非 ASCII 值。
+		targetURL, err := url.Parse(endpoint)
+		if err != nil {
+			return err
+		}
+		query := targetURL.Query()
+		query.Set("path", uploadGrant.Path)
+		targetURL.RawQuery = query.Encode()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL.String(), bytes.NewReader(chunk))
 		if err != nil {
 			return err
 		}
@@ -527,7 +536,6 @@ func (s *Service) sendUploadChunk(ctx context.Context, task *watchTask, uploadGr
 		request.Header.Set("Content-Type", "application/octet-stream")
 		request.Header.Set("X-Prism-Resource-Type", uploadGrant.ResourceType)
 		request.Header.Set("X-Prism-Resource-ID", uploadGrant.ResourceID)
-		request.Header.Set("X-Prism-Path", uploadGrant.Path)
 		request.Header.Set("X-Prism-Overwrite", "true")
 		request.Header.Set("X-Prism-Expected-Version", task.baseVersion)
 		request.Header.Set("X-Prism-Upload-Offset", fmt.Sprintf("%d", offset))
