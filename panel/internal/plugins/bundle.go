@@ -87,6 +87,12 @@ func (r *Repository) buildBundle(pluginID string, artifactID int64, kind string,
 				if err != nil {
 					return err
 				}
+				// manifest.yaml 为保留名（bundle 的 manifest 占用 zip 根级该名）：
+				// 内容包顶层若含同名文件会与 bundle manifest 重名，daemon 会拒绝（防重名冲突），
+				// 因此打包时跳过，与 daemon deployContentToWorkspace 的跳过逻辑一致。
+				if filepath.ToSlash(relative) == "manifest.yaml" {
+					return nil
+				}
 				return addBundleFile(archive, filePath, filepath.ToSlash(relative))
 			})
 		}

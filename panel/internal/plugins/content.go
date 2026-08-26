@@ -111,6 +111,12 @@ func extractContentZIP(contents []byte, destination string) (int, int64, error) 
 		if name == "" {
 			continue
 		}
+		// manifest.yaml 为保留名：zip 顶层的 manifest.yaml 是 bundle manifest 的占位名
+		//（打包与部署时均跳过，防与 bundle manifest 重名冲突），解压时不入库，
+		// 使仓库快照（tree/files/sha256）与部署行为一致。
+		if name == "manifest.yaml" {
+			continue
+		}
 		if entry.Mode()&os.ModeSymlink != 0 {
 			return 0, 0, fmt.Errorf("content zip contains symbolic link %s", name)
 		}
