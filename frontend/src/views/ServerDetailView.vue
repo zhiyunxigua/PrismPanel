@@ -66,6 +66,8 @@ const deploymentTask = ref(null);
 const deploymentSubmitting = ref(false);
 const deploymentRefreshing = ref(false);
 const actionLoading = reactive({});
+// 子服操作中文标签（invoke/confirmAction 共用，必须为模块级——放函数内会导致 invoke 中未定义）。
+const instanceActionLabels = { start: "启动", stop: "关闭", restart: "重启", kill: "强制关闭" };
 let refreshTimer;
 let deploymentTimer;
 
@@ -658,7 +660,6 @@ function canRun(instance, action) {
 }
 
 async function confirmAction(instance, action) {
-  const labels = { stop: "关闭", restart: "重启", kill: "强制关闭" };
   if (action === "kill") {
     const result = await ElMessageBox.prompt(
       "强制关闭可能导致未保存的数据丢失。",
@@ -676,9 +677,9 @@ async function confirmAction(instance, action) {
   const online = Number(instance.online_players);
   const impact = Number.isFinite(online) ? `，当前在线玩家 ${online} 人` : "";
   await ElMessageBox.confirm(
-    `确认${labels[action]}${instance.name}${impact}？`,
-    labels[action] + "子服",
-    { type: "warning", confirmButtonText: labels[action], cancelButtonText: "取消" },
+    `确认${instanceActionLabels[action]}${instance.name}${impact}？`,
+    instanceActionLabels[action] + "子服",
+    { type: "warning", confirmButtonText: instanceActionLabels[action], cancelButtonText: "取消" },
   );
   return true;
 }
@@ -698,7 +699,7 @@ async function invoke(instance, action) {
       `/api/v1/instances/${encodeURIComponent(instance.instance_id)}/${action}?node_id=${encodeURIComponent(nodeId.value)}`,
       { method: "POST", body: "{}" },
     );
-    ElMessage.success("已提交" + labels[action] + "请求：" + instance.name);
+    ElMessage.success("已提交" + instanceActionLabels[action] + "请求：" + instance.name);
     await load(true);
     if (action === "restart" && canViewPlugins.value) await loadPlugins(true);
   } catch (error) {
