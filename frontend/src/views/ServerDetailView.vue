@@ -6,7 +6,7 @@ import {
   PlugZap, Puzzle, RefreshCw, RotateCw, Server, Square, Terminal, Trash2, Upload, Users,
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { request } from "../api";
+import { request, requestWithProgress } from "../api";
 import { hasPermission } from "../session";
 import { showUploadResult } from "../uploadResult";
 import {
@@ -39,6 +39,7 @@ const pluginUploadInput = ref(null);
 const pluginUploadState = ref({
   active: false, completed: 0, total: 0, name: "",
   installed: 0, replaced: 0, skipped: 0, failed: 0, failures: [],
+  progress: { loaded: 0, total: 0, percent: 0 },
 });
 const pluginDropActive = ref(false);
 const pluginConflictOpen = ref(false);
@@ -410,18 +411,21 @@ async function handlePluginDrop(event) {
   await uploadPluginFiles(files);
 }
 
-async function uploadInstancePluginFile(file, overwrite, instanceID) {
+async function uploadInstancePluginFile(file, overwrite, instanceID, onProgress) {
   const query = "?node_id=" + encodeURIComponent(nodeId.value)
     + "&filename=" + encodeURIComponent(file.name)
     + "&overwrite=" + String(overwrite);
-  return request(
+  const options = {
+    method: "POST",
+    headers: { "Content-Type": file.type || "application/java-archive" },
+    body: file,
+  };
+  if (onProgress) return requestWithProgress(
     "/api/v1/instances/" + encodeURIComponent(instanceID) + "/plugins" + query,
-    {
-      method: "POST",
-      headers: { "Content-Type": file.type || "application/java-archive" },
-      body: file,
-    },
+    options,
+    onProgress,
   );
+  return request("/api/v1/instances/" + encodeURIComponent(instanceID) + "/plugins" + query, options);
 }
 
 function askPluginConflict(file, data) {
@@ -450,13 +454,22 @@ async function uploadPluginFiles(files) {
   pluginUploadState.value = {
     active: true, completed: 0, total: files.length, name: files[0].name,
     installed: 0, replaced: 0, skipped: 0, failed: 0, failures: [],
+    progress: { loaded: 0, total: 0, percent: 0 },
   };
   for (const file of files) {
     pluginUploadState.value.name = file.name;
+    pluginUploadState.value.progress = { loaded: 0, total: file.size || 0, percent: 0 };
+    const onProgress = (event) => {
+      pluginUploadState.value.progress = {
+        loaded: event.loaded,
+        total: event.total,
+        percent: event.total ? Math.round((event.loaded / event.total) * 100) : 0,
+      };
+    };
     try {
       let result;
       try {
-        result = await uploadInstancePluginFile(file, false, instanceID);
+        result = await uploadInstancePluginFile(file, false, instanceID, onProgress);
       } catch (error) {
         if (error.code !== "PLUGIN_EXISTS") throw error;
         const action = await askPluginConflict(file, error.data);
@@ -464,7 +477,7 @@ async function uploadPluginFiles(files) {
           pluginUploadState.value.skipped += 1;
           continue;
         }
-        result = await uploadInstancePluginFile(file, true, instanceID);
+        result = await uploadInstancePluginFile(file, true, instanceID, onProgress);
         restartRequested = restartRequested || action === "replace-restart";
       }
       if (result.replaced) pluginUploadState.value.replaced += 1;
@@ -1347,8 +1360,11 @@ onBeforeRouteLeave(async () => {
               <span>{{ pluginUploadState.name }}</span>
               <strong>{{ pluginUploadState.completed }}/{{ pluginUploadState.total }}</strong>
             </div>
+            <div v-if="pluginUploadState.progress.total" class="plugin-upload-progress-detail">
+              <span>上传中 {{ pluginUploadState.progress.percent }}%（{{ formatBytes(pluginUploadState.progress.loaded) }} / {{ formatBytes(pluginUploadState.progress.total) }}）</span>
+            </div>
             <el-progress
-              :percentage="Math.round(pluginUploadState.completed / pluginUploadState.total * 100)"
+              :percentage="pluginUploadState.progress.total ? pluginUploadState.progress.percent : Math.round(pluginUploadState.completed / pluginUploadState.total * 100)"
               :stroke-width="3"
               :show-text="false"
             />

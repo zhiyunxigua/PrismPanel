@@ -1114,6 +1114,7 @@ code {
 }
 .plugin-upload-progress > div { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: #67736b; }
 .plugin-upload-progress span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-upload-progress-detail { font-size: 10px; color: #7b877f; }
 .plugin-conflict-content { display: grid; gap: 10px; }
 .plugin-conflict-content p { margin: 0; color: #354139; line-height: 1.65; }
 .plugin-conflict-content small { color: #727e76; line-height: 1.55; }

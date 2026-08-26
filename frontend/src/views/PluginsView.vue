@@ -5,9 +5,10 @@ import {
   Plus, RefreshCw, Save, Search, ShieldAlert, Trash2, Upload,
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { request } from "../api";
+import { request, requestWithProgress } from "../api";
 import { apiURL, runtimeConfig, runtimeHeaders } from "../runtime";
 import { hasPermission } from "../session";
+import { formatBytes } from "../formatBytes";
 import TargetSelectionTree from "../components/TargetSelectionTree.vue";
 import CodeEditor from "../components/files/CodeEditor.vue";
 
@@ -36,6 +37,7 @@ const DEPLOY_TYPES = [
 
 const loading = ref(false);
 const submitting = ref(false);
+const uploadProgress = ref({ active: false, loaded: 0, total: 0, percent: 0 });
 const catalog = ref([]);
 const nodeContents = ref([]);
 const search = ref("");
@@ -355,14 +357,16 @@ async function uploadPlugin() {
       return;
     }
     submitting.value = true;
+    uploadProgress.value = { active: true, loaded: 0, total: uploadZip.value.size || 0, percent: 0 };
     try {
       const body = new FormData();
       body.append("content", uploadZip.value);
       body.append("content_type", uploadForm.value.contentType);
       // 与 t2 约定：POST .../{artifactID}/content（multipart content + content_type）
-      await request(
+      await requestWithProgress(
         pluginArtifactPathOf(uploadForm.value.pluginType, uploadForm.value.pluginId, editTarget.value.artifact_id) + "/content",
         { method: "POST", body },
+        (event) => { uploadProgress.value = { active: true, loaded: event.loaded, total: event.total, percent: event.total ? Math.round((event.loaded / event.total) * 100) : 0 }; },
       );
       uploadOpen.value = false;
       resetUpload();
@@ -373,6 +377,7 @@ async function uploadPlugin() {
       ElMessage.error(error.message);
     } finally {
       submitting.value = false;
+      uploadProgress.value.active = false;
     }
     return;
   }
@@ -386,21 +391,26 @@ async function uploadPlugin() {
     return;
   }
   submitting.value = true;
+  const body = new FormData();
+  // 纯内容包上传时无 jar 字段
+  if (uploadJAR.value) body.append("jar", uploadJAR.value);
+  body.append("plugin_type", uploadForm.value.pluginType);
+  body.append("auto_install", String(uploadForm.value.autoInstall));
+  let expectedBytes = uploadJAR.value?.size || 0;
+  if (uploadZip.value) {
+    // 与 t2 约定：内容包 zip 用字段 content（旧 config 字段为 legacy 配置 zip）；
+    // content_type 取 "config"（单独配置）| "full"（完全配置）；纯内容包身份用 name/version。
+    body.append("content", uploadZip.value);
+    body.append("content_type", uploadForm.value.contentType);
+    if (uploadForm.value.contentName.trim()) body.append("name", uploadForm.value.contentName.trim());
+    if (uploadForm.value.contentVersion.trim()) body.append("version", uploadForm.value.contentVersion.trim());
+    expectedBytes += uploadZip.value.size || 0;
+  }
+  uploadProgress.value = { active: true, loaded: 0, total: expectedBytes, percent: 0 };
   try {
-    const body = new FormData();
-    // 纯内容包上传时无 jar 字段
-    if (uploadJAR.value) body.append("jar", uploadJAR.value);
-    body.append("plugin_type", uploadForm.value.pluginType);
-    body.append("auto_install", String(uploadForm.value.autoInstall));
-    if (uploadZip.value) {
-      // 与 t2 约定：内容包 zip 用字段 content（旧 config 字段为 legacy 配置 zip）；
-      // content_type 取 "config"（单独配置）| "full"（完全配置）；纯内容包身份用 name/version。
-      body.append("content", uploadZip.value);
-      body.append("content_type", uploadForm.value.contentType);
-      if (uploadForm.value.contentName.trim()) body.append("name", uploadForm.value.contentName.trim());
-      if (uploadForm.value.contentVersion.trim()) body.append("version", uploadForm.value.contentVersion.trim());
-    }
-    const result = await request("/api/v1/plugins", { method: "POST", body });
+    const result = await requestWithProgress("/api/v1/plugins", { method: "POST", body }, (event) => {
+      uploadProgress.value = { active: true, loaded: event.loaded, total: event.total, percent: event.total ? Math.round((event.loaded / event.total) * 100) : 0 };
+    });
     uploadOpen.value = false;
     resetUpload();
     ElMessage.success(result.duplicate ? "制品已保存到仓库（内容与现有制品相同）" : "制品已保存到仓库");
@@ -409,6 +419,7 @@ async function uploadPlugin() {
     ElMessage.error(error.message);
   } finally {
     submitting.value = false;
+    uploadProgress.value.active = false;
   }
 }
 
@@ -1201,6 +1212,17 @@ onMounted(load);
         </div>
       </el-form-item>
     </el-form>
+    <div v-if="uploadProgress.active" class="repo-upload-progress">
+      <div>
+        <span>上传中 {{ uploadProgress.percent }}%（{{ formatBytes(uploadProgress.loaded) }} / {{ formatBytes(uploadProgress.total) }}）</span>
+      </div>
+      <el-progress
+        :percentage="uploadProgress.percent"
+        :indeterminate="!uploadProgress.total"
+        :stroke-width="4"
+        :show-text="false"
+      />
+    </div>
     <template #footer>
       <el-button @click="uploadOpen = false">取消</el-button>
       <el-button type="primary" :loading="submitting" @click="uploadPlugin">
@@ -1572,6 +1594,9 @@ onMounted(load);
 .content-tree-entry small { color: var(--app-text-muted); font-size: 11px; }
 .content-tree-icon { flex: none; color: var(--app-text-muted); }
 .form-hint { width: 100%; margin-top: 4px; color: var(--app-text-muted); font-size: 12px; line-height: 1.6; }
+.repo-upload-progress { display: grid; gap: 5px; margin-bottom: 14px; border: 1px solid var(--app-border); border-radius: 6px; padding: 8px 10px; background: var(--app-surface-muted); }
+.repo-upload-progress > div { display: flex; justify-content: space-between; gap: 12px; color: var(--app-text-muted); font-size: 11px; }
+.repo-upload-progress span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .full-risk-alert { margin-bottom: 14px; }
 .full-risk-text { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .full-risk-text div { display: flex; align-items: center; gap: 6px; }

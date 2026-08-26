@@ -8,7 +8,8 @@ import {
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { hasPermission } from "../../session";
-import { downloadFile, fileExportURL, fileJSON, importArchive, uploadFile } from "../../fileApi";
+import { downloadFile, fileExportURL, fileJSON, importArchive, uploadFileWithProgress } from "../../fileApi";
+import { formatBytes } from "../../formatBytes";
 import { isExternalFileDrag, plainUploadItems, scanDroppedItems } from "../../fileDrop";
 import { isWinApp, openRemoteFileWinApp, runtimeConfig } from "../../runtime";
 import { showUploadResult } from "../../uploadResult";
@@ -37,7 +38,12 @@ const uploadState = ref({
   active: false, completed: 0, total: 0, name: "", scanning: false,
   directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
   failures: [],
+  progress: { loaded: 0, total: 0, percent: 0 },
+  transferred: 0,
+  cancelled: false,
 });
+const downloadState = ref({ active: false, name: "", loaded: 0, total: 0, percent: 0, rate: 0 });
+let activeUploadCancel = null;
 const archiveImporting = ref(false);
 const archiveCreating = ref(false);
 const rootEmpty = ref(false);
@@ -615,9 +621,17 @@ async function handleDrop(event, directory = activeDirectory.value) {
   uploadState.value = {
     active: true, completed: 0, total: 0, name: "正在扫描拖入内容", scanning: true,
     directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
+    progress: { loaded: 0, total: 0, percent: 0 },
+    transferred: 0,
+    cancelled: false,
   };
   try {
-    await uploadItems(await scanDroppedItems(event.dataTransfer), directory, true);
+    const scanned = await scanDroppedItems(event.dataTransfer);
+    if (uploadState.value.cancelled) {
+      uploadState.value.active = false;
+      return;
+    }
+    await uploadItems(scanned, directory, true);
   } catch (error) {
     ElMessage.error(error.message || "拖入内容读取失败");
     uploadState.value.active = false;
@@ -634,10 +648,15 @@ async function uploadItems(items, baseDirectory) {
     active: true, completed: 0, total: items.files.length, name: items.files[0]?.path || "创建目录",
     scanning: false, directories: 0, uploaded: 0, overwritten: 0, skipped: 0, failed: 0,
     failures: [],
+    progress: { loaded: 0, total: 0, percent: 0 },
+    transferred: 0,
+    cancelled: false,
   };
   let overwriteAll = false;
+  let completedBytes = 0;
   try {
     for (const directory of items.directories) {
+      if (uploadState.value.cancelled) break;
       const targetPath = joinPath(baseDirectory, directory);
       try {
         await fileJSON(authorization("file.create", targetPath, [], {}, target), "POST", { type: "directory" });
@@ -648,9 +667,19 @@ async function uploadItems(items, baseDirectory) {
       }
     }
     for (const item of items.files) {
+      if (uploadState.value.cancelled) break;
       uploadState.value.name = item.path;
+      uploadState.value.progress = { loaded: 0, total: item.file.size || 0, percent: 0 };
       const targetPath = joinPath(baseDirectory, item.path);
-      const result = await uploadOneFile(target, targetPath, item.file, overwriteAll);
+      const result = await uploadOneFile(target, targetPath, item.file, overwriteAll, (event) => {
+        uploadState.value.progress = {
+          loaded: event.loaded,
+          total: event.total,
+          percent: event.total ? Math.round((event.loaded / event.total) * 100) : 0,
+        };
+        uploadState.value.transferred = completedBytes + event.loaded;
+      });
+      if (uploadState.value.cancelled) break;
       if (result.status === "overwrite-all") overwriteAll = true;
       if (result.status === "uploaded") uploadState.value.uploaded += 1;
       if (result.status === "overwritten" || result.status === "overwrite-all") uploadState.value.overwritten += 1;
@@ -659,7 +688,15 @@ async function uploadItems(items, baseDirectory) {
         uploadState.value.failed += 1;
         uploadState.value.failures.push({ name: item.path, error: result.error || "上传失败" });
       }
+      if (result.status === "uploaded" || result.status === "overwritten" || result.status === "overwrite-all") {
+        completedBytes += item.file.size || 0;
+      }
+      uploadState.value.transferred = completedBytes;
       uploadState.value.completed += 1;
+    }
+    if (uploadState.value.cancelled) {
+      // 取消提示、刷新已由 cancelUpload 处理（已上传文件保留在服务器）。
+      return;
     }
     showUploadSummary(uploadState.value);
     refreshDirectory();
@@ -667,14 +704,23 @@ async function uploadItems(items, baseDirectory) {
     if (!isCancelled(error)) ElMessage.error(error.message || "文件上传失败");
   } finally {
     uploadState.value.active = false;
+    activeUploadCancel = null;
   }
 }
 
-async function uploadOneFile(target, targetPath, file, overwriteAll) {
+async function uploadOneFile(target, targetPath, file, overwriteAll, onProgress) {
+  if (uploadState.value.cancelled) return { status: "cancelled" };
   try {
-    await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, overwriteAll);
-    return { status: overwriteAll ? "overwritten" : "uploaded" };
+    const handle = uploadFileWithProgress(authorization("file.upload", targetPath, [], {}, target), file, overwriteAll, onProgress);
+    activeUploadCancel = typeof handle.cancel === "function" ? handle.cancel : null;
+    try {
+      await handle;
+      return { status: overwriteAll ? "overwritten" : "uploaded" };
+    } finally {
+      activeUploadCancel = null;
+    }
   } catch (error) {
+    if (error.name === "AbortError") return { status: "cancelled" };
     if (error.code !== "FILE_EXISTS") {
       if (["RESULT_UNKNOWN", "UNAUTHENTICATED"].includes(error.code)) throw error;
       return { status: "failed", error: error.message || "上传失败" };
@@ -687,13 +733,32 @@ async function uploadOneFile(target, targetPath, file, overwriteAll) {
     allowOverwriteAll: true,
   });
   if (action === "skip") return { status: "skipped" };
+  if (uploadState.value.cancelled) return { status: "cancelled" };
   try {
-    await uploadFile(authorization("file.upload", targetPath, [], {}, target), file, true);
-    return { status: action === "overwrite-all" ? "overwrite-all" : "overwritten" };
+    const handle = uploadFileWithProgress(authorization("file.upload", targetPath, [], {}, target), file, true, onProgress);
+    activeUploadCancel = typeof handle.cancel === "function" ? handle.cancel : null;
+    try {
+      await handle;
+      return { status: action === "overwrite-all" ? "overwrite-all" : "overwritten" };
+    } finally {
+      activeUploadCancel = null;
+    }
   } catch (error) {
+    if (error.name === "AbortError") return { status: "cancelled" };
     if (["RESULT_UNKNOWN", "UNAUTHENTICATED"].includes(error.code)) throw error;
     return { status: "failed", error: error.message || "上传失败" };
   }
+}
+
+function cancelUpload() {
+  if (!uploadState.value.active || uploadState.value.cancelled) return;
+  uploadState.value.cancelled = true;
+  if (typeof activeUploadCancel === "function") activeUploadCancel();
+  const kept = (uploadState.value.uploaded || 0) + (uploadState.value.overwritten || 0);
+  uploadState.value.active = false;
+  uploadState.value.scanning = false;
+  refreshDirectory();
+  ElMessage.info(`已取消上传（已上传 ${kept} 个文件保留）`);
 }
 
 function showUploadSummary(state) {
@@ -819,11 +884,20 @@ function runContextAction(action) {
 
 async function downloadEntry(entry = preview.value) {
   if (!entry.path) return;
+  const name = entry.name || entry.path.split("/").pop();
+  const fileName = entry.type === "directory" ? name + ".zip" : name;
+  downloadState.value = { active: true, name: fileName, loaded: 0, total: 0, percent: 0, rate: 0 };
   try {
-    const name = entry.name || entry.path.split("/").pop();
-    await downloadFile(authorization("file.download", entry.path), entry.type === "directory" ? name + ".zip" : name);
+    await downloadFile(authorization("file.download", entry.path), fileName, (event) => {
+      downloadState.value = {
+        active: true, name: fileName,
+        loaded: event.loaded, total: event.total, percent: event.percent, rate: event.rate || 0,
+      };
+    });
   } catch (error) {
     if (error?.name !== "AbortError") ElMessage.error(error.message || "文件下载失败");
+  } finally {
+    downloadState.value.active = false;
   }
 }
 
@@ -1034,11 +1108,33 @@ function fileIconClass(entry) {
       <div v-if="uploadState.active" class="upload-status">
         <div>
           <span>{{ uploadState.name }}</span>
-          <strong>{{ uploadState.scanning ? "扫描中" : uploadState.completed + "/" + uploadState.total }}</strong>
+          <strong>{{ uploadState.scanning ? "扫描中" : uploadState.completed + "/" + uploadState.total + " 个文件" }}</strong>
+          <button v-if="!uploadState.cancelled" type="button" class="upload-cancel" @click="cancelUpload">取消</button>
+        </div>
+        <div v-if="!uploadState.scanning && uploadState.progress.total" class="upload-status-detail">
+          <span>上传中 {{ uploadState.progress.percent }}%（{{ formatBytes(uploadState.progress.loaded) }} / {{ formatBytes(uploadState.progress.total) }}）</span>
+          <span>已传 {{ formatBytes(uploadState.transferred) }}</span>
         </div>
         <el-progress
-          :percentage="uploadState.total ? Math.round(uploadState.completed / uploadState.total * 100) : 0"
+          :percentage="uploadState.scanning ? 0 : (uploadState.progress.total ? uploadState.progress.percent : (uploadState.total ? Math.round(uploadState.completed / uploadState.total * 100) : 0))"
           :indeterminate="uploadState.scanning"
+          :duration="1.2"
+          :stroke-width="3"
+          :show-text="false"
+        />
+      </div>
+      <div v-if="downloadState.active" class="upload-status">
+        <div>
+          <span>下载 {{ downloadState.name }}</span>
+          <strong>{{ downloadState.total ? downloadState.percent + "%" : formatBytes(downloadState.loaded) }}</strong>
+        </div>
+        <div v-if="downloadState.total" class="upload-status-detail">
+          <span>已下载 {{ formatBytes(downloadState.loaded) }} / {{ formatBytes(downloadState.total) }}</span>
+          <span v-if="downloadState.rate">速率 {{ formatBytes(downloadState.rate) }}/s</span>
+        </div>
+        <el-progress
+          :percentage="downloadState.total ? downloadState.percent : 0"
+          :indeterminate="!downloadState.total && downloadState.loaded === 0"
           :duration="1.2"
           :stroke-width="3"
           :show-text="false"
@@ -1213,6 +1309,9 @@ function fileIconClass(entry) {
 .upload-status { border-top: 1px solid var(--app-border); padding: 7px 9px; background: var(--app-surface); }
 .upload-status > div { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; color: var(--app-text-muted); font-size: 11px; }
 .upload-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-status-detail { font-size: 10px; }
+.upload-cancel { flex: 0 0 auto; border: 0; padding: 0 2px; color: var(--file-danger-text, #a23f36); background: transparent; cursor: pointer; font-size: 11px; }
+.upload-cancel:hover { text-decoration: underline; }
 .editor-pane { display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; background: var(--app-surface); }
 .editor-tabbar { display: flex; min-height: 36px; align-items: stretch; justify-content: space-between; border-bottom: 1px solid var(--app-border); background: var(--app-surface-muted); }
 .editor-tab { display: flex; min-width: 140px; max-width: 280px; align-items: center; gap: 6px; border-right: 1px solid var(--app-border); padding-left: 10px; background: var(--app-surface); color: var(--app-text-secondary); font-size: 12px; }
