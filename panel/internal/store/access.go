@@ -41,6 +41,7 @@ var permissionDefinitions = []PermissionDefinition{
 	{Code: "player.transfer", Name: "跨服转移玩家", Category: "玩家"},
 	{Code: "player.whitelist.manage", Name: "管理玩家白名单", Category: "玩家"},
 	{Code: "player.op.manage", Name: "全服 OP", Category: "玩家"},
+	{Code: "mail.send", Name: "发送邮件", Category: "邮件"},
 	{Code: "plugin.view", Name: "查看插件", Category: "插件"},
 	{Code: "plugin.upload", Name: "上传插件", Category: "插件"},
 	{Code: "plugin.deploy", Name: "部署和回滚插件", Category: "插件"},

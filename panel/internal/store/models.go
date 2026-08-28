@@ -80,6 +80,17 @@ type Session struct {
 	LastSeenAt    time.Time
 	ExpiresAt     time.Time
 	IdleExpiresAt time.Time
+	AuthMethod    string `json:"-"`
+	CredentialID  string `json:"-"`
+}
+
+type APIKey struct {
+	ID         string     `json:"id"`
+	UserID     string     `json:"user_id"`
+	Prefix     string     `json:"prefix"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 }
 
 type UserGroupSummary struct {

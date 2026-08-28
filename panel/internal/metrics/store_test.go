@@ -56,7 +56,7 @@ func TestStoreReturnsCurrentNodeSnapshot(t *testing.T) {
 	store.Record("node-a", Snapshot{
 		Host: HostSnapshot{SampledAt: now, CPUPercent: 25, MemoryUsedBytes: 1024},
 		Instances: []InstanceSnapshot{{
-			InstanceID: "survival", ServerID: "survival", Name: "Survival",
+			InstanceID: "survival", ServerID: "survival", Platform: "paper", Name: "Survival",
 			State: "running", OnlinePlayers: &players,
 		}},
 	})
@@ -64,7 +64,7 @@ func TestStoreReturnsCurrentNodeSnapshot(t *testing.T) {
 	if current.Host == nil || current.Host.CPUPercent != 25 {
 		t.Fatalf("unexpected current host: %#v", current.Host)
 	}
-	if len(current.Instances) != 1 || current.Instances[0].OnlinePlayers == nil ||
+	if len(current.Instances) != 1 || current.Instances[0].Platform != "paper" || current.Instances[0].OnlinePlayers == nil ||
 		*current.Instances[0].OnlinePlayers != 3 {
 		t.Fatalf("unexpected current instances: %#v", current.Instances)
 	}

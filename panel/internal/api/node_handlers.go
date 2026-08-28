@@ -193,29 +193,53 @@ func (s *Server) handleDashboard(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	online := 0
-	onlinePlayers := 0
+	proxyPlayers := 0
+	serverPlayers := 0
 	runningInstances := 0
 	for _, item := range items {
 		if item.Status == "ONLINE" || item.Status == "DEGRADED" {
 			online++
 		}
 		current := s.metrics.CurrentNode(item.ID)
+		proxy, servers := dashboardOnlinePlayerTotals(current.Instances)
+		proxyPlayers += proxy
+		serverPlayers += servers
 		for _, instance := range current.Instances {
 			if instance.State == "running" {
 				runningInstances++
-			}
-			if instance.OnlinePlayers != nil {
-				onlinePlayers += *instance.OnlinePlayers
 			}
 		}
 	}
 	writeSuccess(writer, map[string]any{
 		"summary": map[string]int{
-			"online_players": onlinePlayers, "online_nodes": online,
+			"online_players": maxInt(proxyPlayers, serverPlayers), "online_nodes": online,
 			"running_instances": runningInstances, "active_alerts": 0,
 		},
 		"nodes": s.decorateNodes(items),
 	})
+}
+
+func dashboardOnlinePlayerTotals(instances []panelmetrics.InstanceCurrent) (int, int) {
+	proxyPlayers := 0
+	serverPlayers := 0
+	for _, instance := range instances {
+		if instance.OnlinePlayers == nil {
+			continue
+		}
+		if isProxyPlatform(instance.Platform) {
+			proxyPlayers += *instance.OnlinePlayers
+		} else {
+			serverPlayers += *instance.OnlinePlayers
+		}
+	}
+	return proxyPlayers, serverPlayers
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }
 
 func (s *Server) decorateNodes(items []panelnodes.View) []nodeMetricView {

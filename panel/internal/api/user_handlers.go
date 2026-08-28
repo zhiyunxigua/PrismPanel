@@ -101,12 +101,24 @@ func (s *Server) createUser(writer http.ResponseWriter, request *http.Request) {
 func (s *Server) handleUser(writer http.ResponseWriter, request *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/v1/users/"), "/")
 	parts := strings.Split(path, "/")
-	if len(parts) < 1 || len(parts) > 2 || parts[0] == "" {
+	if len(parts) < 1 || len(parts) > 3 || parts[0] == "" {
 		http.NotFound(writer, request)
 		return
 	}
 	userID := parts[0]
+	if len(parts) == 3 && parts[1] == "api-key" && parts[2] == "rotate" {
+		s.handleUserAPIKey(writer, request, userID, true)
+		return
+	}
+	if len(parts) == 3 {
+		http.NotFound(writer, request)
+		return
+	}
 	if len(parts) == 2 {
+		if parts[1] == "api-key" {
+			s.handleUserAPIKey(writer, request, userID, false)
+			return
+		}
 		s.handleUserAction(writer, request, userID, parts[1])
 		return
 	}
@@ -140,6 +152,70 @@ func (s *Server) handleUser(writer http.ResponseWriter, request *http.Request) {
 	default:
 		methodNotAllowed(writer, "GET, PUT, DELETE")
 	}
+}
+
+func (s *Server) handleUserAPIKey(writer http.ResponseWriter, request *http.Request, userID string, rotate bool) {
+	if err := s.authorizeAPIKeyManagement(request, userID); err != nil {
+		writeRequestError(writer, err)
+		return
+	}
+	switch request.Method {
+	case http.MethodGet:
+		if rotate {
+			methodNotAllowed(writer, "POST")
+			return
+		}
+		key, err := s.store.GetAPIKey(request.Context(), userID)
+		if err != nil {
+			writeRequestError(writer, publicError(err))
+			return
+		}
+		writeSuccess(writer, key)
+	case http.MethodPost:
+		var key store.APIKey
+		var token string
+		var err error
+		if rotate {
+			key, token, err = s.auth.RotateAPIKey(request.Context(), userID)
+		} else {
+			key, token, err = s.auth.CreateAPIKey(request.Context(), userID)
+		}
+		action := "api_key.create"
+		if rotate {
+			action = "api_key.rotate"
+		}
+		s.record(request, action, userID, nil, publicError(err))
+		if err != nil {
+			writeRequestError(writer, publicError(err))
+			return
+		}
+		writeJSON(writer, http.StatusCreated, response{Success: true, Data: map[string]any{
+			"key": key, "api_key": token,
+		}})
+	case http.MethodDelete:
+		if rotate {
+			methodNotAllowed(writer, "POST")
+			return
+		}
+		err := publicError(s.auth.RevokeAPIKey(request.Context(), userID))
+		s.record(request, "api_key.revoke", userID, nil, err)
+		if err != nil {
+			writeRequestError(writer, err)
+			return
+		}
+		writeSuccess(writer, map[string]any{})
+	default:
+		methodNotAllowed(writer, "GET, POST, DELETE")
+	}
+}
+
+func (s *Server) authorizeAPIKeyManagement(request *http.Request, userID string) error {
+	actor := currentSession(request).User
+	if !actor.IsSuperAdmin() && actor.GroupCode != store.GroupAdmin {
+		return apiError("FORBIDDEN", "仅超级管理员和管理员可以管理 API Key")
+	}
+	_, err := s.manageableUser(request, userID)
+	return err
 }
 
 func (s *Server) updateUser(writer http.ResponseWriter, request *http.Request, userID string) {

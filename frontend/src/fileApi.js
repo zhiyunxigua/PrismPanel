@@ -2,7 +2,7 @@ import { ApiError, request } from "./api.js";
 import { apiURL, runtimeHeaders, runtimeConfig } from "./runtime.js";
 
 const proxyNodes = new Set();
-const mutatingScopes = new Set(["file.edit", "file.upload", "file.import", "file.create", "file.move", "file.copy", "file.archive", "file.extract", "file.delete"]);
+const mutatingScopes = new Set(["file.edit", "file.upload", "file.import", "file.create", "file.move", "file.copy", "file.archive", "file.extract", "file.delete", "file.recycle.restore", "file.recycle.delete", "file.recycle.clear"]);
 
 export async function fileJSON(authorization, method, body, extraHeaders = {}) {
   return withAuthorization(authorization, async (grant) => {
@@ -98,6 +98,22 @@ export function uploadStatus(authorization, uploadId) {
 
 export function cancelUpload(authorization, uploadId) {
   return fileJSON({ ...authorization, scope: "file.upload.cancel" }, "POST", { upload_id: uploadId });
+}
+
+export function listRecycleBin(authorization) {
+  return fileJSON({ ...authorization, scope: "file.recycle.list", path: "." }, "POST", {});
+}
+
+export function restoreRecycleEntry(authorization, id) {
+  return fileJSON({ ...authorization, scope: "file.recycle.restore", path: "." }, "POST", { id });
+}
+
+export function deleteRecycleEntries(authorization, ids) {
+  return fileJSON({ ...authorization, scope: "file.recycle.delete", path: "." }, "POST", { ids });
+}
+
+export function clearRecycleBin(authorization) {
+  return fileJSON({ ...authorization, scope: "file.recycle.clear", path: "." }, "POST", {});
 }
 
 export function createUploadID() {

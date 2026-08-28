@@ -9,7 +9,8 @@ import {
 import { ElMessage, ElMessageBox } from "element-plus";
 import { hasPermission } from "../../session";
 import {
-  cancelUpload, createUploadID, downloadFile, fileExportURL, fileJSON, importArchive, uploadFile,
+  cancelUpload, clearRecycleBin, createUploadID, deleteRecycleEntries, downloadFile, fileExportURL, fileJSON,
+  importArchive, listRecycleBin, restoreRecycleEntry, uploadFile,
 } from "../../fileApi";
 import { isExternalFileDrag, plainUploadItems, scanDroppedItems } from "../../fileDrop";
 import { invertFileSelection, selectFileEntry } from "../../fileSelection";
@@ -51,6 +52,9 @@ const extractEntry = ref(null);
 const extractTask = ref(null);
 const archiveImporting = ref(false);
 const archiveCreating = ref(false);
+const recycleDialogVisible = ref(false);
+const recycleLoading = ref(false);
+const recycleEntries = ref([]);
 const rootEmpty = ref(false);
 const previewLoading = ref(false);
 const previewSaving = ref(false);
@@ -611,6 +615,66 @@ async function removeSelectedEntries() {
     refreshDirectory();
   } catch (error) {
     if (!isCancelled(error)) ElMessage.error(error.message || "删除失败");
+  }
+}
+
+async function openRecycleBin() {
+  if (!currentTarget.value) return;
+  recycleDialogVisible.value = true;
+  await loadRecycleBin();
+}
+
+async function loadRecycleBin() {
+  if (!currentTarget.value) return;
+  recycleLoading.value = true;
+  try {
+    const result = await listRecycleBin(authorization("file.recycle.list", "."));
+    recycleEntries.value = result.entries || [];
+  } catch (error) {
+    ElMessage.error(error.message || "回收站读取失败");
+  } finally {
+    recycleLoading.value = false;
+  }
+}
+
+async function restoreRecycle(item) {
+  try {
+    await ElMessageBox.confirm(`将恢复到原路径「${item.original_path}」。`, "恢复文件", {
+      type: "warning", confirmButtonText: "恢复", cancelButtonText: "取消",
+    });
+    await restoreRecycleEntry(authorization("file.recycle.restore", "."), item.id);
+    ElMessage.success("恢复完成");
+    await loadRecycleBin();
+    refreshDirectory();
+  } catch (error) {
+    if (!isCancelled(error)) ElMessage.error(error.message || "恢复失败");
+  }
+}
+
+async function permanentlyDeleteRecycle(item) {
+  try {
+    await ElMessageBox.confirm(`将永久删除「${item.name}」，此操作不可恢复。`, "彻底删除", {
+      type: "warning", confirmButtonText: "彻底删除", cancelButtonText: "取消",
+    });
+    await deleteRecycleEntries(authorization("file.recycle.delete", "."), [item.id]);
+    ElMessage.success("已彻底删除");
+    await loadRecycleBin();
+  } catch (error) {
+    if (!isCancelled(error)) ElMessage.error(error.message || "彻底删除失败");
+  }
+}
+
+async function emptyRecycleBin() {
+  if (!recycleEntries.value.length) return;
+  try {
+    await ElMessageBox.confirm("回收站中的所有文件将被永久删除，此操作不可恢复。", "清空回收站", {
+      type: "warning", confirmButtonText: "清空", cancelButtonText: "取消",
+    });
+    await clearRecycleBin(authorization("file.recycle.clear", "."));
+    recycleEntries.value = [];
+    ElMessage.success("回收站已清空");
+  } catch (error) {
+    if (!isCancelled(error)) ElMessage.error(error.message || "清空回收站失败");
   }
 }
 
@@ -1190,6 +1254,7 @@ function fileIconClass(entry) {
           <button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('move')"><Scissors :size="15" />剪切</button>
           <button v-if="directoryEntries.length" type="button" @click="invertSelection"><RotateCcw :size="15" />反选</button>
           <button v-if="canDelete && selectedEntries.length" class="danger" type="button" :disabled="writeDisabled" @click="removeSelectedEntries"><Trash2 :size="15" />删除</button>
+          <button v-if="canDelete" type="button" :disabled="!currentTarget || recycleLoading" @click="openRecycleBin"><Trash2 :size="15" />回收站</button>
           <button v-if="canImportArchive" type="button" :disabled="writeDisabled || archiveImporting" @click="chooseArchive"><FileArchive :size="15" />导入 ZIP</button>
           <button type="button" @click="refreshDirectory"><RefreshCw :size="15" />刷新</button>
         </div>
@@ -1360,6 +1425,29 @@ function fileIconClass(entry) {
       :task="extractTask"
       @start="startExtract"
     />
+    <el-dialog v-model="recycleDialogVisible" title="回收站" width="min(860px, 94vw)" @open="loadRecycleBin">
+      <div v-loading="recycleLoading" class="recycle-bin-dialog">
+        <el-table :data="recycleEntries" size="small" max-height="420">
+          <el-table-column label="名称" min-width="150">
+            <template #default="{ row }"><strong>{{ row.name }}</strong><small class="recycle-original-path">{{ row.original_path }}</small></template>
+          </el-table-column>
+          <el-table-column label="类型" width="90"><template #default="{ row }">{{ row.type === "directory" ? "目录" : "文件" }}</template></el-table-column>
+          <el-table-column label="大小" width="100"><template #default="{ row }">{{ formatSize(row.size) }}</template></el-table-column>
+          <el-table-column label="删除时间" width="170"><template #default="{ row }">{{ formatDate(row.deleted_at) }}</template></el-table-column>
+          <el-table-column label="操作" width="170" align="right">
+            <template #default="{ row }">
+              <el-button link type="primary" @click="restoreRecycle(row)">恢复</el-button>
+              <el-button link type="danger" @click="permanentlyDeleteRecycle(row)">彻底删除</el-button>
+            </template>
+          </el-table-column>
+          <template #empty><div class="recycle-empty"><Trash2 :size="26" /><span>回收站为空</span></div></template>
+        </el-table>
+      </div>
+      <template #footer>
+        <el-button @click="recycleDialogVisible = false">关闭</el-button>
+        <el-button type="danger" plain :disabled="!recycleEntries.length || recycleLoading" @click="emptyRecycleBin">清空回收站</el-button>
+      </template>
+    </el-dialog>
     <Teleport to="body">
       <div
         v-if="contextMenu.visible && contextMenu.entry"
@@ -1417,6 +1505,9 @@ function fileIconClass(entry) {
   color: var(--app-text-secondary);
   background: var(--app-surface);
 }
+.recycle-bin-dialog { min-height: 120px; }
+.recycle-original-path { display: block; margin-top: 3px; overflow: hidden; color: var(--app-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.recycle-empty { display: grid; justify-items: center; gap: 8px; padding: 32px 0; color: var(--app-text-muted); }
 :global(html.dark) .file-manager {
   --file-accent: #76b58d;
   --file-accent-text: #8dcba3;

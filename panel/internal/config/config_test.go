@@ -50,3 +50,17 @@ func TestConfigCanDisableOperatorManagement(t *testing.T) {
 		t.Fatal("operator management should respect an explicit false value")
 	}
 }
+
+func TestMailFeatureDefaultsDisabled(t *testing.T) {
+	if Default().Features.Mail {
+		t.Fatal("mail feature should default to disabled")
+	}
+}
+
+func TestMailFeatureRequiresPlayerDataCredentials(t *testing.T) {
+	cfg := Default()
+	cfg.Features.Mail = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected enabled mail feature to require PlayerData credentials")
+	}
+}

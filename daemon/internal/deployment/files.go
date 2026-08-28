@@ -43,7 +43,7 @@ func (m *Manager) deployFiles(item *task, cfg model.ServerConfig, target supervi
 	m.log(item, "info", "scanning_image", target.InstanceID, "正在扫描镜像内容")
 	m.beginCopyProgress(item, "scanning_image", 0, 0)
 	skip := func(relative string, entry fs.DirEntry) bool {
-		return isExcluded(relative, entry.IsDir(), cfg.Exclude)
+		return isRecycleBinPath(relative) || isExcluded(relative, entry.IsDir(), cfg.Exclude)
 	}
 	files, bytes, err := scanTree(item.context, imagePath, skip)
 	if err != nil {
@@ -83,12 +83,15 @@ func (m *Manager) deployFiles(item *task, cfg model.ServerConfig, target supervi
 	if err := item.context.Err(); err != nil {
 		return err
 	}
-
 	m.log(item, "info", "swapping", target.InstanceID, "正在交换实例目录")
 	hadOriginal := pathExists(targetPath)
 	if hadOriginal {
 		if err := os.Rename(targetPath, backupPath); err != nil {
 			return apperr.Wrap("INTERNAL", "无法创建实例目录备份", err)
+		}
+		if err := preserveRecycleBin(backupPath, tempPath); err != nil {
+			_ = os.Rename(backupPath, targetPath)
+			return err
 		}
 	}
 	if err := os.Rename(tempPath, targetPath); err != nil {
@@ -132,14 +135,15 @@ func (m *Manager) syncInstanceBackToImage(item *task, cfg model.ServerConfig, so
 
 	m.log(item, "info", "scanning_instance", source.InstanceID, "正在扫描实例内容")
 	m.beginCopyProgress(item, "scanning_instance", 0, 0)
-	files, bytes, err := scanTree(item.context, sourcePath, nil)
+	skip := func(relative string, _ fs.DirEntry) bool { return isRecycleBinPath(relative) }
+	files, bytes, err := scanTree(item.context, sourcePath, skip)
 	if err != nil {
 		return err
 	}
 	m.beginCopyProgress(item, "copying_instance", files, bytes)
 	m.log(item, "info", "copying_instance", source.InstanceID,
 		fmt.Sprintf("正在使用 %d 个工作线程复制 %d 个文件", m.copyConcurrency, files))
-	if err := m.copyTree(item.context, sourcePath, tempPath, nil, func(bytes int64, fileDone bool) {
+	if err := m.copyTree(item.context, sourcePath, tempPath, skip, func(bytes int64, fileDone bool) {
 		m.advanceCopyProgress(item, bytes, fileDone)
 	}); err != nil {
 		return err
@@ -152,6 +156,10 @@ func (m *Manager) syncInstanceBackToImage(item *task, cfg model.ServerConfig, so
 
 	if err := os.Rename(imagePath, backupPath); err != nil {
 		return apperr.Wrap("INTERNAL", "无法创建原镜像源目录备份", err)
+	}
+	if err := preserveRecycleBin(backupPath, tempPath); err != nil {
+		_ = os.Rename(backupPath, imagePath)
+		return err
 	}
 	if err := os.Rename(tempPath, imagePath); err != nil {
 		if rollbackErr := os.Rename(backupPath, imagePath); rollbackErr != nil {
@@ -402,6 +410,36 @@ func isExcluded(relative string, directory bool, entries []model.ExcludeEntry) b
 		}
 	}
 	return false
+}
+
+func isRecycleBinPath(relative string) bool {
+	clean := filepath.ToSlash(filepath.Clean(relative))
+	return clean == ".prism-recycle-bin" || strings.HasPrefix(clean, ".prism-recycle-bin/")
+}
+
+func preserveRecycleBin(oldRoot, newRoot string) error {
+	if !pathExists(oldRoot) {
+		return nil
+	}
+	source := filepath.Join(oldRoot, ".prism-recycle-bin")
+	info, err := os.Lstat(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return apperr.New("PATH_ESCAPE", "回收站目录无效")
+	}
+	destination := filepath.Join(newRoot, ".prism-recycle-bin")
+	if pathExists(destination) {
+		return apperr.New("ROLLBACK_FAILED", "部署临时目录中已存在回收站目录")
+	}
+	if err := os.Rename(source, destination); err != nil {
+		return apperr.Wrap("INTERNAL", "无法保留回收站目录", err)
+	}
+	return nil
 }
 
 func copyFile(

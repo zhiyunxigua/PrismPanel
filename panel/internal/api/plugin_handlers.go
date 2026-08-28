@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -85,6 +86,54 @@ func (s *Server) handlePlugins(writer http.ResponseWriter, request *http.Request
 	default:
 		methodNotAllowed(writer, "GET, POST")
 	}
+}
+
+func (s *Server) deletePlugin(writer http.ResponseWriter, request *http.Request, pluginType, pluginID string) {
+	if request.Method != http.MethodDelete {
+		methodNotAllowed(writer, "DELETE")
+		return
+	}
+	if err := s.authorize(request, "plugin.remove"); err != nil {
+		writeRequestError(writer, err)
+		return
+	}
+	if !panelplugins.ValidPluginType(pluginType) || strings.TrimSpace(pluginID) == "" {
+		writeRequestError(writer, apiError("INVALID_REQUEST", "invalid plugin"))
+		return
+	}
+	if err := s.plugins.Delete(pluginID, pluginType); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			s.record(request, "plugin.remove", pluginID, map[string]any{
+				"plugin_type": pluginType, "plugin_id": pluginID,
+			}, err)
+			writeRequestError(writer, apiError("NOT_FOUND", "插件不存在"))
+			return
+		}
+		s.record(request, "plugin.remove", pluginID, map[string]any{
+			"plugin_type": pluginType, "plugin_id": pluginID,
+		}, err)
+		writeRequestError(writer, apiError("INTERNAL", "插件删除失败"))
+		return
+	}
+	if err := s.store.DeletePluginDeployPreferences(request.Context(), pluginType, pluginID); err != nil {
+		s.record(request, "plugin.remove", pluginID, map[string]any{
+			"plugin_type": pluginType, "plugin_id": pluginID,
+		}, err)
+		writeRequestError(writer, apiError("INTERNAL", "插件部署偏好清理失败"))
+		return
+	}
+	catalog, err := s.plugins.List()
+	if err == nil {
+		err = syncPluginCatalogAll(request.Context(), s.store, catalog)
+	}
+	s.record(request, "plugin.remove", pluginID, map[string]any{
+		"plugin_type": pluginType, "plugin_id": pluginID,
+	}, err)
+	if err != nil {
+		writeRequestError(writer, apiError("INTERNAL", "插件目录同步失败"))
+		return
+	}
+	writeSuccess(writer, map[string]any{"plugin_type": pluginType, "plugin_id": pluginID})
 }
 
 func (s *Server) handlePluginUpload(writer http.ResponseWriter, request *http.Request) {

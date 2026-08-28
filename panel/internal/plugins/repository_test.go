@@ -57,6 +57,34 @@ func TestRepositoryDeduplicatesSameArtifact(t *testing.T) {
 	}
 }
 
+func TestRepositoryDeleteRemovesOnlySelectedPlugin(t *testing.T) {
+	repository, err := NewRepository(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Upload(UploadInput{
+		PluginType: PluginTypeSpigot, JARFilename: "Example.jar",
+		JAR: testJAR(t, "Example", "1.0", "com.example.Main"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Upload(UploadInput{
+		PluginType: PluginTypeVelocity, JARFilename: "Example.jar",
+		JAR: testVelocityJAR(t, "example", "1.0", "com.example.Main"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Delete("example", PluginTypeSpigot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Get("example", PluginTypeSpigot); err == nil {
+		t.Fatal("expected deleted spigot plugin to be unavailable")
+	}
+	if _, err := repository.Get("example", PluginTypeVelocity); err != nil {
+		t.Fatalf("velocity plugin was unexpectedly removed: %v", err)
+	}
+}
+
 func TestConfigZIPRejectsPathEscape(t *testing.T) {
 	repository, _ := NewRepository(t.TempDir())
 	_, err := repository.Upload(UploadInput{
@@ -201,6 +229,13 @@ func testJAR(t *testing.T, name, version, main string) []byte {
 	t.Helper()
 	return testZIP(t, map[string]string{
 		"plugin.yml": "name: " + name + "\nversion: " + version + "\nmain: " + main + "\nauthors: [Tester]\n",
+	})
+}
+
+func testVelocityJAR(t *testing.T, id, version, main string) []byte {
+	t.Helper()
+	return testZIP(t, map[string]string{
+		"velocity-plugin.json": `{"id":"` + id + `","version":"` + version + `","name":"` + id + `","main":"` + main + `"}`,
 	})
 }
 

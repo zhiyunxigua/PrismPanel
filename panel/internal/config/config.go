@@ -19,12 +19,14 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Database  DatabaseConfig  `yaml:"database"`
-	Auth      AuthConfig      `yaml:"auth"`
-	Security  SecurityConfig  `yaml:"security"`
-	Minecraft MinecraftConfig `yaml:"minecraft"`
-	Frontend  Frontend        `yaml:"frontend"`
+	Server     ServerConfig     `yaml:"server"`
+	Database   DatabaseConfig   `yaml:"database"`
+	Auth       AuthConfig       `yaml:"auth"`
+	Security   SecurityConfig   `yaml:"security"`
+	Minecraft  MinecraftConfig  `yaml:"minecraft"`
+	PlayerData PlayerDataConfig `yaml:"playerdata"`
+	Features   FeaturesConfig   `yaml:"features"`
+	Frontend   Frontend         `yaml:"frontend"`
 }
 
 type ServerConfig struct {
@@ -60,6 +62,15 @@ type MinecraftConfig struct {
 	ManageOperators bool `yaml:"manage_operators"`
 }
 
+type PlayerDataConfig struct {
+	BaseURL string `yaml:"base_url"`
+	Token   string `yaml:"token"`
+}
+
+type FeaturesConfig struct {
+	Mail bool `yaml:"mail"`
+}
+
 type Frontend struct {
 	Directory string `yaml:"directory"`
 }
@@ -86,8 +97,10 @@ func Default() Config {
 			},
 			TrustedProxyCIDRs: []string{},
 		},
-		Minecraft: MinecraftConfig{ManageOperators: true},
-		Frontend:  Frontend{Directory: "../frontend/dist"},
+		Minecraft:  MinecraftConfig{ManageOperators: true},
+		PlayerData: PlayerDataConfig{},
+		Features:   FeaturesConfig{Mail: false},
+		Frontend:   Frontend{Directory: "../frontend/dist"},
 	}
 }
 
@@ -151,6 +164,27 @@ func (c Config) Validate() error {
 	}
 	if c.Frontend.Directory == "" {
 		return errors.New("frontend.directory is required")
+	}
+	if err := c.PlayerData.Validate(c.Features.Mail); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c PlayerDataConfig) Validate(mailEnabled bool) error {
+	baseURL := strings.TrimSpace(c.BaseURL)
+	if baseURL != "" {
+		parsed, err := url.Parse(baseURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+			parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return errors.New("playerdata.base_url must be an http or https URL without query or credentials")
+		}
+	}
+	if mailEnabled && baseURL == "" {
+		return errors.New("playerdata.base_url is required when features.mail is enabled")
+	}
+	if mailEnabled && strings.TrimSpace(c.Token) == "" {
+		return errors.New("playerdata.token is required when features.mail is enabled")
 	}
 	return nil
 }

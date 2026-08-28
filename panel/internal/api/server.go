@@ -22,6 +22,7 @@ import (
 	panelmetrics "PrismPanel/internal/metrics"
 	"PrismPanel/internal/netgames"
 	panelnodes "PrismPanel/internal/nodes"
+	"PrismPanel/internal/playerdata"
 	panelplugins "PrismPanel/internal/plugins"
 	"PrismPanel/internal/schedule"
 	"PrismPanel/internal/store"
@@ -39,6 +40,7 @@ type Server struct {
 	winApp      *winappupdates.Repository
 	netGames    *netgames.Service
 	scheduler   *schedule.Service
+	playerData  *playerdata.Client
 	fileProxies *fileProxyStore
 	http        *http.Server
 	logger      *slog.Logger
@@ -69,7 +71,7 @@ func NewServer(
 	server := &Server{
 		config: cfg, auth: authService, store: repository, connections: connectionManager,
 		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, winApp: winAppRepository, netGames: netGameService,
-		scheduler: scheduler, fileProxies: newFileProxyStore(), logger: logger,
+		scheduler: scheduler, playerData: playerdata.NewClient(cfg.PlayerData.BaseURL, cfg.PlayerData.Token), fileProxies: newFileProxyStore(), logger: logger,
 	}
 	connectionManager.AddStatusCallback(func(_ string, status daemon.RuntimeStatus) {
 		if status.State == "ONLINE" {
@@ -85,6 +87,7 @@ func NewServer(
 	mux.HandleFunc("/api/v1/auth/logout", server.requireAuth(server.handleLogout))
 	mux.HandleFunc("/api/v1/auth/session", server.requireAuth(server.handleSession))
 	mux.HandleFunc("/api/v1/auth/client-ip", server.requireAuth(server.handleClientIP))
+	mux.HandleFunc("/api/v1/features", server.requireAuth(server.handleFeatures))
 	mux.HandleFunc("/api/v1/auth/password", server.requireAuth(server.handlePassword))
 	mux.HandleFunc("/api/v1/users", server.requireAuth(server.handleUsers))
 	mux.HandleFunc("/api/v1/users/", server.requireAuth(server.handleUser))
@@ -119,6 +122,7 @@ func NewServer(
 	mux.HandleFunc("/api/v1/net-games/", server.requirePermission("dashboard.view", server.handleNetGame))
 	mux.HandleFunc("/api/v1/user/preferences/net-games", server.requirePermission("dashboard.view", server.handleNetGamePreference))
 	mux.HandleFunc("/api/v1/players/transfer", server.requireAuth(server.handlePlayerTransfer))
+	mux.HandleFunc("/api/v1/mail/send", server.requirePermission("mail.send", server.handleMailSend))
 	mux.HandleFunc("/api/v1/operators", server.requireSuperAdmin(server.handleOperators))
 	mux.HandleFunc("/api/v1/operators/", server.requireSuperAdmin(server.handleOperator))
 	mux.HandleFunc("/api/v1/winapp/update", server.handleWinAppUpdate)

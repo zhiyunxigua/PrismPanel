@@ -60,6 +60,14 @@ func (s *Server) handleFiles(writer http.ResponseWriter, request *http.Request) 
 		s.handleFileExtractStatus(writer, request)
 	case "delete":
 		s.handleFileDelete(writer, request)
+	case "recycle-list":
+		s.handleFileRecycleList(writer, request)
+	case "recycle-restore":
+		s.handleFileRecycleRestore(writer, request)
+	case "recycle-delete":
+		s.handleFileRecycleDelete(writer, request)
+	case "recycle-clear":
+		s.handleFileRecycleClear(writer, request)
 	default:
 		http.NotFound(writer, request)
 	}
@@ -533,6 +541,92 @@ func (s *Server) handleFileDelete(writer http.ResponseWriter, request *http.Requ
 		err = s.files.Delete(target, input.Paths, input.Recursive)
 	}
 	s.publishFileResult(created, target, input.Paths, err)
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, map[string]any{})
+}
+
+func (s *Server) handleFileRecycleList(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	target, _ := fileTarget(request)
+	if _, err := s.consumeFileTicket(request, "file.recycle.list", target, "."); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	entries, err := s.files.RecycleList(target)
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, map[string]any{"entries": entries})
+}
+
+func (s *Server) handleFileRecycleRestore(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	var input struct {
+		ID string `json:"id"`
+	}
+	if err := decodeFileJSON(request, &input, 64*1024); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	target, _ := fileTarget(request)
+	created, err := s.consumeFileTicket(request, "file.recycle.restore", target, ".")
+	if err == nil {
+		err = s.files.RecycleRestore(target, input.ID)
+	}
+	s.publishFileResult(created, target, []string{"."}, err)
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, map[string]any{})
+}
+
+func (s *Server) handleFileRecycleDelete(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	var input struct {
+		IDs []string `json:"ids"`
+	}
+	if err := decodeFileJSON(request, &input, 64*1024); err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	target, _ := fileTarget(request)
+	created, err := s.consumeFileTicket(request, "file.recycle.delete", target, ".")
+	if err == nil {
+		err = s.files.RecycleDelete(target, input.IDs)
+	}
+	s.publishFileResult(created, target, []string{"."}, err)
+	if err != nil {
+		writeFileError(writer, err)
+		return
+	}
+	writeFileSuccess(writer, map[string]any{})
+}
+
+func (s *Server) handleFileRecycleClear(writer http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		writeFileMethodError(writer, "POST")
+		return
+	}
+	target, _ := fileTarget(request)
+	created, err := s.consumeFileTicket(request, "file.recycle.clear", target, ".")
+	if err == nil {
+		err = s.files.RecycleClear(target)
+	}
+	s.publishFileResult(created, target, []string{"."}, err)
 	if err != nil {
 		writeFileError(writer, err)
 		return

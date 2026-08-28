@@ -31,15 +31,25 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		cookie, err := request.Cookie(s.config.Auth.CookieName)
-		if err != nil || cookie.Value == "" {
-			writeRequestError(writer, apiError("UNAUTHENTICATED", "请先登录"))
-			return
-		}
-		session, err := s.auth.Authenticate(request.Context(), cookie.Value)
-		if err != nil {
-			s.clearSessionCookie(writer)
-			writeRequestError(writer, publicError(err))
-			return
+		var session store.Session
+		if err == nil && cookie.Value != "" {
+			session, err = s.auth.Authenticate(request.Context(), cookie.Value)
+			if err != nil {
+				s.clearSessionCookie(writer)
+				writeRequestError(writer, publicError(err))
+				return
+			}
+		} else {
+			apiKey := strings.TrimSpace(request.Header.Get("X-API-Key"))
+			if apiKey == "" {
+				writeRequestError(writer, apiError("UNAUTHENTICATED", "请先登录或提供 API Key"))
+				return
+			}
+			session, err = s.auth.AuthenticateAPIKey(request.Context(), apiKey)
+			if err != nil {
+				writeRequestError(writer, publicError(err))
+				return
+			}
 		}
 		ctx := context.WithValue(request.Context(), sessionContextKey{}, session)
 		next(writer, request.WithContext(ctx))

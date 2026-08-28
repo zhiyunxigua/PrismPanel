@@ -49,3 +49,13 @@ func TestWriteGBKConsoleInput(t *testing.T) {
 		t.Fatalf("unexpected encoded command %q", decoded)
 	}
 }
+
+func TestDecodeGBKSessionContentPreservesChineseText(t *testing.T) {
+	raw, _, err := transform.String(simplifiedchinese.GBK.NewEncoder(), "服务器已启动")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeSessionContent("gbk", []byte(raw), ""); got != "服务器已启动" {
+		t.Fatalf("decoded content = %q", got)
+	}
+}

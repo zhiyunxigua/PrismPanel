@@ -123,4 +123,5 @@ panel/panel.yaml
 frontend/node_modules/
 frontend/dist/
 /prism-plugin/*/build/
+/reference/Fantnel/.idea
 /prism-plugin/.gradle/

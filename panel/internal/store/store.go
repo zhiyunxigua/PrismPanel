@@ -36,7 +36,7 @@ func Open(ctx context.Context, cfg config.DatabaseConfig) (*Store, error) {
 }
 
 var logicalTablePattern = regexp.MustCompile(
-	`\b(instance_admins|user_permission_overrides|group_permissions|user_preferences|user_groups|sessions|users|nodes|audit_logs|file_operations|operator_state|operators|scheduled_task_targets|scheduled_tasks|task_run_targets|task_runs|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences|net_game_observations|net_game_collection_runs|net_games)\b`,
+	`\b(api_keys|instance_admins|user_permission_overrides|group_permissions|user_preferences|user_groups|sessions|users|nodes|audit_logs|file_operations|operator_state|operators|scheduled_task_targets|scheduled_tasks|task_run_targets|task_runs|plugin_artifacts_v2|plugin_artifacts|proxy_sync_owners|proxy_sync_rules|plugin_deploy_preferences|net_game_observations|net_game_collection_runs|net_games)\b`,
 )
 
 type database struct {
@@ -142,6 +142,19 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			KEY idx_sessions_user_active (user_id, revoked_at),
 			KEY idx_sessions_expiry (expires_at, idle_expires_at)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+		`CREATE TABLE IF NOT EXISTS api_keys (
+			id CHAR(32) CHARACTER SET ascii NOT NULL PRIMARY KEY,
+			user_id CHAR(32) CHARACTER SET ascii NOT NULL,
+			token_hash BINARY(32) NOT NULL,
+			prefix VARCHAR(24) CHARACTER SET ascii NOT NULL,
+			created_at DATETIME(6) NOT NULL,
+			last_used_at DATETIME(6) NULL,
+			revoked_at DATETIME(6) NULL,
+			UNIQUE KEY uq_api_keys_user (user_id),
+			UNIQUE KEY uq_api_keys_token_hash (token_hash),
+			KEY idx_api_keys_active (revoked_at),
+			CONSTRAINT fk_api_keys_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 		`CREATE TABLE IF NOT EXISTS group_permissions (
 			group_code VARCHAR(32) CHARACTER SET ascii NOT NULL,
 			permission_code VARCHAR(64) CHARACTER SET ascii NOT NULL,
@@ -155,6 +168,7 @@ func (s *Store) initializeSchema(ctx context.Context) error {
 			('admin','instance.start'),('admin','instance.stop'),('admin','instance.restart'),('admin','instance.kill'),
 			('admin','console.read'),('admin','console.command'),('admin','file.read'),('admin','file.write'),('admin','file.delete'),
 			('admin','player.view'),('admin','player.kick'),('admin','player.message'),('admin','player.transfer'),('admin','player.whitelist.manage'),
+			('admin','mail.send'),
 			('admin','plugin.view'),('admin','plugin.upload'),('admin','plugin.deploy'),('admin','plugin.remove'),
 			('admin','firewall.view'),('admin','firewall.manage'),('admin','task.view'),('admin','task.cancel'),('admin','task.retry'),
 			('admin','schedule.view'),('admin','schedule.manage'),

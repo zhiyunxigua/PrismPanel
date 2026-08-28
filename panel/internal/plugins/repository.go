@@ -237,6 +237,23 @@ func (r *Repository) Get(pluginID string, pluginTypes ...string) (Plugin, error)
 	return r.loadPluginLocked(normalizePluginType(pluginTypes), pluginID)
 }
 
+func (r *Repository) Delete(pluginID string, pluginTypes ...string) error {
+	pluginType := normalizePluginType(pluginTypes)
+	if !ValidPluginType(pluginType) || !pluginIDPattern.MatchString(pluginID) {
+		return errors.New("invalid plugin")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pluginDir := filepath.Join(r.typeRoot(pluginType), pluginID)
+	if _, err := r.loadIndexLocked(pluginDir); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(pluginDir); err != nil {
+		return fmt.Errorf("delete plugin repository: %w", err)
+	}
+	return nil
+}
+
 func (r *Repository) Artifact(pluginID string, artifactID int64, pluginTypes ...string) (Manifest, string, error) {
 	if !pluginIDPattern.MatchString(pluginID) || artifactID < 1 {
 		return Manifest{}, "", errors.New("invalid plugin artifact")

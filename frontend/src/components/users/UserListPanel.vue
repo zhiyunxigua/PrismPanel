@@ -39,8 +39,12 @@ const permissionSubmitting = ref(false);
 const permissionUser = ref(null);
 const permissionProfile = ref(null);
 const selectedPermissions = ref([]);
+const apiKeyDialogOpen = ref(false);
+const apiKeyUser = ref(null);
+const apiKeyValue = ref("");
 
 const isSuperAdmin = computed(() => sessionState.user?.group_code === "super_admin");
+const isAdmin = computed(() => sessionState.user?.group_code === "admin");
 const canCreate = computed(() => hasPermission("user.create"));
 const groupTypes = { super_admin: "danger", admin: "warning", operator: "primary", observer: "info" };
 const assignableGroups = computed(() => {
@@ -202,6 +206,64 @@ async function revokeSessions(user) {
   }
 }
 
+async function manageAPIKey(user) {
+  let existing = null;
+  try {
+    existing = await request(`/api/v1/users/${user.id}/api-key`);
+  } catch (error) {
+    if (error.status !== 404) {
+      ElMessage.error(error.message);
+      return;
+    }
+  }
+  let rotate = Boolean(existing);
+  if (rotate) {
+    try {
+      await ElMessageBox.confirm(
+        `“${user.display_name}”已有 API Key，继续将使旧 Key 立即失效。`,
+        "轮换 API Key",
+        { type: "warning", confirmButtonText: "轮换", cancelButtonText: "取消" },
+      );
+    } catch (error) {
+      if (error !== "cancel" && error !== "close") ElMessage.error(error.message);
+      return;
+    }
+  }
+  try {
+    const result = await request(
+      `/api/v1/users/${user.id}/api-key${rotate ? "/rotate" : ""}`,
+      { method: "POST", body: "{}" },
+    );
+    apiKeyUser.value = user;
+    apiKeyValue.value = result.api_key;
+    apiKeyDialogOpen.value = true;
+  } catch (error) {
+    ElMessage.error(error.message);
+  }
+}
+
+async function revokeAPIKey(user) {
+  try {
+    await ElMessageBox.confirm(`撤销“${user.display_name}”的 API Key？`, "撤销 API Key", {
+      type: "warning", confirmButtonText: "撤销", cancelButtonText: "取消",
+    });
+    await request(`/api/v1/users/${user.id}/api-key`, { method: "DELETE" });
+    apiKeyDialogOpen.value = false;
+    ElMessage.success("API Key 已撤销");
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") ElMessage.error(error.message);
+  }
+}
+
+async function copyAPIKey() {
+  try {
+    await navigator.clipboard.writeText(apiKeyValue.value);
+    ElMessage.success("API Key 已复制");
+  } catch {
+    ElMessage.error("复制失败，请手动复制");
+  }
+}
+
 async function remove(user) {
   try {
     const result = await ElMessageBox.prompt(`删除“${user.display_name}”并撤销其登录会话。`, "删除用户", {
@@ -273,6 +335,7 @@ function command(action, user) {
   if (action === "permissions") openPermissions(user);
   if (action === "reset") resetPassword(user);
   if (action === "revoke") revokeSessions(user);
+  if (action === "api-key") manageAPIKey(user);
   if (action === "delete") remove(user);
 }
 
@@ -283,11 +346,19 @@ function canManage(user, permission) {
   return permissionSetContains(sessionState.user?.permissions || [], user.permissions || []);
 }
 
+function canManageAPIKey(user) {
+  if (!isSuperAdmin.value && !isAdmin.value) return false;
+  if (isSuperAdmin.value) return true;
+  if (user.group_code === "super_admin") return false;
+  return permissionSetContains(sessionState.user?.permissions || [], user.permissions || []);
+}
+
 function rowHasActions(user) {
   return canManage(user, "user.update")
     || canManage(user, "user.password.reset")
     || canManage(user, "user.sessions.revoke")
     || (canManage(user, "user.delete") && user.id !== sessionState.user.id)
+    || canManageAPIKey(user)
     || isSuperAdmin.value;
 }
 
@@ -390,6 +461,9 @@ onMounted(load);
                   </el-dropdown-item>
                   <el-dropdown-item v-if="canManage(row, 'user.password.reset')" command="reset">
                     <KeyRound :size="16" />重置密码
+                  </el-dropdown-item>
+                  <el-dropdown-item v-if="canManageAPIKey(row)" command="api-key">
+                    <KeyRound :size="16" />管理 API Key
                   </el-dropdown-item>
                   <el-dropdown-item v-if="canManage(row, 'user.sessions.revoke')" command="revoke">
                     <ShieldOff :size="16" />撤销会话
@@ -498,6 +572,18 @@ onMounted(load);
       >
         保存
       </el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="apiKeyDialogOpen" title="API Key 已生成" width="560px">
+    <p>该 Key 只显示这一次，请立即复制并保存到外部服务的安全配置中。</p>
+    <el-input :model-value="apiKeyValue" readonly>
+      <template #append><el-button @click="copyAPIKey">复制</el-button></template>
+    </el-input>
+    <p v-if="apiKeyUser" class="muted-text">所属用户：{{ apiKeyUser.display_name }}（{{ apiKeyUser.username }}）</p>
+    <template #footer>
+      <el-button v-if="apiKeyUser" type="danger" plain @click="revokeAPIKey(apiKeyUser)">撤销 Key</el-button>
+      <el-button type="primary" @click="apiKeyDialogOpen = false">完成</el-button>
     </template>
   </el-dialog>
 </template>

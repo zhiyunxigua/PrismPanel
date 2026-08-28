@@ -79,6 +79,8 @@ var fileScopePermissions = map[string]string{
 	"file.import": "file.write",
 	"file.move":   "file.write", "file.copy": "file.write", "file.archive": "file.write",
 	"file.extract": "file.write", "file.extract.status": "file.write", "file.delete": "file.delete",
+	"file.recycle.list": "file.read", "file.recycle.restore": "file.delete",
+	"file.recycle.delete": "file.delete", "file.recycle.clear": "file.delete",
 }
 
 var fileScopeOperations = map[string]string{
@@ -88,6 +90,8 @@ var fileScopeOperations = map[string]string{
 	"file.import": "import",
 	"file.move":   "move", "file.copy": "copy", "file.archive": "archive",
 	"file.extract": "extract", "file.extract.status": "extract-status", "file.delete": "delete",
+	"file.recycle.list": "recycle-list", "file.recycle.restore": "recycle-restore",
+	"file.recycle.delete": "recycle-delete", "file.recycle.clear": "recycle-clear",
 }
 
 type fileAuthorizeInput struct {
@@ -145,13 +149,15 @@ func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.R
 	}
 	operationName := fileScopeOperations[input.Scope]
 	mustProxy := input.Scope == "file.create" || input.Scope == "file.move" || input.Scope == "file.copy" || input.Scope == "file.archive" ||
-		input.Scope == "file.extract" || input.Scope == "file.extract.status" || input.Scope == "file.delete" || input.Scope == "file.import"
+		input.Scope == "file.extract" || input.Scope == "file.extract.status" || input.Scope == "file.delete" || input.Scope == "file.import" ||
+		input.Scope == "file.recycle.restore" || input.Scope == "file.recycle.delete" || input.Scope == "file.recycle.clear"
 	directSourceIP, directSourceKnown := s.directAccessSourceIP(request)
 	direct := err == nil && !input.ForceProxy && publicURL != "" && !mustProxy && directSourceKnown
 
 	mutating := input.Scope == "file.edit" || input.Scope == "file.upload" || input.Scope == "file.import" ||
 		input.Scope == "file.upload.cancel" || input.Scope == "file.create" || input.Scope == "file.move" ||
-		input.Scope == "file.copy" || input.Scope == "file.archive" || input.Scope == "file.extract" || input.Scope == "file.delete"
+		input.Scope == "file.copy" || input.Scope == "file.archive" || input.Scope == "file.extract" || input.Scope == "file.delete" ||
+		input.Scope == "file.recycle.restore" || input.Scope == "file.recycle.delete" || input.Scope == "file.recycle.clear"
 	var operation store.FileOperation
 	if err == nil && mutating {
 		expiresAt := time.Now().UTC().Add(2 * time.Minute)
@@ -430,6 +436,22 @@ func proxyFileScope(operation, method string) string {
 	case "delete":
 		if method == http.MethodPost {
 			return "file.delete"
+		}
+	case "recycle-list":
+		if method == http.MethodPost {
+			return "file.recycle.list"
+		}
+	case "recycle-restore":
+		if method == http.MethodPost {
+			return "file.recycle.restore"
+		}
+	case "recycle-delete":
+		if method == http.MethodPost {
+			return "file.recycle.delete"
+		}
+	case "recycle-clear":
+		if method == http.MethodPost {
+			return "file.recycle.clear"
 		}
 	}
 	return ""

@@ -67,6 +67,38 @@ func TestPluginAndConfigDeployAreSeparate(t *testing.T) {
 	}
 }
 
+func TestConfigDeploymentFailureIsImmediate(t *testing.T) {
+	workspace := t.TempDir()
+	pending, err := newPendingStore(filepath.Join(t.TempDir(), "plugin-pending"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{pending: pending}
+	result, applyErr := service.applyOrQueue(
+		operationTarget{ID: "instance-1", Workspace: workspace, Running: true},
+		pendingOperation{Type: "deploy_config"}, "bundle.zip",
+		func() error { return os.ErrPermission },
+	)
+	if applyErr == nil || result.Status != "failed" {
+		t.Fatalf("config deployment failure was not returned immediately: result=%#v err=%v", result, applyErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(pending.root, "instance-1", "pending.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("config deployment unexpectedly queued: %v", statErr)
+	}
+}
+
+func TestConfigDeploymentDoesNotRequestRestart(t *testing.T) {
+	service := &Service{}
+	result, err := service.applyOrQueue(
+		operationTarget{ID: "instance-1", Workspace: t.TempDir(), Running: true},
+		pendingOperation{Type: "deploy_config"}, "",
+		func() error { return nil },
+	)
+	if err != nil || result.Status != "applied" || result.PendingRestart {
+		t.Fatalf("config deployment unexpectedly requested restart: result=%#v err=%v", result, err)
+	}
+}
+
 func configBundle(t *testing.T, name, version string, config map[string]string) string {
 	t.Helper()
 	var buffer bytes.Buffer

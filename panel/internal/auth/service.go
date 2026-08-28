@@ -147,6 +147,54 @@ func (s *Service) Authenticate(ctx context.Context, token string) (store.Session
 	return session, nil
 }
 
+func (s *Service) AuthenticateAPIKey(ctx context.Context, token string) (store.Session, error) {
+	token = strings.TrimSpace(token)
+	tokenHash, err := apiKeyTokenHash(token)
+	if err != nil {
+		return store.Session{}, ErrUnauthenticated
+	}
+	now := time.Now().UTC()
+	key, user, err := s.store.FindAPIKey(ctx, tokenHash, now)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.Session{}, ErrUnauthenticated
+	}
+	if err != nil {
+		return store.Session{}, err
+	}
+	if err := s.store.TouchAPIKey(ctx, key.ID, now); err != nil {
+		return store.Session{}, err
+	}
+	user, err = s.store.DecorateUser(ctx, user)
+	if err != nil {
+		return store.Session{}, err
+	}
+	return store.Session{
+		TokenHash: tokenHash, User: user, AuthMethod: "api_key", CredentialID: key.ID,
+	}, nil
+}
+
+func (s *Service) CreateAPIKey(ctx context.Context, userID string) (store.APIKey, string, error) {
+	token, tokenHash, prefix, err := newAPIKeyToken()
+	if err != nil {
+		return store.APIKey{}, "", err
+	}
+	key, err := s.store.CreateAPIKey(ctx, userID, tokenHash, prefix, time.Now().UTC())
+	return key, token, err
+}
+
+func (s *Service) RotateAPIKey(ctx context.Context, userID string) (store.APIKey, string, error) {
+	token, tokenHash, prefix, err := newAPIKeyToken()
+	if err != nil {
+		return store.APIKey{}, "", err
+	}
+	key, err := s.store.RotateAPIKey(ctx, userID, tokenHash, prefix, time.Now().UTC())
+	return key, token, err
+}
+
+func (s *Service) RevokeAPIKey(ctx context.Context, userID string) error {
+	return s.store.RevokeAPIKey(ctx, userID)
+}
+
 func (s *Service) Logout(ctx context.Context, token string) error {
 	tokenHash, err := sessionTokenHash(token)
 	if err != nil {
@@ -263,6 +311,28 @@ func newSessionToken() (string, []byte, error) {
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	hash := sha256.Sum256([]byte(token))
 	return token, hash[:], nil
+}
+
+func newAPIKeyToken() (string, []byte, string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", nil, "", err
+	}
+	token := "ppk_" + base64.RawURLEncoding.EncodeToString(raw)
+	hash := sha256.Sum256([]byte(token))
+	return token, hash[:], token[:12], nil
+}
+
+func apiKeyTokenHash(token string) ([]byte, error) {
+	if !strings.HasPrefix(token, "ppk_") {
+		return nil, errors.New("invalid api key")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, "ppk_"))
+	if err != nil || len(raw) != 32 {
+		return nil, errors.New("invalid api key")
+	}
+	hash := sha256.Sum256([]byte(token))
+	return hash[:], nil
 }
 
 func sessionTokenHash(token string) ([]byte, error) {

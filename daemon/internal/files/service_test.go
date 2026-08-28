@@ -76,6 +76,103 @@ func TestFileLifecycleAndVersionConflict(t *testing.T) {
 	}
 }
 
+func TestManualOverwritePreservesPreviousFilesInRecycleBin(t *testing.T) {
+	service, target, root := newTestService(t)
+	path := filepath.Join(root, "settings.yml")
+	if err := os.WriteFile(path, []byte("before-save"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	content, err := service.Read(target, "settings.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Save(target, "settings.yml", "after-save", content.Encoding, content.Version); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContents(t, path, "after-save")
+
+	entries, err := service.RecycleList(target)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected one saved version in recycle bin: %#v, %v", entries, err)
+	}
+	if entries[0].OriginalPath != "settings.yml" {
+		t.Fatalf("unexpected saved version path: %#v", entries[0])
+	}
+	entryDir := filepath.Join(root, recycleBinName, entries[0].ID, "data")
+	assertFileContents(t, entryDir, "before-save")
+
+	if _, err := service.Upload(target, "settings.yml", bytes.NewReader([]byte("after-upload")), 12, "", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContents(t, path, "after-upload")
+	entries, err = service.RecycleList(target)
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("expected both overwritten versions in recycle bin: %#v, %v", entries, err)
+	}
+}
+
+func TestChunkUploadOverwritePreservesPreviousFileInRecycleBin(t *testing.T) {
+	service, target, root := newTestService(t)
+	path := filepath.Join(root, "chunk.txt")
+	if err := os.WriteFile(path, []byte("before"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.UploadChunk(target, "chunk.txt", bytes.NewReader([]byte("after!")), 6, "", true, "", "chunk-session", 0, true); err != nil {
+		t.Fatal(err)
+	}
+	assertFileContents(t, path, "after!")
+	entries, err := service.RecycleList(target)
+	if err != nil || len(entries) != 1 || entries[0].OriginalPath != "chunk.txt" {
+		t.Fatalf("chunk upload did not preserve overwritten file: %#v, %v", entries, err)
+	}
+	assertFileContents(t, filepath.Join(root, recycleBinName, entries[0].ID, "data"), "before")
+}
+
+func TestRecycleBinDeleteRestoreAndClear(t *testing.T) {
+	service, target, root := newTestService(t)
+	if err := os.MkdirAll(filepath.Join(root, "plugins"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	original := filepath.Join(root, "plugins", "example.jar")
+	if err := os.WriteFile(original, []byte("jar"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Delete(target, []string{"plugins/example.jar"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(original); !os.IsNotExist(err) {
+		t.Fatalf("deleted file still exists: %v", err)
+	}
+	entries, err := service.RecycleList(target)
+	if err != nil || len(entries) != 1 || entries[0].OriginalPath != "plugins/example.jar" {
+		t.Fatalf("unexpected recycle entries: %#v, %v", entries, err)
+	}
+	if err := service.RecycleRestore(target, entries[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(original)
+	if err != nil || string(contents) != "jar" {
+		t.Fatalf("restored contents = %q, err = %v", contents, err)
+	}
+	if err := service.Delete(target, []string{"plugins/example.jar"}, false); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = service.RecycleList(target)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("unexpected recycle entries after second delete: %#v, %v", entries, err)
+	}
+	if err := service.RecycleDelete(target, []string{entries[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = service.RecycleList(target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("recycle entry was not removed: %#v, %v", entries, err)
+	}
+	if err := service.Create(target, recycleBinName, "directory"); err == nil {
+		t.Fatal("recycle bin should not be directly operable")
+	}
+}
+
 func TestUploadCreatesMissingParentDirectories(t *testing.T) {
 	service, target, root := newTestService(t)
 	entry, err := service.Upload(target, "nested/deep/file.bin", bytes.NewReader([]byte("data")), 4, "", false, "")

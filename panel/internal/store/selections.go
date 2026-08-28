@@ -148,6 +148,14 @@ func (s *Store) ReplacePluginDeployPreferences(
 	)
 }
 
+func (s *Store) DeletePluginDeployPreferences(ctx context.Context, pluginType, pluginID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"DELETE FROM plugin_deploy_preferences WHERE plugin_type = ? AND plugin_id = ?",
+		pluginType, pluginID,
+	)
+	return err
+}
+
 func (s *Store) replaceTargetRules(
 	ctx context.Context,
 	deleteStatement, insertStatement string,

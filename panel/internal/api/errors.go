@@ -44,6 +44,12 @@ func writeRequestError(writer http.ResponseWriter, err error) {
 			status = http.StatusPreconditionRequired
 		case "INTERNAL":
 			status = http.StatusInternalServerError
+		case "FEATURE_DISABLED":
+			status = http.StatusNotFound
+		case "PLAYERDATA_UNAVAILABLE":
+			status = http.StatusServiceUnavailable
+		case "PLAYERDATA_ERROR":
+			status = http.StatusBadGateway
 		}
 		writeJSON(writer, status, response{Success: false, Error: panelError})
 		return

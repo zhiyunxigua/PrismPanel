@@ -249,7 +249,10 @@ func (s *Service) applyOrQueue(target operationTarget, operation pendingOperatio
 		}
 	}
 	if err := apply(); err != nil {
-		if target.Running && !target.Image && retryableFileError(err) {
+		// Config snapshots are safe to replace while the server is running. They
+		// must report the write error immediately instead of being deferred until
+		// the next restart.
+		if operation.Type != "deploy_config" && target.Running && !target.Image && retryableFileError(err) {
 			if queueErr := s.pending.enqueue(target.ID, operation, bundlePath); queueErr != nil {
 				return TargetResult{Target: target.ID, Status: "failed", Message: errors.Join(err, queueErr).Error()}, errors.Join(err, queueErr)
 			}
@@ -258,10 +261,10 @@ func (s *Service) applyOrQueue(target operationTarget, operation pendingOperatio
 		}
 		return TargetResult{Target: target.ID, Status: "failed", Message: err.Error()}, err
 	}
-	if !target.Image {
+	if operation.Type != "deploy_config" && !target.Image {
 		s.supervisor.SetPluginPendingRestart(target.ID, target.Running)
 	}
-	return TargetResult{Target: target.ID, Status: "applied", PendingRestart: target.Running}, nil
+	return TargetResult{Target: target.ID, Status: "applied", PendingRestart: operation.Type != "deploy_config" && target.Running}, nil
 }
 
 func (s *Service) applyPending(instanceID, workspace string) error {

@@ -17,6 +17,7 @@ const PluginsView = () => import("./views/PluginsView.vue");
 const NetGamesView = () => import("./views/NetGamesView.vue");
 const FirewallView = () => import("./views/FirewallView.vue");
 const WinAppUpdatesView = () => import("./views/WinAppUpdatesView.vue");
+const MailView = () => import("./views/MailView.vue");
 
 const routes = [
   {
@@ -66,6 +67,12 @@ const routes = [
         name: "plugins",
         component: PluginsView,
         meta: { title: "插件", permission: "plugin.view" },
+      },
+      {
+        path: "mail",
+        name: "mail",
+        component: MailView,
+        meta: { title: "邮件", permission: "mail.send", feature: "mail" },
       },
       {
         path: "net-games",
@@ -134,6 +141,7 @@ router.beforeEach(async (to) => {
       return { name: "overview" };
     }
   }
+  if (to.meta.feature && !sessionState.features?.[to.meta.feature]) return { name: "overview" };
   return true;
 });
 

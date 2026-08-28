@@ -14,6 +14,7 @@ import {
   ListTodo,
   Laptop,
   LogOut,
+  Mail,
   Menu,
   Moon,
   Network,
@@ -91,12 +92,14 @@ const navigation = computed(() => [
   { label: "服务器", route: "servers", icon: Server, permission: "server.view" },
   { label: "定时任务", route: "scheduled-tasks", icon: CalendarClock, permission: "schedule.view" },
   { label: "插件", route: "plugins", icon: Package, permission: "plugin.view" },
+  { label: "邮件", route: "mail", icon: Mail, permission: "mail.send", feature: "mail" },
   { label: "用户", route: "users", icon: Users, permission: "user.view" },
   { label: "网络白名单", route: "firewall", icon: ShieldCheck, permission: "firewall.view" },
   { label: "节点", route: "nodes", icon: Network, permission: "node.view" },
   { label: "客户端更新", route: "winapp-updates", icon: Laptop, superAdmin: true },
 ].filter((item) => (!item.winAppOnly || isWinApp())
   && (!item.permission || hasPermission(item.permission))
+  && (!item.feature || sessionState.features?.[item.feature])
   && (!item.superAdmin || sessionState.user?.group_code === "super_admin")));
 
 const passwordRules = {

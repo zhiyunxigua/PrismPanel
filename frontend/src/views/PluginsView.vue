@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
-import { ArchiveRestore, Boxes, FileCode2, Package, Plus, RefreshCw, Save, Search, Upload } from "lucide-vue-next";
-import { ElMessage } from "element-plus";
+import { ArchiveRestore, Boxes, FileCode2, Package, Plus, RefreshCw, Save, Search, Trash2, Upload } from "lucide-vue-next";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { request } from "../api";
 import { hasPermission } from "../session";
 import TargetSelectionTree from "../components/TargetSelectionTree.vue";
@@ -29,6 +29,7 @@ const configLoading = ref(false);
 
 const canUpload = computed(() => hasPermission("plugin.upload"));
 const canDeploy = computed(() => hasPermission("plugin.deploy"));
+const canRemove = computed(() => hasPermission("plugin.remove"));
 const configDirty = computed(() => configPath.value && configContent.value !== savedConfigContent.value);
 const filteredCatalog = computed(() => {
   const keyword = search.value.trim().toLowerCase();
@@ -115,6 +116,26 @@ async function rescan() {
     if (result.warnings?.length) ElMessage.warning(result.warnings.join("；"));
   } catch (error) {
     ElMessage.error(error.message);
+  } finally {
+    submitting.value = false;
+  }
+}
+
+async function removePlugin(plugin) {
+  try {
+    await ElMessageBox.confirm(
+      `将删除“${plugin.name}”及其全部仓库制品和配置快照，已部署到服务器的插件不会受影响。此操作不可恢复。`,
+      "删除插件",
+      { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
+    );
+    submitting.value = true;
+    await request(`/api/v1/plugins/${encodeURIComponent(plugin.plugin_type)}/${encodeURIComponent(plugin.plugin_id)}`, {
+      method: "DELETE",
+    });
+    ElMessage.success("插件已从仓库删除");
+    await load(true);
+  } catch (error) {
+    if (error !== "cancel" && error !== "close") ElMessage.error(error.message || "插件删除失败");
   } finally {
     submitting.value = false;
   }
@@ -356,9 +377,10 @@ onMounted(load);
           </template>
         </el-table-column>
         <el-table-column label="制品" width="90"><template #default="{ row }">{{ row.artifacts?.length || 0 }}</template></el-table-column>
-        <el-table-column label="操作" width="110" align="right">
+        <el-table-column label="操作" width="150" align="right">
           <template #default="{ row }">
             <el-button v-if="canDeploy" type="primary" link @click="openDeploy(row)"><Upload :size="14" />部署</el-button>
+            <el-button v-if="canRemove" type="danger" link :disabled="submitting" @click="removePlugin(row)"><Trash2 :size="14" />删除</el-button>
           </template>
         </el-table-column>
         <template #empty><div class="table-empty"><Package :size="24" /><span>仓库中暂无插件</span></div></template>

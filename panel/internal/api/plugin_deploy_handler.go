@@ -15,6 +15,10 @@ import (
 func (s *Server) handlePluginArtifact(writer http.ResponseWriter, request *http.Request) {
 	path := strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/v1/plugins/"), "/")
 	parts := strings.Split(path, "/")
+	if len(parts) == 2 {
+		s.deletePlugin(writer, request, parts[0], parts[1])
+		return
+	}
 	if len(parts) == 3 && parts[2] == "deploy" {
 		s.handlePluginDeployment(writer, request, "spigot", parts[0], parts[1], false)
 		return

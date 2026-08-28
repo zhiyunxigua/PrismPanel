@@ -168,6 +168,9 @@ func (s *Service) listDirectory(root string, request DirectoryRequest, includeHi
 	}
 	visible := make([]os.DirEntry, 0, len(entries))
 	for _, entry := range entries {
+		if relative == "." && entry.Name() == recycleBinName {
+			continue
+		}
 		if !includeHidden && strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
@@ -276,7 +279,9 @@ func (s *Service) Save(target Target, relative, content, encoding, expectedVersi
 		if int64(len(raw)) > s.maxEdit {
 			return apperr.New("FILE_TOO_LARGE", "文件超过在线编辑大小限制")
 		}
-		if err := atomicfile.WriteFile(filePath, raw, info.Mode().Perm()); err != nil {
+		if err := publishWithRecycle(root, clean, func() error {
+			return atomicfile.WriteFile(filePath, raw, info.Mode().Perm())
+		}); err != nil {
 			return apperr.Wrap("FILE_WRITE_FAILED", "文件保存失败", err)
 		}
 		updated, _ := os.Stat(filePath)
@@ -403,7 +408,9 @@ func (s *Service) Upload(target Target, relative string, source io.Reader, expec
 		if expectedSHA != "" && !strings.EqualFold(expectedSHA, digest) {
 			return apperr.New("FILE_HASH_MISMATCH", "上传文件摘要与授权不一致")
 		}
-		if err := atomicfile.Publish(tempPath, targetPath, overwrite); err != nil {
+		if err := publishWithRecycle(root, clean, func() error {
+			return atomicfile.Publish(tempPath, targetPath, false)
+		}); err != nil {
 			if errors.Is(err, os.ErrExist) {
 				return apperr.New("FILE_EXISTS", "目标文件已存在")
 			}
@@ -565,7 +572,9 @@ func (s *Service) UploadChunk(target Target, relative string, source io.Reader, 
 		} else if !errors.Is(targetErr, os.ErrNotExist) {
 			return fileError(targetErr, "无法检查上传目标")
 		}
-		if publishErr := atomicfile.Publish(tempPath, targetPath, overwrite); publishErr != nil {
+		if publishErr := publishWithRecycle(root, clean, func() error {
+			return atomicfile.Publish(tempPath, targetPath, false)
+		}); publishErr != nil {
 			if errors.Is(publishErr, os.ErrExist) {
 				return apperr.New("FILE_EXISTS", "上传目标文件已存在")
 			}
@@ -858,7 +867,7 @@ func (s *Service) Delete(target Target, paths []string, recursive bool) error {
 	return s.mutate(target, func(root string) error {
 		for _, relative := range paths {
 			clean, err := normalizeRelative(relative)
-			if err != nil || clean == "." {
+			if err != nil || clean == "." || isRecyclePath(clean) {
 				return apperr.New("INVALID_REQUEST", "不能删除工作目录根路径")
 			}
 			targetPath, err := securePath(root, clean, false)
@@ -873,11 +882,9 @@ func (s *Service) Delete(target Target, paths []string, recursive bool) error {
 				if !recursive {
 					return apperr.New("RECURSIVE_REQUIRED", "删除目录必须显式允许递归")
 				}
-				if err := os.RemoveAll(targetPath); err != nil {
-					return apperr.Wrap("FILE_WRITE_FAILED", "目录删除失败", err)
-				}
-			} else if err := os.Remove(targetPath); err != nil {
-				return apperr.Wrap("FILE_WRITE_FAILED", "文件删除失败", err)
+			}
+			if err := moveToRecycleBin(root, clean); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -984,6 +991,9 @@ func securePath(root, relative string, allowMissingFinal bool) (string, error) {
 	clean, err := normalizeRelative(relative)
 	if err != nil {
 		return "", err
+	}
+	if isRecyclePath(clean) {
+		return "", apperr.New("PATH_ESCAPE", "不能直接操作回收站目录")
 	}
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {

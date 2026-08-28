@@ -8,6 +8,7 @@ export const sessionState = reactive({
   ready: false,
   initialized: true,
   user: null,
+  features: { mail: false },
 });
 
 let bootstrapPromise;
@@ -22,6 +23,7 @@ export async function ensureSession() {
       if (status.initialized) {
         const session = await request("/api/v1/auth/session");
         sessionState.user = session.user;
+        await refreshFeatures();
       }
     } catch (error) {
       const unauthenticated = error instanceof ApiError && error.status === 401;
@@ -43,6 +45,7 @@ export async function login(username, password, remember = false) {
       body: JSON.stringify({ username, password }),
     });
   applyLogin(data);
+  await refreshFeatures();
   return data;
 }
 
@@ -50,7 +53,16 @@ export async function loginSavedAccount(accountID) {
   if (!isWinApp()) throw new Error("保存账号登录仅支持 Windows 客户端");
   const data = await loginSavedAccountWinApp(accountID);
   applyLogin(data);
+  await refreshFeatures();
   return data;
+}
+
+async function refreshFeatures() {
+  try {
+    sessionState.features = await request("/api/v1/features");
+  } catch {
+    sessionState.features = { mail: false };
+  }
 }
 
 function applyLogin(data) {
@@ -63,6 +75,7 @@ export async function logout() {
     await request("/api/v1/auth/logout", { method: "POST", body: "{}" });
   } finally {
     sessionState.user = null;
+    sessionState.features = { mail: false };
   }
 }
 
@@ -95,8 +108,10 @@ export function resetSession() {
   sessionState.ready = false;
   sessionState.initialized = true;
   sessionState.user = null;
+  sessionState.features = { mail: false };
 }
 
 window.addEventListener("prism:session-expired", () => {
   sessionState.user = null;
+  sessionState.features = { mail: false };
 });

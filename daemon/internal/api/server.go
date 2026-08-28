@@ -646,6 +646,8 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			"file.move": http.MethodPost, "file.copy": http.MethodPost,
 			"file.archive": http.MethodPost, "file.extract": http.MethodPost,
 			"file.extract.status": http.MethodPost, "file.delete": http.MethodPost,
+			"file.recycle.list": http.MethodPost, "file.recycle.restore": http.MethodPost,
+			"file.recycle.delete": http.MethodPost, "file.recycle.clear": http.MethodPost,
 		}
 		method, exists := allowed[input.Scope]
 		if !exists || (input.Method != "" && !strings.EqualFold(input.Method, method)) {
@@ -670,7 +672,7 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			input.TTLSeconds = 120
 		}
 		maxUses := 1
-		if input.Scope == "file.list" || input.Scope == "file.extract.status" {
+		if input.Scope == "file.list" || input.Scope == "file.extract.status" || input.Scope == "file.recycle.list" {
 			maxUses = 64
 			if input.Scope == "file.list" {
 				input.PathPrefix = true

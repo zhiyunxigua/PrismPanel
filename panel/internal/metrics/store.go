@@ -24,6 +24,7 @@ type HostSnapshot struct {
 type InstanceSnapshot struct {
 	InstanceID    string   `json:"instance_id"`
 	ServerID      string   `json:"server_id"`
+	Platform      string   `json:"platform"`
 	Name          string   `json:"name"`
 	State         string   `json:"state"`
 	CPUPercent    *float64 `json:"cpu_percent,omitempty"`
@@ -49,6 +50,7 @@ type InstancePoint struct {
 type InstanceSeries struct {
 	InstanceID string          `json:"instance_id"`
 	ServerID   string          `json:"server_id"`
+	Platform   string          `json:"platform"`
 	Name       string          `json:"name"`
 	Points     []InstancePoint `json:"points"`
 }
@@ -56,6 +58,7 @@ type InstanceSeries struct {
 type InstanceCurrent struct {
 	InstanceID    string   `json:"instance_id"`
 	ServerID      string   `json:"server_id"`
+	Platform      string   `json:"platform"`
 	Name          string   `json:"name"`
 	State         string   `json:"state"`
 	CPUPercent    *float64 `json:"cpu_percent,omitempty"`
@@ -76,6 +79,7 @@ type instanceKey struct {
 
 type instanceHistory struct {
 	serverID string
+	platform string
 	name     string
 	points   []InstancePoint
 }
@@ -113,6 +117,7 @@ func (s *Store) Record(nodeID string, snapshot Snapshot) {
 		key := instanceKey{nodeID: nodeID, instanceID: instance.InstanceID}
 		history := s.instances[key]
 		history.serverID = instance.ServerID
+		history.platform = instance.Platform
 		history.name = instance.Name
 		history.points = appendInstancePoint(history.points, InstancePoint{
 			SampledAt: sampledAt, State: instance.State,
@@ -179,7 +184,7 @@ func (s *Store) ServerHistory(nodeID, serverID string) []InstanceSeries {
 			continue
 		}
 		result = append(result, InstanceSeries{
-			InstanceID: key.instanceID, ServerID: history.serverID, Name: history.name,
+			InstanceID: key.instanceID, ServerID: history.serverID, Platform: history.platform, Name: history.name,
 			Points: append([]InstancePoint(nil), history.points[first:]...),
 		})
 	}
@@ -208,7 +213,8 @@ func (s *Store) CurrentNode(nodeID string) NodeCurrent {
 			continue
 		}
 		result.Instances = append(result.Instances, InstanceCurrent{
-			InstanceID: key.instanceID, ServerID: history.serverID, Name: history.name, State: latest.State,
+			InstanceID: key.instanceID, ServerID: history.serverID, Platform: history.platform,
+			Name: history.name, State: latest.State,
 			CPUPercent: copyFloat64(latest.CPUPercent), MemoryBytes: copyUint64(latest.MemoryBytes),
 			OnlinePlayers: copyInt(latest.OnlinePlayers), TPS: copyFloat64(latest.TPS),
 		})

@@ -48,6 +48,7 @@ func TestPrefixStatementNewPluginAndSelectionTables(t *testing.T) {
 		`net_game_observations`,
 		`operator_state`,
 		`operators`,
+		`api_keys`,
 	} {
 		statement := prefixStatement(`DELETE FROM `+table, `prism_`)
 		quotedTable := string(rune(96)) + `prism_` + table + string(rune(96))

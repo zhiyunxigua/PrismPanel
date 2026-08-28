@@ -25,6 +25,7 @@ const selectedGameId = ref("");
 const gameDrawerOpen = ref(false);
 const settingsDialogOpen = ref(false);
 const accountForm = ref({ email: "", password: "" });
+const collectionMode = ref("pc");
 const windowHours = ref(24);
 const localNetEaseAccount = ref(null);
 const characters = ref([]);
@@ -168,8 +169,12 @@ function stripHtml(value) {
 async function loadAll(silent = false) {
   if (!silent) loading.value = true;
   try {
-    const seriesPromise = request("/api/v1/net-games/series?hours=" + windowHours.value);
-    const catalogPromise = request("/api/v1/net-games/catalog");
+    const seriesPromise = collectionMode.value === "pe"
+      ? Promise.resolve(defaultSeries())
+      : request("/api/v1/net-games/series?hours=" + windowHours.value);
+    const catalogPromise = collectionMode.value === "pe"
+      ? Promise.resolve(defaultCatalog())
+      : request("/api/v1/net-games/catalog");
     const preferencePromise = request("/api/v1/user/preferences/net-games");
     const collectorPromise = isSuperAdmin.value
       ? request("/api/v1/net-games/collector-status").catch(() => ({ collector: null }))
@@ -200,7 +205,7 @@ async function loadAll(silent = false) {
     account.value = accountResult?.account || null;
     accountForm.value.email = account.value?.email || "";
 
-    if (selectedGameId.value) {
+    if (collectionMode.value === "pc" && selectedGameId.value) {
       await loadGame(selectedGameId.value, true);
     }
   } catch (error) {
@@ -211,6 +216,10 @@ async function loadAll(silent = false) {
 }
 
 async function loadSeries(silent = false) {
+  if (collectionMode.value === "pe") {
+    series.value = defaultSeries();
+    return;
+  }
   if (!silent) loading.value = true;
   try {
     series.value = await request("/api/v1/net-games/series?hours=" + windowHours.value);
@@ -331,6 +340,10 @@ async function verifyAccount() {
 }
 
 async function collectNow() {
+  if (collectionMode.value === "pe") {
+    ElMessage.info("PE版网络游戏信息采集制作中，暂未开放");
+    return;
+  }
   try {
     await request("/api/v1/net-games/collect", { method: "POST", body: "{}" });
     ElMessage.success("已触发立即采集");
@@ -338,6 +351,16 @@ async function collectNow() {
   } catch (error) {
     ElMessage.error(error.message);
   }
+}
+
+function onCollectionModeChange(mode) {
+  if (mode === "pe") {
+    selectedGameId.value = "";
+    selectedGame.value = null;
+    gameDrawerOpen.value = false;
+    ElMessage.info("PE版网络游戏信息采集制作中，暂未开放");
+  }
+  loadAll();
 }
 
 async function refreshDetails(gameId) {
@@ -521,6 +544,10 @@ watch(joinProgressDialogOpen, (open) => {
         <p>{{ series.window_start ? formatTime(series.window_start) : "--" }} - {{ series.window_end ? formatTime(series.window_end) : "--" }}</p>
       </div>
       <div class="toolbar-actions">
+        <el-radio-group v-model="collectionMode" size="small" @change="onCollectionModeChange">
+          <el-radio-button label="pc">PC</el-radio-button>
+          <el-radio-button label="pe">PE</el-radio-button>
+        </el-radio-group>
         <el-select v-model="windowHours" class="status-filter" @change="loadSeries">
           <el-option label="24 小时" :value="24" />
           <el-option label="12 小时" :value="12" />
@@ -538,6 +565,8 @@ watch(joinProgressDialogOpen, (open) => {
     </div>
 
     <div class="net-games-status">
+      <span>模式 <strong>{{ collectionMode.toUpperCase() }}</strong></span>
+      <span v-if="collectionMode === 'pe'">PE版网络游戏信息采集制作中，暂未开放</span>
       <span>目录 <strong>{{ catalogGames.length }}</strong></span>
       <span>已选 <strong>{{ games.length }}/20</strong></span>
       <span>最后采样 <strong>{{ catalog.sampled_at ? formatTime(catalog.sampled_at) : "--" }}</strong></span>

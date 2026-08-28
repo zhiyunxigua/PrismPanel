@@ -21,7 +21,9 @@ func TestMirrorDeploymentTransaction(t *testing.T) {
 	mustWrite(t, filepath.Join(image, "server.jar"), "new jar")
 	mustWrite(t, filepath.Join(image, "config.txt"), "new config")
 	mustWrite(t, filepath.Join(image, "world", "level.dat"), "image world")
+	mustWrite(t, filepath.Join(image, ".prism-recycle-bin", "keep", "manifest.json"), "{}")
 	mustWrite(t, filepath.Join(instancePath, "old.txt"), "old file")
+	mustWrite(t, filepath.Join(instancePath, ".prism-recycle-bin", "keep", "manifest.json"), "{}")
 	mustWrite(t, filepath.Join(instancePath, "world", "level.dat"), "saved world")
 	mustWrite(t, filepath.Join(instancePath, "server.properties"), "motd=test\nserver-port=25500\n")
 
@@ -61,6 +63,12 @@ func TestMirrorDeploymentTransaction(t *testing.T) {
 	assertContents(t, filepath.Join(instancePath, "world", "level.dat"), "saved world")
 	if _, err := os.Stat(filepath.Join(instancePath, "old.txt")); !os.IsNotExist(err) {
 		t.Fatalf("old non-excluded file should be removed, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(instancePath, ".prism-recycle-bin", "keep", "manifest.json")); err != nil {
+		t.Fatalf("instance recycle bin was not preserved: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(image, ".prism-recycle-bin", "keep", "manifest.json")); err != nil {
+		t.Fatalf("image recycle bin was not skipped: %v", err)
 	}
 	port, err := os.ReadFile(filepath.Join(instancePath, "server.properties"))
 	if err != nil || string(port) != "server-port=25571\n" {
