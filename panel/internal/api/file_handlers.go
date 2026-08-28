@@ -86,6 +86,20 @@ var fileScopeOperations = map[string]string{
 	"file.move":   "move", "file.copy": "copy", "file.archive": "archive", "file.delete": "delete",
 }
 
+// fileScopeMethods 声明每个文件操作 scope 对应的 HTTP 方法，必须与 daemon 侧
+// createTicket 的 allowed 映射保持一致。ticket.create 时显式携带 method，
+// 使票据绑定的方法与前端实际发出的请求方法一致（file.edit 为 PUT），
+// 避免依赖 daemon 侧从 scope 推导 method 而出现版本不一致导致的
+// 「临时凭证不允许当前文件操作」（ConsumeRestrictedFrom method 不匹配）。
+var fileScopeMethods = map[string]string{
+	"file.list": http.MethodPost, "file.read": http.MethodGet,
+	"file.edit": http.MethodPut, "file.upload": http.MethodPost,
+	"file.import":   http.MethodPost,
+	"file.download": http.MethodGet, "file.create": http.MethodPost,
+	"file.move": http.MethodPost, "file.copy": http.MethodPost,
+	"file.archive": http.MethodPost, "file.delete": http.MethodPost,
+}
+
 type fileAuthorizeInput struct {
 	NodeID          string   `json:"node_id"`
 	Scope           string   `json:"scope"`
@@ -173,6 +187,7 @@ func (s *Server) handleFileAuthorize(writer http.ResponseWriter, request *http.R
 			"scope": input.Scope, "resource_type": input.ResourceType, "resource_id": input.ResourceID,
 			"path": input.Path, "paths": input.Paths, "size": input.Size, "sha256": input.SHA256,
 			"expected_version": input.ExpectedVersion,
+			"method":           fileScopeMethods[input.Scope],
 			"operation_id":     operation.ID, "ttl_seconds": ttlSeconds,
 			"overwrite": input.Overwrite, "recursive": input.Recursive,
 			"chunked": input.Chunked,
