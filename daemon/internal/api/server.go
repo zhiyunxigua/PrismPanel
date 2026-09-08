@@ -27,7 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var Version = "0.0.1"
+var Version = "0.0.10"
 
 const ProtocolVersion = "1"
 
@@ -75,7 +75,6 @@ func NewServer(
 	mux.HandleFunc("/api/v1/ws/console", api.handleConsole)
 	mux.HandleFunc("/api/v1/ws/plugin", api.handlePlugin)
 	mux.HandleFunc("/api/v1/plugins/deploy", api.handlePluginDeploy)
-	mux.HandleFunc("/api/v1/plugins/config/deploy", api.handlePluginConfigDeploy)
 	mux.HandleFunc("/api/v1/plugins/upload", api.handlePluginUpload)
 	mux.HandleFunc("/api/v1/files/", api.handleFiles)
 	api.http = &http.Server{
@@ -512,15 +511,6 @@ func (s *Server) executeFrom(callerSource, messageType string, raw json.RawMessa
 			return nil, invalidJSON(err)
 		}
 		return s.deployments.Start(input.ServerID, input.Targets)
-	case "deployment.plugin_config_sync.start":
-		var input struct {
-			ServerID string `json:"server_id"`
-			Targets  []int  `json:"targets,omitempty"`
-		}
-		if err := json.Unmarshal(raw, &input); err != nil {
-			return nil, invalidJSON(err)
-		}
-		return s.deployments.StartPluginConfigSync(input.ServerID, input.Targets)
 	case "deployment.image_sync_back.start":
 		var input struct {
 			ServerID string `json:"server_id"`
@@ -614,7 +604,7 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 			"public_url": s.config.Server.PublicURL, "upload_path": "/api/v1/plugins/upload",
 		}, nil
 	}
-	if input.Scope == "plugin.deploy" || input.Scope == "plugin.config.deploy" {
+	if input.Scope == "plugin.deploy" {
 		if _, err := s.servers.Get(input.InstanceID); err != nil {
 			return nil, err
 		}
@@ -626,14 +616,10 @@ func (s *Server) createTicket(raw json.RawMessage) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		uploadPath := "/api/v1/plugins/deploy"
-		if input.Scope == "plugin.config.deploy" {
-			uploadPath = "/api/v1/plugins/config/deploy"
-		}
 		return map[string]any{
 			"ticket_id": created.ID, "ticket": created.Token, "expires_at": created.ExpiresAt,
 			"scope": created.Scope, "instance_id": created.InstanceID,
-			"public_url": s.config.Server.PublicURL, "upload_path": uploadPath,
+			"public_url": s.config.Server.PublicURL, "upload_path": "/api/v1/plugins/deploy",
 		}, nil
 	}
 	if strings.HasPrefix(input.Scope, "file.") {

@@ -17,7 +17,6 @@ import (
 const maxBundleSize = int64(800 * 1024 * 1024)
 
 type bundleManifest struct {
-	Kind       string `yaml:"kind"`
 	PluginType string `yaml:"plugin_type"`
 	Name       string `yaml:"name"`
 	Version    string `yaml:"version"`
@@ -26,18 +25,13 @@ type bundleManifest struct {
 		OriginalFilename string `yaml:"original_filename"`
 		SHA256           string `yaml:"sha256"`
 	} `yaml:"artifact"`
-	Config struct {
-		Directory string `yaml:"directory"`
-		Present   bool   `yaml:"present"`
-	} `yaml:"config"`
 }
 
 type preparedBundle struct {
-	root       string
-	jarPath    string
-	configPath string
-	manifest   bundleManifest
-	plugin     FilePlugin
+	root     string
+	jarPath  string
+	manifest bundleManifest
+	plugin   FilePlugin
 }
 
 func prepareBundle(path string) (*preparedBundle, func(), error) {
@@ -68,7 +62,7 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 		if name == "" || entry.FileInfo().IsDir() {
 			continue
 		}
-		if name != "plugin.jar" && name != "manifest.yaml" && !strings.HasPrefix(name, "config/") {
+		if name != "plugin.jar" && name != "manifest.yaml" {
 			cleanup()
 			return nil, nil, fmt.Errorf("unsupported plugin bundle entry: %s", name)
 		}
@@ -124,49 +118,23 @@ func prepareBundle(path string) (*preparedBundle, func(), error) {
 		cleanup()
 		return nil, nil, errors.New("plugin bundle type is invalid")
 	}
-	if manifest.Kind == "" {
-		manifest.Kind = "plugin"
-	}
-	if manifest.Kind != "plugin" && manifest.Kind != "config" {
+	jarInfo, err := os.Stat(jarPath)
+	if err != nil {
 		cleanup()
-		return nil, nil, errors.New("plugin bundle kind is invalid")
+		return nil, nil, errors.New("plugin bundle has no jar")
 	}
-	if manifest.Config.Present && !validDirectoryName(manifest.Config.Directory) {
+	plugin, err := scanFile(jarPath, "plugin.jar", true, jarInfo, manifest.PluginType)
+	if err != nil {
 		cleanup()
-		return nil, nil, errors.New("plugin config directory is invalid")
+		return nil, nil, err
 	}
-	if manifest.Config.Present {
-		if info, err := os.Stat(filepath.Join(root, "config")); err != nil || !info.IsDir() {
-			cleanup()
-			return nil, nil, errors.New("plugin bundle config snapshot is missing")
-		}
-	}
-	var plugin FilePlugin
-	if manifest.Kind == "config" {
-		if !manifest.Config.Present || strings.TrimSpace(manifest.Name) == "" {
-			cleanup()
-			return nil, nil, errors.New("plugin config bundle is invalid")
-		}
-		plugin = FilePlugin{PluginType: manifest.PluginType, Name: manifest.Name, Version: manifest.Version, Main: manifest.Main}
-	} else {
-		jarInfo, err := os.Stat(jarPath)
-		if err != nil {
-			cleanup()
-			return nil, nil, errors.New("plugin bundle has no jar")
-		}
-		plugin, err = scanFile(jarPath, "plugin.jar", true, jarInfo, manifest.PluginType)
-		if err != nil {
-			cleanup()
-			return nil, nil, err
-		}
-		if !strings.EqualFold(manifest.Name, plugin.Name) || manifest.Version != plugin.Version ||
-			manifest.Artifact.SHA256 != plugin.SHA256 {
-			cleanup()
-			return nil, nil, errors.New("plugin bundle manifest does not match jar")
-		}
+	if !strings.EqualFold(manifest.Name, plugin.Name) || manifest.Version != plugin.Version ||
+		manifest.Artifact.SHA256 != plugin.SHA256 {
+		cleanup()
+		return nil, nil, errors.New("plugin bundle manifest does not match jar")
 	}
 	return &preparedBundle{
-		root: root, jarPath: jarPath, configPath: filepath.Join(root, "config"),
+		root: root, jarPath: jarPath,
 		manifest: manifest, plugin: plugin,
 	}, cleanup, nil
 }
@@ -202,22 +170,6 @@ func cleanBundlePath(value string) (string, error) {
 		return "", errors.New("plugin bundle path escapes root")
 	}
 	return clean, nil
-}
-
-func validDirectoryName(value string) bool {
-	if value == "" || value == "." || value == ".." || filepath.Base(value) != value {
-		return false
-	}
-	for _, char := range value {
-		switch char {
-		case '<', '>', ':', 34, '/', 92, '|', '?', '*':
-			return false
-		}
-		if char < 32 {
-			return false
-		}
-	}
-	return true
 }
 
 func fileSHA256(path string) (string, error) {

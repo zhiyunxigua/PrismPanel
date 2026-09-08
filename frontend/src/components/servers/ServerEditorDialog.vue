@@ -16,10 +16,6 @@ const props = defineProps({
 });
 const emit = defineEmits(["update:modelValue", "submit"]);
 
-const defaultPluginConfigSyncExtensions = [
-  ".yml", ".yaml", ".json", ".toml", ".ini", ".conf", ".properties", ".xml",
-];
-
 const formRef = ref();
 const archiveUploadRef = ref();
 const archiveFile = ref(null);
@@ -41,7 +37,6 @@ const form = reactive({
   instanceCount: 1,
   portsText: "25565",
   exclude: [],
-  pluginConfigSyncExtensions: [...defaultPluginConfigSyncExtensions],
   startCommand: "java -jar server.jar nogui",
   stopCommand: "stop",
   stopTimeoutSeconds: 60,
@@ -173,9 +168,6 @@ function resetForm() {
     instanceCount: source?.instance_count || 1,
     portsText: source?.ports?.join(", ") || "25565",
     exclude: normalizeExcludeEntries(source?.exclude),
-    pluginConfigSyncExtensions: source?.plugin_config_sync_extensions?.length
-      ? [...source.plugin_config_sync_extensions]
-      : [...defaultPluginConfigSyncExtensions],
     startCommand: source?.process?.start_command || "java -jar server.jar nogui",
     stopCommand: source?.process?.stop_command || "stop",
     stopTimeoutSeconds: source?.process?.stop_timeout_seconds || 60,
@@ -277,10 +269,6 @@ async function submit() {
       ElMessage.warning("请填写排除项路径，或删除空白排除项");
       return;
     }
-    if (!form.pluginConfigSyncExtensions.length) {
-      ElMessage.warning("请至少保留一个插件配置文件后缀");
-      return;
-    }
   }
   let proxyTargets = null;
   if (!editing.value && form.kind !== "proxy" && canConfigureProxy.value) {
@@ -324,7 +312,6 @@ async function submit() {
         type: entry.type,
         path: entry.path.trim(),
       })),
-      plugin_config_sync_extensions: form.pluginConfigSyncExtensions,
     });
   }
   emit("submit", {
@@ -430,22 +417,6 @@ async function submit() {
             </el-button>
             <small class="form-help">路径相对于每个实例目录；排除目录会保留其全部子目录和文件。</small>
           </div>
-        </el-form-item>
-        <el-form-item label="插件配置同步后缀白名单">
-          <el-select
-            v-model="form.pluginConfigSyncExtensions"
-            class="full-control"
-            multiple
-            filterable
-            allow-create
-            default-first-option
-            collapse-tags
-            collapse-tags-tooltip
-            placeholder="输入后缀并回车，例如 .yml"
-          >
-            <el-option v-for="extension in defaultPluginConfigSyncExtensions" :key="extension" :label="extension" :value="extension" />
-          </el-select>
-          <small class="form-help">仅同步这些后缀的插件配置文件，不会删除目标中的额外文件；数据库后缀请勿加入白名单。</small>
         </el-form-item>
       </template>
 

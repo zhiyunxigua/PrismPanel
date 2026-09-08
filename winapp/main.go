@@ -14,7 +14,7 @@ import (
 //go:embed all:assets
 var assets embed.FS
 
-var appVersion = "0.0.1"
+var appVersion = "0.0.10"
 
 func main() {
 	if updater.IsApplyMode(os.Args[1:]) {

@@ -27,9 +27,6 @@ func (s *Service) Deploy(serverID, bundlePath string) (OperationResult, error) {
 	if bundle.plugin.PluginType != model.PluginTypeForPlatform(server.Platform) {
 		return OperationResult{}, apperr.New("PLUGIN_TYPE_MISMATCH", "plugin type does not match target server platform")
 	}
-	if bundle.manifest.Kind != "plugin" {
-		return OperationResult{}, apperr.New("INVALID_PLUGIN_BUNDLE", "plugin deployment requires a plugin bundle")
-	}
 	targets, release, err := s.targets(serverID)
 	if err != nil {
 		return OperationResult{}, err
@@ -50,46 +47,6 @@ func (s *Service) Deploy(serverID, bundlePath string) (OperationResult, error) {
 	}
 	if len(targetErrors) > 0 {
 		return result, apperr.Wrap("PLUGIN_DEPLOY_FAILED", "plugin deployment failed", errors.Join(targetErrors...))
-	}
-	return result, nil
-}
-
-func (s *Service) DeployConfig(serverID, bundlePath string) (OperationResult, error) {
-	server, err := s.servers.Get(serverID)
-	if err != nil {
-		return OperationResult{}, err
-	}
-	bundle, cleanup, err := prepareBundle(bundlePath)
-	if err != nil {
-		return OperationResult{}, apperr.Wrap("INVALID_PLUGIN_BUNDLE", "plugin config bundle is invalid", err)
-	}
-	defer cleanup()
-	if bundle.manifest.Kind != "config" {
-		return OperationResult{}, apperr.New("INVALID_PLUGIN_BUNDLE", "config deployment requires a config bundle")
-	}
-	if bundle.plugin.PluginType != model.PluginTypeForPlatform(server.Platform) {
-		return OperationResult{}, apperr.New("PLUGIN_TYPE_MISMATCH", "plugin type does not match target server platform")
-	}
-	targets, release, err := s.targets(serverID)
-	if err != nil {
-		return OperationResult{}, err
-	}
-	defer release()
-	result := OperationResult{ServerID: serverID, PluginName: bundle.plugin.Name, Version: bundle.plugin.Version}
-	var targetErrors []error
-	for _, target := range targets {
-		item, applyErr := s.applyOrQueue(target, pendingOperation{
-			Type: "deploy_config", PluginType: bundle.plugin.PluginType, PluginName: bundle.plugin.Name,
-		}, bundlePath,
-			func() error { return deployConfigToWorkspace(target.Workspace, bundle) })
-		result.Targets = append(result.Targets, item)
-		result.PendingRestart = result.PendingRestart || item.PendingRestart
-		if applyErr != nil {
-			targetErrors = append(targetErrors, fmt.Errorf("%s: %w", target.ID, applyErr))
-		}
-	}
-	if len(targetErrors) > 0 {
-		return result, apperr.Wrap("PLUGIN_DEPLOY_FAILED", "plugin config deployment failed", errors.Join(targetErrors...))
 	}
 	return result, nil
 }
@@ -202,9 +159,6 @@ func (s *Service) Uninstall(input OperationInput) (OperationResult, error) {
 	if strings.TrimSpace(input.PluginName) == "" {
 		return OperationResult{}, apperr.New("INVALID_REQUEST", "plugin_name is required")
 	}
-	if input.DeleteConfig && !validDirectoryName(input.ConfigDirectory) {
-		return OperationResult{}, apperr.New("INVALID_REQUEST", "config_directory is invalid")
-	}
 	targets, release, err := s.targetsForInstance(input.ServerID, input.InstanceID)
 	if err != nil {
 		return OperationResult{}, err
@@ -213,12 +167,9 @@ func (s *Service) Uninstall(input OperationInput) (OperationResult, error) {
 	result := OperationResult{ServerID: input.ServerID, PluginName: input.PluginName}
 	var targetErrors []error
 	for _, target := range targets {
-		operation := pendingOperation{
-			Type: "uninstall", PluginName: input.PluginName,
-			DeleteConfig: input.DeleteConfig, ConfigDirectory: input.ConfigDirectory,
-		}
+		operation := pendingOperation{Type: "uninstall", PluginName: input.PluginName}
 		item, applyErr := s.applyOrQueue(target, operation, "", func() error {
-			return uninstallPlugin(target.Workspace, input.PluginName, input.DeleteConfig, input.ConfigDirectory)
+			return uninstallPlugin(target.Workspace, input.PluginName)
 		})
 		result.Targets = append(result.Targets, item)
 		result.PendingRestart = result.PendingRestart || item.PendingRestart
@@ -249,10 +200,7 @@ func (s *Service) applyOrQueue(target operationTarget, operation pendingOperatio
 		}
 	}
 	if err := apply(); err != nil {
-		// Config snapshots are safe to replace while the server is running. They
-		// must report the write error immediately instead of being deferred until
-		// the next restart.
-		if operation.Type != "deploy_config" && target.Running && !target.Image && retryableFileError(err) {
+		if target.Running && !target.Image && retryableFileError(err) {
 			if queueErr := s.pending.enqueue(target.ID, operation, bundlePath); queueErr != nil {
 				return TargetResult{Target: target.ID, Status: "failed", Message: errors.Join(err, queueErr).Error()}, errors.Join(err, queueErr)
 			}
@@ -261,10 +209,10 @@ func (s *Service) applyOrQueue(target operationTarget, operation pendingOperatio
 		}
 		return TargetResult{Target: target.ID, Status: "failed", Message: err.Error()}, err
 	}
-	if operation.Type != "deploy_config" && !target.Image {
+	if !target.Image {
 		s.supervisor.SetPluginPendingRestart(target.ID, target.Running)
 	}
-	return TargetResult{Target: target.ID, Status: "applied", PendingRestart: operation.Type != "deploy_config" && target.Running}, nil
+	return TargetResult{Target: target.ID, Status: "applied", PendingRestart: target.Running}, nil
 }
 
 func (s *Service) applyPending(instanceID, workspace string) error {
@@ -277,13 +225,6 @@ func (s *Service) applyPending(instanceID, workspace string) error {
 			}
 			defer cleanup()
 			return deployPluginToWorkspace(workspace, bundle)
-		case "deploy_config":
-			bundle, cleanup, err := prepareBundle(bundlePath)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-			return deployConfigToWorkspace(workspace, bundle)
 		case "upload":
 			bundle, err := prepareUploadedJAR(bundlePath, operation.OriginalFilename, operation.PluginType)
 			if err != nil {
@@ -295,7 +236,7 @@ func (s *Service) applyPending(instanceID, workspace string) error {
 		case "disable":
 			return setPluginEnabled(workspace, operation.PluginName, false)
 		case "uninstall":
-			return uninstallPlugin(workspace, operation.PluginName, operation.DeleteConfig, operation.ConfigDirectory)
+			return uninstallPlugin(workspace, operation.PluginName)
 		default:
 			return fmt.Errorf("unknown pending plugin operation: %s", operation.Type)
 		}
@@ -307,13 +248,7 @@ func (s *Service) applyPending(instanceID, workspace string) error {
 }
 
 func deployBundleToWorkspace(workspace string, bundle *preparedBundle) error {
-	if err := deployPluginToWorkspace(workspace, bundle); err != nil {
-		return err
-	}
-	if !bundle.manifest.Config.Present {
-		return nil
-	}
-	return deployConfigToWorkspace(workspace, bundle)
+	return deployPluginToWorkspace(workspace, bundle)
 }
 
 func deployPluginToWorkspace(workspace string, bundle *preparedBundle) error {
@@ -357,69 +292,6 @@ func deployPluginToWorkspace(workspace string, bundle *preparedBundle) error {
 	return nil
 }
 
-func deployConfigToWorkspace(workspace string, bundle *preparedBundle) error {
-	if !bundle.manifest.Config.Present {
-		return errors.New("plugin config bundle has no config snapshot")
-	}
-	pluginDir := filepath.Join(workspace, "plugins")
-	pluginPath, err := findPlugin(pluginDir, bundle.plugin.Name, bundle.plugin.PluginType)
-	if err != nil {
-		return err
-	}
-	if pluginPath == "" {
-		return errors.New("plugin file not found")
-	}
-	txn := fmt.Sprintf(".prism-plugin-%d", time.Now().UnixNano())
-	configRoot := filepath.Join(pluginDir, bundle.manifest.Config.Directory)
-	rollbacks := make([]func(), 0)
-	err = filepath.WalkDir(bundle.configPath, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() {
-			return walkErr
-		}
-		relative, relErr := filepath.Rel(bundle.configPath, path)
-		if relErr != nil {
-			return relErr
-		}
-		destination := filepath.Join(configRoot, relative)
-		if err := os.MkdirAll(filepath.Dir(destination), 0o750); err != nil {
-			return err
-		}
-		configTemp := destination + txn + ".new"
-		configBackup := destination + txn + ".backup"
-		if err := copyFile(path, configTemp); err != nil {
-			return err
-		}
-		hadConfig := pathExists(destination)
-		if hadConfig {
-			if err := os.Rename(destination, configBackup); err != nil {
-				_ = os.Remove(configTemp)
-				return err
-			}
-		}
-		if err := os.Rename(configTemp, destination); err != nil {
-			if hadConfig {
-				_ = os.Rename(configBackup, destination)
-			}
-			return err
-		}
-		rollbacks = append(rollbacks, func() {
-			_ = os.Remove(destination)
-			if hadConfig {
-				_ = os.Rename(configBackup, destination)
-			}
-		})
-		return nil
-	})
-	if err != nil {
-		for index := len(rollbacks) - 1; index >= 0; index-- {
-			rollbacks[index]()
-		}
-		return err
-	}
-	cleanupTransactionFiles(workspace, txn)
-	return nil
-}
-
 func setPluginEnabled(workspace, pluginName string, enabled bool) error {
 	pluginDir := filepath.Join(workspace, "plugins")
 	path, err := findPlugin(pluginDir, pluginName)
@@ -446,7 +318,7 @@ func setPluginEnabled(workspace, pluginName string, enabled bool) error {
 	return os.Rename(path, target)
 }
 
-func uninstallPlugin(workspace, pluginName string, deleteConfig bool, configDirectory string) error {
+func uninstallPlugin(workspace, pluginName string) error {
 	pluginDir := filepath.Join(workspace, "plugins")
 	path, err := findPlugin(pluginDir, pluginName)
 	if err != nil {
@@ -454,18 +326,6 @@ func uninstallPlugin(workspace, pluginName string, deleteConfig bool, configDire
 	}
 	if path != "" {
 		if err := os.Remove(path); err != nil {
-			return err
-		}
-	}
-	if deleteConfig {
-		if !validDirectoryName(configDirectory) {
-			return errors.New("config directory is invalid")
-		}
-		configPath := filepath.Join(pluginDir, configDirectory)
-		if filepath.Dir(configPath) != pluginDir {
-			return errors.New("config directory escapes plugins directory")
-		}
-		if err := os.RemoveAll(configPath); err != nil {
 			return err
 		}
 	}

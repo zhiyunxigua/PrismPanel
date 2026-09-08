@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { onBeforeRouteLeave } from "vue-router";
 import {
-  ArrowUp, ChevronRight, ClipboardPaste, Copy, Download, Edit3, File, FileArchive, FileCode2,
+  ArrowRightLeft, ArrowUp, ChevronRight, ClipboardPaste, Copy, Download, Edit3, File, FileArchive, FileCode2,
   FilePlus2, FileText, Folder, FolderOpen, FolderPlus, Home, MoreHorizontal, MoveRight,
   RefreshCw, RotateCcw, Save, Scissors, Trash2, Upload, X,
 } from "lucide-vue-next";
@@ -18,6 +18,7 @@ import { isWinApp, openRemoteFileWinApp, runtimeConfig } from "../../runtime";
 import UploadConflictDialog from "./UploadConflictDialog.vue";
 import ExtractDialog from "./ExtractDialog.vue";
 import UploadTaskDialog from "./UploadTaskDialog.vue";
+import FileSyncDialog from "./FileSyncDialog.vue";
 
 const CodeEditor = defineAsyncComponent(() => import("./CodeEditor.vue"));
 
@@ -25,6 +26,7 @@ const props = defineProps({
   nodeId: { type: String, required: true },
   server: { type: Object, required: true },
   instances: { type: Array, default: () => [] },
+  nodes: { type: Array, default: () => [] },
 });
 
 const directoryEntries = ref([]);
@@ -63,6 +65,7 @@ const preview = ref(emptyPreview());
 const contextMenu = ref({ visible: false, x: 0, y: 0, entry: null });
 const contextMenuElement = ref(null);
 const selectedEntries = ref([]);
+const fileSyncDialogVisible = ref(false);
 const lastSelectedIndex = ref(-1);
 const pathEditing = ref(false);
 const clipboard = ref({ type: "", entries: [], targetKey: "" });
@@ -1115,6 +1118,17 @@ function runContextAction(action) {
   if (action === "rename") void renameEntry(entry);
   if (action === "move") void promptMove(entry);
   if (action === "delete") void (isMulti ? removeSelectedEntries() : removeEntry(entry));
+  if (action === "sync") openFileSync(entry);
+}
+
+function openFileSync(entry = null) {
+  if (entry && !isSelected(entry)) selectedEntries.value = [entry];
+  if (!currentTarget.value || !selectedEntries.value.length) {
+    ElMessage.warning("请先选择需要同步的文件或文件夹");
+    return;
+  }
+  closeContextMenu();
+  fileSyncDialogVisible.value = true;
 }
 
 async function downloadEntry(entry = preview.value) {
@@ -1252,6 +1266,7 @@ function fileIconClass(entry) {
           <button v-if="hasClipboard" type="button" :disabled="writeDisabled" @click="pasteClipboard"><ClipboardPaste :size="15" />粘贴</button>
           <button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('copy')"><Copy :size="15" />复制</button>
           <button v-if="selectedEntries.length" type="button" :disabled="writeDisabled" @click="setClipboard('move')"><Scissors :size="15" />剪切</button>
+          <button v-if="selectedEntries.length" type="button" :disabled="!currentTarget" @click="openFileSync"><ArrowRightLeft :size="15" />同步到子服</button>
           <button v-if="directoryEntries.length" type="button" @click="invertSelection"><RotateCcw :size="15" />反选</button>
           <button v-if="canDelete && selectedEntries.length" class="danger" type="button" :disabled="writeDisabled" @click="removeSelectedEntries"><Trash2 :size="15" />删除</button>
           <button v-if="canDelete" type="button" :disabled="!currentTarget || recycleLoading" @click="openRecycleBin"><Trash2 :size="15" />回收站</button>
@@ -1419,6 +1434,12 @@ function fileIconClass(entry) {
       @retry="retryUploadTask"
       @clear="clearUploadTasks"
     />
+    <FileSyncDialog
+      v-model:visible="fileSyncDialogVisible"
+      :source="{ node_id: nodeId, resource_type: currentTarget?.type, resource_id: currentTarget?.id }"
+      :entries="selectedEntries"
+      :nodes="nodes"
+    />
     <ExtractDialog
       v-model:visible="extractDialogVisible"
       :entry="extractEntry"
@@ -1466,6 +1487,7 @@ function fileIconClass(entry) {
         <button v-if="!multiContextSelection && isWinApp() && contextMenu.entry.type === 'file'" type="button" role="menuitem" @click="runContextAction('open-with')"><FolderOpen :size="16" />选择打开方式</button>
         <button v-if="!multiContextSelection && isWinApp() && contextMenu.entry.type === 'file'" type="button" role="menuitem" @click="runContextAction('online-edit')"><Edit3 :size="16" />在线编辑</button>
         <button type="button" role="menuitem" @click="runContextAction('download')"><Download :size="16" />{{ multiContextSelection ? `批量下载 (${selectedEntries.length})` : "下载" }}</button>
+        <button type="button" role="menuitem" @click="runContextAction('sync')"><ArrowRightLeft :size="16" />同步到子服</button>
         <div class="file-context-separator" />
         <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('copy')"><Copy :size="16" />复制</button>
         <button v-if="canWrite" type="button" role="menuitem" :disabled="writeLocked" @click="runContextAction('cut')"><Scissors :size="16" />剪切</button>

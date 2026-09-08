@@ -19,8 +19,6 @@ type pendingOperation struct {
 	PluginType       string    `json:"plugin_type,omitempty"`
 	PluginName       string    `json:"plugin_name,omitempty"`
 	OriginalFilename string    `json:"original_filename,omitempty"`
-	ConfigDirectory  string    `json:"config_directory,omitempty"`
-	DeleteConfig     bool      `json:"delete_config,omitempty"`
 	BundleFile       string    `json:"bundle_file,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 }

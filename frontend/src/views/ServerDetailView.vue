@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import {
-  Activity, ArrowLeft, ArrowRightLeft, Cpu, Edit3, FileCode2, MemoryStick, OctagonX, Play,
+  Activity, ArrowLeft, ArrowRightLeft, Cpu, Edit3, MemoryStick, OctagonX, Play,
   PlugZap, Puzzle, RefreshCw, RotateCw, Server, ShieldCheck, Square, Terminal, Trash2, Upload, Users,
 } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
@@ -39,7 +39,6 @@ const pluginConflict = ref({ fileName: "", incoming: {}, existing: {} });
 let pluginConflictResolver = null;
 const uninstallOpen = ref(false);
 const uninstallTarget = ref(null);
-const uninstallForm = ref({ deleteConfig: false, configDirectory: "" });
 const metricSeries = ref([]);
 const healthInstanceId = ref("");
 const editorOpen = ref(false);
@@ -127,10 +126,8 @@ const tpsHistory = computed(() => metricPoints("tps"));
 const deploymentActive = computed(() => deploymentTask.value && ![
   "cancelled", "force_stopped", "completed", "completed_with_errors", "failed",
 ].includes(deploymentTask.value.status));
-const pluginConfigSyncMode = computed(() => deploymentMode.value === "plugin_config_sync");
 const imageSyncBackMode = computed(() => deploymentMode.value === "image_sync_back");
 const deploymentDialogTitle = computed(() => {
-  if (pluginConfigSyncMode.value) return "同步插件配置";
   if (imageSyncBackMode.value) return "同步回镜像源";
   return "部署镜像服务器组";
 });
@@ -169,11 +166,6 @@ const deploymentStatusLabels = {
   force_stop_requested: "正在强制结束", cancelled: "已取消", force_stopped: "已强制结束",
   completed: "部署完成", completed_with_errors: "部分失败", failed: "部署失败",
 };
-const pluginConfigSyncStatusLabels = {
-  queued: "等待同步", running: "同步中", cancel_requested: "正在取消",
-  force_stop_requested: "正在强制结束", cancelled: "已取消", force_stopped: "已强制结束",
-  completed: "同步完成", completed_with_errors: "同步完成，部分失败", failed: "同步失败",
-};
 const imageSyncBackStatusLabels = {
   queued: "等待同步", running: "同步中", cancel_requested: "正在取消",
   force_stop_requested: "正在强制结束", cancelled: "已取消", force_stopped: "已强制结束",
@@ -182,13 +174,10 @@ const imageSyncBackStatusLabels = {
 const deploymentStatusText = computed(() => {
   const status = deploymentTask.value?.status;
   if (!status) return "";
-  if (pluginConfigSyncMode.value) return pluginConfigSyncStatusLabels[status] || status;
   if (imageSyncBackMode.value) return imageSyncBackStatusLabels[status] || status;
   return deploymentStatusLabels[status] || status;
 });
 const deploymentCopyStageLabels = {
-  scanning_plugin_config: "扫描插件配置",
-  copying_plugin_config: "复制插件配置",
   preparing: "准备目标",
   scanning_image: "扫描镜像文件",
   copying_image: "复制镜像文件",
@@ -277,8 +266,7 @@ async function loadSyncConfiguration() {
   if (!server.value || !canConfigure.value) return;
   proxyConfigLoading.value = true;
   try {
-    const catalog = await request("/api/v1/servers");
-    allNodeContents.value = catalog.nodes || [];
+    await loadNodeContents();
     if (isProxyServer.value) {
       const query = "?node_id=" + encodeURIComponent(nodeId.value)
         + "&server_id=" + encodeURIComponent(serverId.value);
@@ -296,6 +284,12 @@ async function loadSyncConfiguration() {
   } finally {
     proxyConfigLoading.value = false;
   }
+}
+
+async function loadNodeContents() {
+  if (allNodeContents.value.length) return;
+  const catalog = await request("/api/v1/servers");
+  allNodeContents.value = catalog.nodes || [];
 }
 
 async function saveProxyRules() {
@@ -545,7 +539,6 @@ async function setPluginEnabled(plugin, enabled) {
 
 function openUninstall(plugin) {
   uninstallTarget.value = plugin;
-  uninstallForm.value = { deleteConfig: false, configDirectory: plugin.name || "" };
   uninstallOpen.value = true;
 }
 
@@ -561,8 +554,6 @@ async function uninstallPlugin() {
       method: "POST",
       body: JSON.stringify({
         plugin_name: uninstallTarget.value.name,
-        delete_config: uninstallForm.value.deleteConfig,
-        config_directory: uninstallForm.value.deleteConfig ? uninstallForm.value.configDirectory.trim() : "",
       }),
     });
     uninstallOpen.value = false;
@@ -746,7 +737,7 @@ function startDeploymentPolling() {
 }
 
 function applyDeploymentMode(task) {
-  if (["plugin_config_sync", "mirror_deploy", "image_sync_back"].includes(task?.kind)) {
+  if (["mirror_deploy", "image_sync_back"].includes(task?.kind)) {
     deploymentMode.value = task.kind;
   }
 }
@@ -819,10 +810,6 @@ function resetDeployment() {
 }
 
 async function startDeployment() {
-  if (pluginConfigSyncMode.value) {
-    await startPluginConfigSync();
-    return;
-  }
   if (imageSyncBackMode.value) {
     await startImageSyncBack();
     return;
@@ -900,45 +887,8 @@ async function startImageSyncBack() {
   }
 }
 
-async function startPluginConfigSync() {
-  if (!deploymentTargets.value.length) {
-    ElMessage.warning("请至少选择一个同步目标");
-    return;
-  }
-  const targetSet = new Set(deploymentTargets.value);
-  const targets = instances.value.filter((item) => targetSet.has(Number(item.slot)));
-  try {
-    await ElMessageBox.confirm(
-      "将镜像源 plugins 目录中白名单后缀的文件覆盖到 " + targets.length + " 个实例，不会停止或重启服务器，也不会删除目标中的额外文件。同步完成后请按需执行插件重载命令。",
-      "同步插件配置",
-      { type: "warning", confirmButtonText: "开始同步", cancelButtonText: "取消" },
-    );
-  } catch {
-    return;
-  }
-  deploymentSubmitting.value = true;
-  try {
-    const path = "/api/v1/servers/" + encodeURIComponent(serverId.value) +
-      "/plugin-config-sync?node_id=" + encodeURIComponent(nodeId.value);
-    deploymentTask.value = await request(path, {
-      method: "POST", body: JSON.stringify({ targets: deploymentTargets.value }),
-    });
-    ElMessage.success("插件配置同步任务已创建");
-    startDeploymentPolling();
-    await load(true);
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    deploymentSubmitting.value = false;
-  }
-}
-
 async function stopDeployment(force) {
   if (!deploymentTask.value || !deploymentActive.value) return;
-  if (pluginConfigSyncMode.value) {
-    await stopPluginConfigSync(force);
-    return;
-  }
   if (imageSyncBackMode.value) {
     await stopImageSyncBack(force);
     return;
@@ -979,34 +929,6 @@ async function stopImageSyncBack(force) {
         ? "强制结束会中止后续复制；如果目录切换已经开始，系统仍会完成或回滚该原子操作。"
         : "取消会在当前安全点停止同步，镜像源目录不会处于半完成状态。",
       force ? "强制结束镜像源同步" : "取消镜像源同步",
-      {
-        type: force ? "error" : "warning",
-        confirmButtonText: force ? "强制结束" : "取消同步",
-        cancelButtonText: "返回",
-      },
-    );
-  } catch {
-    return;
-  }
-  deploymentSubmitting.value = true;
-  try {
-    const action = force ? "force-stop" : "cancel";
-    const path = "/api/v1/deployments/" + encodeURIComponent(deploymentTask.value.task_id) +
-      "/" + action + "?node_id=" + encodeURIComponent(nodeId.value);
-    deploymentTask.value = await request(path, { method: "POST", body: "{}" });
-    startDeploymentPolling();
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    deploymentSubmitting.value = false;
-  }
-}
-
-async function stopPluginConfigSync(force) {
-  try {
-    await ElMessageBox.confirm(
-      force ? "强制结束会停止后续配置文件同步，已经完成的目标不会回滚。" : "取消会在当前文件安全边界停止后续同步。",
-      force ? "强制结束配置同步" : "取消配置同步",
       {
         type: force ? "error" : "warning",
         confirmButtonText: force ? "强制结束" : "取消同步",
@@ -1088,6 +1010,7 @@ watch(pluginInstanceId, () => loadPlugins());
 watch(activeTab, (value) => {
   if (value === "plugins") loadPlugins();
   if (value === "config") loadSyncConfiguration();
+  if (value === "files") loadNodeContents().catch((error) => ElMessage.error(error.message));
 });
 
 onBeforeRouteLeave(async () => {
@@ -1129,11 +1052,6 @@ onBeforeRouteLeave(async () => {
           :plain="!deploymentActive"
           @click="openDeployment('mirror_deploy')"
         ><Upload :size="16" />{{ deploymentActive || deploymentGroupLocked ? "查看部署" : "部署镜像" }}</el-button>
-        <el-button
-          v-if="server?.type === 'mirror' && canDeploy"
-          plain
-          @click="openDeployment('plugin_config_sync')"
-        ><FileCode2 :size="16" />{{ deploymentActive && deploymentTask?.kind === 'plugin_config_sync' ? '查看配置同步' : '同步插件配置' }}</el-button>
         <el-button
           v-if="server?.type === 'mirror' && canDeploy"
           plain
@@ -1286,6 +1204,7 @@ onBeforeRouteLeave(async () => {
           :node-id="nodeId"
           :server="server"
           :instances="instances"
+          :nodes="allNodeContents"
         />
       </el-tab-pane>
 
@@ -1510,15 +1429,10 @@ onBeforeRouteLeave(async () => {
         <span>镜像目录</span>
         <code>{{ server?.root_path }} / {{ server?.image_directory }}</code>
       </div>
-      <div v-if="pluginConfigSyncMode" class="deployment-source">
-        <span>同步后缀</span>
-        <code>{{ (server?.plugin_config_sync_extensions || []).join(', ') }}</code>
-      </div>
       <div class="section-title">
         <div>
-          <h3>{{ imageSyncBackMode ? '来源实例' : (pluginConfigSyncMode ? '同步目标' : '部署目标') }}</h3>
-          <p v-if="pluginConfigSyncMode">仅覆盖镜像源 plugins 目录中符合白名单的文件，不会停止或重启服务器，也不会删除目标中的额外文件。</p>
-          <p v-else-if="imageSyncBackMode">选择一个实例，用它的全部文件替换镜像源；实例中不存在的镜像源文件也会被删除。</p>
+          <h3>{{ imageSyncBackMode ? '来源实例' : '部署目标' }}</h3>
+          <p v-if="imageSyncBackMode">选择一个实例，用它的全部文件替换镜像源；实例中不存在的镜像源文件也会被删除。</p>
           <p v-else>选中的子服在任务结束前会被锁定，运行中的子服完成后自动恢复</p>
         </div>
         <el-checkbox
@@ -1622,20 +1536,19 @@ onBeforeRouteLeave(async () => {
       <template v-if="!deploymentTask">
         <el-button @click="deploymentOpen = false">取消</el-button>
         <el-button type="primary" :loading="deploymentSubmitting" :disabled="!deploymentTargets.length" @click="startDeployment">
-          <FileCode2 v-if="pluginConfigSyncMode" :size="15" />
-          <ArrowRightLeft v-else-if="imageSyncBackMode" :size="15" />
+          <ArrowRightLeft v-if="imageSyncBackMode" :size="15" />
           <Upload v-else :size="15" />
-          {{ imageSyncBackMode ? '确认同步' : (pluginConfigSyncMode ? '开始同步' : '开始部署') }}
+          {{ imageSyncBackMode ? '确认同步' : '开始部署' }}
         </el-button>
       </template>
       <template v-else-if="deploymentActive">
         <el-button @click="deploymentOpen = false">后台运行</el-button>
-        <el-button v-if="canCancelTasks" :loading="deploymentSubmitting" @click="stopDeployment(false)">{{ pluginConfigSyncMode || imageSyncBackMode ? '取消同步' : '取消部署' }}</el-button>
+        <el-button v-if="canCancelTasks" :loading="deploymentSubmitting" @click="stopDeployment(false)">{{ imageSyncBackMode ? '取消同步' : '取消部署' }}</el-button>
         <el-button v-if="canCancelTasks" type="danger" plain :loading="deploymentSubmitting" @click="stopDeployment(true)">强制结束</el-button>
       </template>
       <template v-else>
         <el-button @click="deploymentOpen = false">关闭</el-button>
-        <el-button type="primary" plain @click="resetDeployment">{{ pluginConfigSyncMode || imageSyncBackMode ? '再次同步' : '再次部署' }}</el-button>
+        <el-button type="primary" plain @click="resetDeployment">{{ imageSyncBackMode ? '再次同步' : '再次部署' }}</el-button>
       </template>
     </template>
   </el-dialog>
@@ -1653,14 +1566,6 @@ onBeforeRouteLeave(async () => {
       <span class="node-symbol"><Puzzle :size="16" /></span>
       <div><strong>{{ uninstallTarget?.name }}</strong><small>{{ uninstallTarget?.source_file }}</small></div>
     </div>
-    <el-form label-position="top">
-      <el-form-item>
-        <el-checkbox v-model="uninstallForm.deleteConfig">同时删除插件配置目录</el-checkbox>
-      </el-form-item>
-      <el-form-item v-if="uninstallForm.deleteConfig" label="配置目录名" required>
-        <el-input v-model="uninstallForm.configDirectory" maxlength="100" />
-      </el-form-item>
-    </el-form>
     <template #footer>
       <el-button @click="uninstallOpen = false">取消</el-button>
       <el-button type="danger" :loading="pluginActionLoading === uninstallTarget?.name" @click="uninstallPlugin">

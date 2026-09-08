@@ -23,8 +23,11 @@ import (
 var ErrDisconnected = errors.New("daemon is disconnected")
 
 type APIError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string   `json:"code"`
+	Message   string   `json:"message"`
+	Stage     string   `json:"stage,omitempty"`
+	Details   []string `json:"details,omitempty"`
+	Retryable bool     `json:"retryable,omitempty"`
 }
 
 func (e *APIError) Error() string {
@@ -394,10 +397,6 @@ func (c *Client) ConsoleURL() (string, error) {
 
 func (c *Client) UploadPlugin(ctx context.Context, ticket, serverID, path string, output any) error {
 	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/deploy", output)
-}
-
-func (c *Client) UploadPluginConfig(ctx context.Context, ticket, serverID, path string, output any) error {
-	return c.uploadPluginBundle(ctx, ticket, serverID, path, "/api/v1/plugins/config/deploy", output)
 }
 
 func (c *Client) uploadPluginBundle(ctx context.Context, ticket, serverID, path, endpointPath string, output any) error {

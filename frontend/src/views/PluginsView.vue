@@ -1,11 +1,10 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
-import { ArchiveRestore, Boxes, FileCode2, Package, Plus, RefreshCw, Save, Search, Trash2, Upload } from "lucide-vue-next";
+import { ArchiveRestore, Package, Plus, RefreshCw, Search, Trash2, Upload } from "lucide-vue-next";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { request } from "../api";
 import { hasPermission } from "../session";
 import TargetSelectionTree from "../components/TargetSelectionTree.vue";
-import CodeEditor from "../components/files/CodeEditor.vue";
 
 const loading = ref(false);
 const submitting = ref(false);
@@ -15,22 +14,13 @@ const search = ref("");
 const typeFilter = ref("");
 const uploadOpen = ref(false);
 const deployOpen = ref(false);
-const configOpen = ref(false);
 const uploadJAR = ref(null);
-const uploadConfig = ref(null);
-const uploadForm = ref({ pluginType: "spigot", autoInstall: false, configDirectory: "" });
+const uploadForm = ref({ pluginType: "spigot", autoInstall: false });
 const deployForm = ref({ pluginType: "spigot", pluginId: "", artifactId: null, rules: [] });
-const configForm = ref({ pluginType: "spigot", pluginId: "", artifactId: null, rules: [] });
-const configFiles = ref([]);
-const configPath = ref("");
-const configContent = ref("");
-const savedConfigContent = ref("");
-const configLoading = ref(false);
 
 const canUpload = computed(() => hasPermission("plugin.upload"));
 const canDeploy = computed(() => hasPermission("plugin.deploy"));
 const canRemove = computed(() => hasPermission("plugin.remove"));
-const configDirty = computed(() => configPath.value && configContent.value !== savedConfigContent.value);
 const filteredCatalog = computed(() => {
   const keyword = search.value.trim().toLowerCase();
   return catalog.value.filter((item) => {
@@ -42,9 +32,6 @@ const filteredCatalog = computed(() => {
 });
 const deployPlugin = computed(() => catalog.value.find((item) => (
   item.plugin_id === deployForm.value.pluginId && item.plugin_type === deployForm.value.pluginType
-)));
-const configPlugin = computed(() => catalog.value.find((item) => (
-  item.plugin_id === configForm.value.pluginId && item.plugin_type === configForm.value.pluginType
 )));
 
 function currentArtifact(plugin) {
@@ -69,14 +56,11 @@ async function load(silent = false) {
 }
 
 function handleJAR(file) { uploadJAR.value = file.raw || null; }
-function handleConfig(file) { uploadConfig.value = file.raw || null; }
 function clearJAR() { uploadJAR.value = null; }
-function clearConfig() { uploadConfig.value = null; }
 
 function resetUpload() {
   uploadJAR.value = null;
-  uploadConfig.value = null;
-  uploadForm.value = { pluginType: "spigot", autoInstall: false, configDirectory: "" };
+  uploadForm.value = { pluginType: "spigot", autoInstall: false };
 }
 
 async function uploadPlugin() {
@@ -90,10 +74,6 @@ async function uploadPlugin() {
     body.append("jar", uploadJAR.value);
     body.append("plugin_type", uploadForm.value.pluginType);
     body.append("auto_install", String(uploadForm.value.autoInstall));
-    if (uploadConfig.value) body.append("config", uploadConfig.value);
-    if (uploadForm.value.configDirectory.trim()) {
-      body.append("config_directory", uploadForm.value.configDirectory.trim());
-    }
     const result = await request("/api/v1/plugins", { method: "POST", body });
     uploadOpen.value = false;
     resetUpload();
@@ -124,7 +104,7 @@ async function rescan() {
 async function removePlugin(plugin) {
   try {
     await ElMessageBox.confirm(
-      `将删除“${plugin.name}”及其全部仓库制品和配置快照，已部署到服务器的插件不会受影响。此操作不可恢复。`,
+      `将删除“${plugin.name}”及其全部仓库制品，已部署到服务器的插件不会受影响。此操作不可恢复。`,
       "删除插件",
       { type: "warning", confirmButtonText: "删除", cancelButtonText: "取消" },
     );
@@ -159,96 +139,9 @@ async function openDeploy(plugin, artifact = currentArtifact(plugin)) {
   }
 }
 
-async function openConfig(plugin, artifact) {
-  configForm.value = {
-    pluginType: plugin.plugin_type,
-    pluginId: plugin.plugin_id,
-    artifactId: artifact.artifact_id,
-    rules: [],
-  };
-  configFiles.value = [];
-  configPath.value = "";
-  configContent.value = "";
-  savedConfigContent.value = "";
-  configOpen.value = true;
-  configLoading.value = true;
-  try {
-    const base = pluginArtifactPath(configForm.value);
-    const query = "?plugin_type=" + encodeURIComponent(plugin.plugin_type)
-      + "&plugin_id=" + encodeURIComponent(plugin.plugin_id);
-    const [config, preferences] = await Promise.all([
-      request(base + "/config"),
-      canDeploy.value ? request("/api/v1/plugin-deploy-preferences" + query) : Promise.resolve({ rules: [] }),
-    ]);
-    configFiles.value = config.files || [];
-    configForm.value.rules = preferences.rules || [];
-    if (configFiles.value.length) await selectConfigFile(configFiles.value[0].path);
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    configLoading.value = false;
-  }
-}
-
 function pluginArtifactPath(form) {
   return "/api/v1/plugins/" + encodeURIComponent(form.pluginType) + "/"
     + encodeURIComponent(form.pluginId) + "/" + encodeURIComponent(form.artifactId);
-}
-
-async function selectConfigFile(path) {
-  if (path === configPath.value) return;
-  if (configDirty.value) {
-    ElMessage.warning("请先保存当前配置文件");
-    return;
-  }
-  configLoading.value = true;
-  try {
-    const data = await request(pluginArtifactPath(configForm.value) + "/config?path=" + encodeURIComponent(path));
-    configPath.value = data.path;
-    configContent.value = data.content;
-    savedConfigContent.value = data.content;
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    configLoading.value = false;
-  }
-}
-
-async function saveConfig() {
-  if (!configPath.value || !configDirty.value) return;
-  submitting.value = true;
-  try {
-    await request(pluginArtifactPath(configForm.value) + "/config?path=" + encodeURIComponent(configPath.value), {
-      method: "PUT", body: JSON.stringify({ content: configContent.value }),
-    });
-    savedConfigContent.value = configContent.value;
-    ElMessage.success("配置已保存");
-    await load(true);
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    submitting.value = false;
-  }
-}
-
-async function deployConfig() {
-  if (configDirty.value) {
-    ElMessage.warning("请先保存配置文件");
-    return;
-  }
-  submitting.value = true;
-  try {
-    const result = await request(pluginArtifactPath(configForm.value) + "/config/deploy", {
-      method: "POST", body: JSON.stringify({ rules: configForm.value.rules }),
-    });
-    const failed = (result.targets || []).filter((item) => item.error);
-    if (failed.length) ElMessage.warning("配置部署完成，其中 " + failed.length + " 个目标失败");
-    else ElMessage.success("配置已部署到 " + (result.targets?.length || 0) + " 个服务器");
-  } catch (error) {
-    ElMessage.error(error.message);
-  } finally {
-    submitting.value = false;
-  }
 }
 
 async function deploy() {
@@ -333,9 +226,6 @@ onMounted(load);
                 <span>{{ formatDate(artifact.uploaded_at) }}</span>
                 <span>{{ artifact.uploaded_by.display_name || artifact.uploaded_by.username || "本地导入" }}</span>
                 <el-tag v-if="artifact.artifact_id === row.current_artifact_id" type="success" effect="plain">当前</el-tag>
-                <el-button v-if="artifact.config?.present && (canUpload || canDeploy)" size="small" plain @click="openConfig(row, artifact)">
-                  <FileCode2 :size="14" />配置
-                </el-button>
                 <el-button v-if="canDeploy" size="small" plain @click="openDeploy(row, artifact)">
                   <Upload :size="14" />部署插件
                 </el-button>
@@ -369,13 +259,6 @@ onMounted(load);
         <el-table-column label="作者" min-width="160">
           <template #default="{ row }">{{ currentArtifact(row)?.authors?.join(", ") || "-" }}</template>
         </el-table-column>
-        <el-table-column label="配置" width="130">
-          <template #default="{ row }">
-            <el-tag :type="currentArtifact(row)?.config?.present ? 'success' : 'info'" effect="plain">
-              {{ currentArtifact(row)?.config?.present ? currentArtifact(row).config.files + " 个文件" : "无快照" }}
-            </el-tag>
-          </template>
-        </el-table-column>
         <el-table-column label="制品" width="90"><template #default="{ row }">{{ row.artifacts?.length || 0 }}</template></el-table-column>
         <el-table-column label="操作" width="150" align="right">
           <template #default="{ row }">
@@ -406,14 +289,6 @@ onMounted(load);
         <el-upload :auto-upload="false" :limit="1" accept=".jar" :on-change="handleJAR" :on-remove="clearJAR">
           <el-button><Package :size="15" />选择 JAR</el-button>
         </el-upload>
-      </el-form-item>
-      <el-form-item label="配置快照 ZIP">
-        <el-upload :auto-upload="false" :limit="1" accept=".zip" :on-change="handleConfig" :on-remove="clearConfig">
-          <el-button><Boxes :size="15" />选择 ZIP</el-button>
-        </el-upload>
-      </el-form-item>
-      <el-form-item label="配置目录名">
-        <el-input v-model="uploadForm.configDirectory" maxlength="100" placeholder="默认使用插件 name" />
       </el-form-item>
     </el-form>
     <template #footer>
@@ -450,60 +325,7 @@ onMounted(load);
     </template>
   </el-dialog>
 
-  <el-dialog v-model="configOpen" title="编辑插件配置" width="min(1080px, 96vw)" destroy-on-close>
-    <div v-loading="configLoading" class="plugin-config-editor">
-      <aside class="plugin-config-files">
-        <strong>{{ configPlugin?.name }} {{ configForm.artifactId ? '#' + configForm.artifactId : '' }}</strong>
-        <button
-          v-for="file in configFiles"
-          :key="file.path"
-          type="button"
-          :class="{ active: file.path === configPath }"
-          :disabled="submitting"
-          @click="selectConfigFile(file.path)"
-        >{{ file.path }}</button>
-        <span v-if="!configFiles.length">该制品没有可编辑的配置文件。</span>
-      </aside>
-      <section class="plugin-config-content">
-        <div class="plugin-config-heading"><strong>{{ configPath || '选择配置文件' }}</strong></div>
-        <CodeEditor
-          v-if="configPath"
-          v-model="configContent"
-          :disabled="!canUpload || submitting"
-          :file-path="configPath"
-          @save="saveConfig"
-        />
-      </section>
-    </div>
-    <el-form v-if="canDeploy" class="plugin-config-targets" label-position="top">
-      <el-form-item label="配置部署目标">
-        <TargetSelectionTree
-          v-model="configForm.rules"
-          :nodes="nodeContents"
-          :plugin-type="configForm.pluginType"
-          :disabled="submitting || configDirty"
-        />
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="configOpen = false">关闭</el-button>
-      <el-button v-if="canUpload" type="primary" :disabled="!configDirty" :loading="submitting" @click="saveConfig"><Save :size="15" />保存配置</el-button>
-      <el-button v-if="canDeploy" type="primary" :disabled="configDirty || !configFiles.length" :loading="submitting" @click="deployConfig"><Upload :size="15" />部署配置</el-button>
-    </template>
-  </el-dialog>
 </template>
 
 <style scoped>
-.plugin-config-editor { display: grid; min-height: 480px; grid-template-columns: minmax(190px, 260px) minmax(0, 1fr); border: 1px solid var(--app-border); }
-.plugin-config-files { display: flex; min-width: 0; flex-direction: column; gap: 3px; border-right: 1px solid var(--app-border); padding: 10px; background: var(--app-surface-muted); }
-.plugin-config-files strong { overflow: hidden; padding: 4px 6px 8px; color: var(--app-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.plugin-config-files button { overflow: hidden; border: 1px solid transparent; border-radius: 4px; padding: 7px 8px; color: var(--app-text-secondary); background: transparent; cursor: pointer; font: 12px/1.3 Consolas, monospace; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-.plugin-config-files button:hover, .plugin-config-files button.active { border-color: var(--app-border); color: var(--app-text); background: var(--app-surface-hover); }
-.plugin-config-files button:disabled { cursor: not-allowed; opacity: 0.55; }
-.plugin-config-files span { padding: 8px 6px; color: var(--app-text-muted); font-size: 12px; }
-.plugin-config-content { display: flex; min-width: 0; flex-direction: column; }
-.plugin-config-heading { min-height: 40px; border-bottom: 1px solid var(--app-border); padding: 11px 13px; color: var(--app-text); font-size: 12px; }
-.plugin-config-content :deep(.code-editor), .plugin-config-content :deep(.cm-editor), .plugin-config-content :deep(.cm-scroller) { min-height: 438px; height: 100%; }
-.plugin-config-targets { margin-top: 16px; }
-@media (max-width: 720px) { .plugin-config-editor { min-height: 580px; grid-template-columns: 1fr; grid-template-rows: minmax(108px, auto) minmax(0, 1fr); } .plugin-config-files { max-height: 150px; border-right: 0; border-bottom: 1px solid var(--app-border); overflow-y: auto; } .plugin-config-content :deep(.code-editor), .plugin-config-content :deep(.cm-editor), .plugin-config-content :deep(.cm-scroller) { min-height: 390px; } }
 </style>

@@ -46,6 +46,8 @@ type Server struct {
 	logger      *slog.Logger
 	proxySyncMu sync.Mutex
 	operatorMu  sync.Mutex
+	fileSyncMu  sync.RWMutex
+	fileSync    map[string]*fileSyncTask
 }
 
 type response struct {
@@ -72,6 +74,7 @@ func NewServer(
 		config: cfg, auth: authService, store: repository, connections: connectionManager,
 		nodes: nodeService, metrics: metricStore, plugins: pluginRepository, winApp: winAppRepository, netGames: netGameService,
 		scheduler: scheduler, playerData: playerdata.NewClient(cfg.PlayerData.BaseURL, cfg.PlayerData.Token), fileProxies: newFileProxyStore(), logger: logger,
+		fileSync: make(map[string]*fileSyncTask),
 	}
 	connectionManager.AddStatusCallback(func(_ string, status daemon.RuntimeStatus) {
 		if status.State == "ONLINE" {
@@ -133,6 +136,8 @@ func NewServer(
 	mux.HandleFunc("/api/v1/files/authorize", server.requireAuth(server.handleFileAuthorize))
 	mux.HandleFunc("/api/v1/files/export", server.requireAuth(server.handleFileExport))
 	mux.HandleFunc("/api/v1/files/proxy/", server.requireAuth(server.handleFileProxy))
+	mux.HandleFunc("/api/v1/file-syncs", server.requireAuth(server.handleFileSyncs))
+	mux.HandleFunc("/api/v1/file-syncs/", server.requireAuth(server.handleFileSync))
 	mux.HandleFunc("/api/v1/ws/console", server.requireAuth(server.handleConsoleProxy))
 	mux.Handle("/", frontendHandler(cfg.Frontend.Directory))
 	server.http = &http.Server{

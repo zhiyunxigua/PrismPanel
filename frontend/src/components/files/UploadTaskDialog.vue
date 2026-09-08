@@ -1,6 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { File, FolderUp, RotateCcw, Trash2, Upload } from "lucide-vue-next";
+import { CircleAlert, File, FolderUp, RotateCcw, Trash2, Upload } from "lucide-vue-next";
 
 const ROW_HEIGHT = 45;
 const VIEWPORT_HEIGHT = 400;
@@ -24,6 +24,7 @@ const scrollTop = ref(0);
 const viewport = ref(null);
 let autoScrollFrame = 0;
 const clock = ref(Date.now());
+const detailTask = ref(null);
 const clockTimer = window.setInterval(() => { clock.value = Date.now(); }, 1000);
 onBeforeUnmount(() => {
   window.clearInterval(clockTimer);
@@ -69,6 +70,16 @@ function taskPercent(task) {
 
 function progressStyle(task) {
   return { width: `${taskPercent(task)}%` };
+}
+
+function errorDetails(task) {
+  const error = task?.error;
+  if (!error) return [];
+  return Array.isArray(error.details) ? error.details : [];
+}
+
+function showError(task) {
+  detailTask.value = task;
 }
 
 function formatSize(value) {
@@ -198,7 +209,10 @@ watch(() => [props.currentTaskId, props.visible, props.tasks.length], scheduleAu
               </div>
               <div>{{ formatSize(task.total) }}</div>
               <div class="task-status" :title="task.error?.message || statusLabel(task)">
-                {{ statusLabel(task) }}
+                <span>{{ statusLabel(task) }}</span>
+                <el-button v-if="task.status === 'failed' && task.error" link class="error-detail-button" @click="showError(task)">
+                  <CircleAlert :size="13" />查看原因
+                </el-button>
               </div>
               <div class="operation">
                 <el-button v-if="task.status === 'failed'" link @click="emit('retry', task)">
@@ -223,6 +237,24 @@ watch(() => [props.currentTaskId, props.visible, props.tasks.length], scheduleAu
         开始上传
       </el-button>
     </template>
+  </el-dialog>
+  <el-dialog
+    v-if="detailTask"
+    :model-value="Boolean(detailTask)"
+    title="上传失败原因"
+    width="min(560px, 94vw)"
+    append-to-body
+    @update:model-value="detailTask = $event ? detailTask : null"
+  >
+    <div class="error-detail">
+      <div><span>文件</span><code>{{ detailTask.displayPath || detailTask.path }}</code></div>
+      <div><span>错误码</span><code>{{ detailTask.error?.code || "UPLOAD_FAILED" }}</code></div>
+      <div><span>阶段</span><span>{{ detailTask.error?.stage || "上传" }}</span></div>
+      <div><span>原因</span><strong>{{ detailTask.error?.message || "上传失败" }}</strong></div>
+      <div v-if="errorDetails(detailTask).length" class="error-detail-block"><span>详细信息</span><pre>{{ errorDetails(detailTask).join("\n") }}</pre></div>
+      <div v-if="detailTask.error?.requestId"><span>请求 ID</span><code>{{ detailTask.error.requestId }}</code></div>
+      <el-alert v-if="detailTask.error?.retryable" type="warning" :closable="false" title="该错误可以重试" />
+    </div>
   </el-dialog>
 </template>
 
@@ -254,6 +286,14 @@ watch(() => [props.currentTaskId, props.visible, props.tasks.length], scheduleAu
 .operation svg { margin-right: 3px; }
 .is-done .task-status { color: #4b9b59; }
 .is-failed .task-status { color: #d9534f; }
+.task-status { display: flex; align-items: center; gap: 5px; }
+.error-detail-button { flex: 0 0 auto; height: 24px; padding: 0; color: #b84a41; font-size: 11px; }
+.error-detail { display: grid; gap: 12px; color: var(--app-text-secondary); font-size: 12px; }
+.error-detail > div { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; align-items: start; }
+.error-detail code { overflow-wrap: anywhere; color: var(--app-text); }
+.error-detail strong { color: #b84a41; font-weight: 600; }
+.error-detail-block { grid-template-columns: 72px minmax(0, 1fr) !important; }
+.error-detail pre { max-height: 180px; overflow: auto; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .upload-summary { flex-wrap: wrap; }
   .upload-row { grid-template-columns: minmax(0, 1fr) 82px 88px; }

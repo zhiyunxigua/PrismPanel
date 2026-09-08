@@ -19,14 +19,6 @@ import (
 )
 
 func (s *Server) deployPluginBundle(request *http.Request, nodeID, serverID, path string, output any) error {
-	return s.deployPluginArchive(request, nodeID, serverID, path, "plugin.deploy", false, output)
-}
-
-func (s *Server) deployPluginConfigBundle(request *http.Request, nodeID, serverID, path string, output any) error {
-	return s.deployPluginArchive(request, nodeID, serverID, path, "plugin.config.deploy", true, output)
-}
-
-func (s *Server) deployPluginArchive(request *http.Request, nodeID, serverID, path, scope string, configOnly bool, output any) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return err
@@ -45,14 +37,11 @@ func (s *Server) deployPluginArchive(request *http.Request, nodeID, serverID, pa
 		Ticket string `json:"ticket"`
 	}
 	err = s.connections.Call(request.Context(), nodeID, "ticket.create", map[string]any{
-		"scope": scope, "instance_id": serverID, "ttl_seconds": 300,
+		"scope": "plugin.deploy", "instance_id": serverID, "ttl_seconds": 300,
 		"sha256": hex.EncodeToString(hash.Sum(nil)), "size": info.Size(),
 	}, &ticket)
 	if err != nil {
 		return err
-	}
-	if configOnly {
-		return s.connections.UploadPluginConfig(request.Context(), nodeID, ticket.Ticket, serverID, path, output)
 	}
 	return s.connections.UploadPlugin(request.Context(), nodeID, ticket.Ticket, serverID, path, output)
 }
@@ -60,7 +49,6 @@ func (s *Server) deployPluginArchive(request *http.Request, nodeID, serverID, pa
 const (
 	maxPluginUploadBody = int64(770 * 1024 * 1024)
 	maxPluginJARUpload  = int64(256 * 1024 * 1024)
-	maxPluginConfigZIP  = int64(512 * 1024 * 1024)
 )
 
 func (s *Server) handlePlugins(writer http.ResponseWriter, request *http.Request) {
@@ -150,15 +138,6 @@ func (s *Server) handlePluginUpload(writer http.ResponseWriter, request *http.Re
 		writeRequestError(writer, apiError("INVALID_REQUEST", err.Error()))
 		return
 	}
-	config, configHeader, err := readMultipartFile(request, "config", maxPluginConfigZIP, false)
-	if err != nil {
-		writeRequestError(writer, apiError("INVALID_REQUEST", err.Error()))
-		return
-	}
-	if configHeader != nil && !strings.EqualFold(strings.TrimSpace(fileExtension(configHeader.Filename)), ".zip") {
-		writeRequestError(writer, apiError("INVALID_REQUEST", "插件配置必须是 ZIP 文件"))
-		return
-	}
 	pluginType := strings.ToLower(strings.TrimSpace(request.FormValue("plugin_type")))
 	if !panelplugins.ValidPluginType(pluginType) {
 		writeRequestError(writer, apiError("INVALID_REQUEST", "plugin_type must be spigot, velocity or bungee"))
@@ -168,8 +147,7 @@ func (s *Server) handlePluginUpload(writer http.ResponseWriter, request *http.Re
 	session := currentSession(request)
 	result, err := s.plugins.Upload(panelplugins.UploadInput{
 		PluginType: pluginType, AutoInstall: autoInstall,
-		JARFilename: jarHeader.Filename, JAR: jar, ConfigZIP: config,
-		ConfigDirectory: request.FormValue("config_directory"),
+		JARFilename: jarHeader.Filename, JAR: jar,
 		Uploader: panelplugins.Uploader{
 			UserID: session.User.ID, Username: session.User.Username,
 			DisplayName: session.User.DisplayName,

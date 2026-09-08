@@ -54,11 +54,9 @@ type ListResult struct {
 }
 
 type OperationInput struct {
-	ServerID        string `json:"server_id"`
-	InstanceID      string `json:"instance_id,omitempty"`
-	PluginName      string `json:"plugin_name,omitempty"`
-	DeleteConfig    bool   `json:"delete_config,omitempty"`
-	ConfigDirectory string `json:"config_directory,omitempty"`
+	ServerID   string `json:"server_id"`
+	InstanceID string `json:"instance_id,omitempty"`
+	PluginName string `json:"plugin_name,omitempty"`
 }
 
 type TargetResult struct {

@@ -1,15 +1,12 @@
 package api
 
 import (
+	"PrismPanel/internal/store"
 	"encoding/json"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"unicode/utf8"
-
-	panelplugins "PrismPanel/internal/plugins"
-	"PrismPanel/internal/store"
 )
 
 func (s *Server) handlePluginArtifact(writer http.ResponseWriter, request *http.Request) {
@@ -20,7 +17,7 @@ func (s *Server) handlePluginArtifact(writer http.ResponseWriter, request *http.
 		return
 	}
 	if len(parts) == 3 && parts[2] == "deploy" {
-		s.handlePluginDeployment(writer, request, "spigot", parts[0], parts[1], false)
+		s.handlePluginDeployment(writer, request, "spigot", parts[0], parts[1])
 		return
 	}
 	if len(parts) < 4 {
@@ -29,21 +26,13 @@ func (s *Server) handlePluginArtifact(writer http.ResponseWriter, request *http.
 	}
 	pluginType, pluginID, artifactPart := parts[0], parts[1], parts[2]
 	if parts[3] == "deploy" && len(parts) == 4 {
-		s.handlePluginDeployment(writer, request, pluginType, pluginID, artifactPart, false)
-		return
-	}
-	if parts[3] == "config" && len(parts) == 4 {
-		s.handlePluginConfig(writer, request, pluginType, pluginID, artifactPart)
-		return
-	}
-	if parts[3] == "config" && len(parts) == 5 && parts[4] == "deploy" {
-		s.handlePluginDeployment(writer, request, pluginType, pluginID, artifactPart, true)
+		s.handlePluginDeployment(writer, request, pluginType, pluginID, artifactPart)
 		return
 	}
 	http.NotFound(writer, request)
 }
 
-func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *http.Request, pluginType, pluginID, artifactPart string, configOnly bool) {
+func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *http.Request, pluginType, pluginID, artifactPart string) {
 	if request.Method != http.MethodPost {
 		methodNotAllowed(writer, "POST")
 		return
@@ -94,11 +83,7 @@ func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *htt
 	results := make([]deploymentResult, 0, len(input.Targets))
 	if err == nil {
 		var bundlePath string
-		if configOnly {
-			bundlePath, _, err = s.plugins.BuildConfigBundle(pluginID, artifactID, pluginType)
-		} else {
-			bundlePath, _, err = s.plugins.BuildBundle(pluginID, artifactID, pluginType)
-		}
+		bundlePath, _, err = s.plugins.BuildBundle(pluginID, artifactID, pluginType)
 		if bundlePath != "" {
 			defer os.Remove(bundlePath)
 		}
@@ -113,11 +98,7 @@ func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *htt
 				} else {
 					item.Error = ""
 					var deployErr error
-					if configOnly {
-						deployErr = s.deployPluginConfigBundle(request, item.NodeID, item.ServerID, bundlePath, &item.Data)
-					} else {
-						deployErr = s.deployPluginBundle(request, item.NodeID, item.ServerID, bundlePath, &item.Data)
-					}
+					deployErr = s.deployPluginBundle(request, item.NodeID, item.ServerID, bundlePath, &item.Data)
 					if deployErr != nil {
 						item.Error = deployErr.Error()
 					}
@@ -127,9 +108,6 @@ func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *htt
 		}
 	}
 	action := "plugin.deploy"
-	if configOnly {
-		action = "plugin.config.deploy"
-	}
 	s.record(request, action, pluginType+"/"+pluginID, map[string]any{
 		"artifact_id": artifactID, "targets": input.Targets, "results": results,
 	}, err)
@@ -138,75 +116,4 @@ func (s *Server) handlePluginDeployment(writer http.ResponseWriter, request *htt
 		return
 	}
 	writeSuccess(writer, map[string]any{"targets": results})
-}
-
-func (s *Server) handlePluginConfig(writer http.ResponseWriter, request *http.Request, pluginType, pluginID, artifactPart string) {
-	artifactID, err := strconv.ParseInt(artifactPart, 10, 64)
-	if err != nil || artifactID < 1 || !panelplugins.ValidPluginType(pluginType) {
-		writeRequestError(writer, apiError("INVALID_REQUEST", "invalid plugin artifact"))
-		return
-	}
-	path := request.URL.Query().Get("path")
-	switch request.Method {
-	case http.MethodGet:
-		if err := s.authorize(request, "plugin.view"); err != nil {
-			writeRequestError(writer, err)
-			return
-		}
-		if strings.TrimSpace(path) == "" {
-			files, err := s.plugins.ListConfig(pluginID, artifactID, pluginType)
-			if err != nil {
-				writeError(writer, err)
-				return
-			}
-			writeSuccess(writer, map[string]any{"files": files})
-			return
-		}
-		contents, err := s.plugins.ReadConfig(pluginID, artifactID, path, pluginType)
-		if err != nil {
-			writeError(writer, err)
-			return
-		}
-		if !utf8.Valid(contents) {
-			writeRequestError(writer, apiError("UNSUPPORTED_ENCODING", "配置文件不是 UTF-8 文本"))
-			return
-		}
-		writeSuccess(writer, map[string]any{"path": path, "content": string(contents)})
-	case http.MethodPut:
-		if err := s.authorize(request, "plugin.upload"); err != nil {
-			writeRequestError(writer, err)
-			return
-		}
-		var input struct {
-			Content string `json:"content"`
-		}
-		body, err := readBody(request)
-		if err == nil {
-			err = json.Unmarshal(body, &input)
-		}
-		if err == nil {
-			if strings.TrimSpace(path) == "" {
-				err = apiError("INVALID_REQUEST", "config file path is required")
-			} else {
-				_, err = s.plugins.UpdateConfig(pluginID, artifactID, path, []byte(input.Content), pluginType)
-			}
-		}
-		if err == nil {
-			var catalog []panelplugins.Plugin
-			catalog, err = s.plugins.List()
-			if err == nil {
-				err = syncPluginCatalogAll(request.Context(), s.store, catalog)
-			}
-		}
-		s.record(request, "plugin.config.update", pluginType+"/"+pluginID, map[string]any{
-			"artifact_id": artifactID, "path": path,
-		}, err)
-		if err != nil {
-			writeError(writer, err)
-			return
-		}
-		writeSuccess(writer, map[string]any{"path": path})
-	default:
-		methodNotAllowed(writer, "GET, PUT")
-	}
 }
